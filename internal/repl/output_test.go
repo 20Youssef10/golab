@@ -121,3 +121,17 @@ func TestWriteOutputSanitizesRemoteText(t *testing.T) {
 		t.Errorf("stdout = %q, want sanitised text", got)
 	}
 }
+
+// Cross-check: a malformed image payload must not be echoed into a diagnostic.
+// The REPL never handles credentials itself, so this is the only error path
+// that can be fed untrusted remote bytes.
+func TestSaveImageErrorOmitsPayload(t *testing.T) {
+	pf, _, errOut := newTestPiped(t)
+	const canary = "PASSWORD_SHOULD_NOT_APPEAR_7f3a"
+	pf.writeOutput(Output{OutputType: "display_data", Data: map[string]string{
+		"image/png": "!!!not-base64!!!" + canary,
+	}})
+	if got := errOut.String(); strings.Contains(got, canary) {
+		t.Fatalf("image error leaked the payload: %q", got)
+	}
+}

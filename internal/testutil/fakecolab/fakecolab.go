@@ -43,6 +43,17 @@ type Runtime struct {
 	Shape       string // SHAPE_STANDARD / SHAPE_HIGHMEM / ...
 }
 
+// PublicOperationSpec configures POST /v1beta/runtimes and the subsequent
+// GET /v1/{op}:wait polling. ErrorCode != 0 yields a done=true Operation with
+// an error (see docs/public_api_migration_plan.md §5); Polls is the number of
+// :wait calls that return done=false before the final done=true response.
+type PublicOperationSpec struct {
+	ErrorCode    int
+	ErrorMessage string
+	Polls        int
+	Runtime      Runtime
+}
+
 // AssignmentState is a snapshot of an in-memory assignment.
 type AssignmentState struct {
 	NBH      string
@@ -110,6 +121,13 @@ type Server struct {
 	requests        []Request
 	seq             int
 	lastXSRFToken   string
+
+	publicAssign         PublicOperationSpec
+	publicGetRuntime     Runtime
+	publicGetRuntimeHTTP int
+	publicDeleted        []string
+	publicWaits          int
+	publicLastRuntimeID  string
 }
 
 // Option customises a Server at construction.
@@ -244,6 +262,37 @@ func (s *Server) SetPropagationAuthorizeURL(uri string) {
 	s.propagateURL = uri
 }
 
+// SetPublicAssign configures the Public API create LRO and its polling.
+func (s *Server) SetPublicAssign(spec PublicOperationSpec) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publicAssign = spec
+	s.publicWaits = 0
+}
+
+// SetPublicGetRuntime configures GET /v1beta/runtimes/{name}. A status of 0
+// means HTTP 200.
+func (s *Server) SetPublicGetRuntime(rt Runtime, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publicGetRuntime = rt
+	s.publicGetRuntimeHTTP = status
+}
+
+// PublicDeleted returns the resource names deleted via the Public API.
+func (s *Server) PublicDeleted() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.publicDeleted...)
+}
+
+// PublicWaits returns the number of GET /v1/{op}:wait calls observed.
+func (s *Server) PublicWaits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.publicWaits
+}
+
 // Requests returns a copy of the request log.
 func (s *Server) Requests() []Request {
 	s.mu.Lock()
@@ -310,7 +359,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.requests = append(s.requests, Request{
 		Method: r.Method, Path: r.URL.Path, Query: r.URL.Query(),
 		Headers: r.Header.Clone(), Body: string(body),
-		Public: r.URL.Path == "/v1beta/runtimes", At: time.Now(),
+		Public: isPublicPath(r.URL.Path), At: time.Now(),
 	})
 	s.mu.Unlock()
 
@@ -336,7 +385,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			if status == 0 {
 				status = http.StatusInternalServerError
 			}
-			writeReply(w, r.URL.Path == "/v1beta/runtimes", s.xssiFor(r), status, []byte(fault.Body), "text/plain")
+			writeReply(w, isPublicPath(r.URL.Path), s.xssiFor(r), status, []byte(fault.Body), "text/plain")
 			return
 		}
 	}
@@ -345,13 +394,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	if fault != nil && fault.Status > 0 {
 		status, payload, contentType = fault.Status, []byte(fault.Body), "text/plain"
 	}
-	writeReply(w, r.URL.Path == "/v1beta/runtimes", s.xssiFor(r), status, payload, contentType)
+	writeReply(w, isPublicPath(r.URL.Path), s.xssiFor(r), status, payload, contentType)
+}
+
+func isPublicPath(path string) bool {
+	return strings.HasPrefix(path, "/v1beta/") || strings.HasPrefix(path, "/v1/")
 }
 
 func (s *Server) xssiFor(r *http.Request) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r.URL.Path == "/v1beta/runtimes" {
+	if isPublicPath(r.URL.Path) {
 		return s.publicXSSI
 	}
 	return s.xssi
@@ -372,7 +425,26 @@ func writeReply(w http.ResponseWriter, public bool, xssi string, status int, pay
 
 func (s *Server) route(r *http.Request) (int, []byte, string) {
 	if r.URL.Path == "/v1beta/runtimes" {
+		if r.Method == http.MethodPost {
+			return s.publicCreateRuntime(r)
+		}
 		return s.publicRuntimes()
+	}
+	// Long-running operations: GET /v1/{op}:wait?timeout=30s.
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/") && strings.HasSuffix(r.URL.Path, ":wait") {
+		return s.publicWait()
+	}
+	// GET/DELETE /v1beta/{name=runtimes/*}.
+	if strings.HasPrefix(r.URL.Path, "/v1beta/runtimes/") {
+		switch r.Method {
+		case http.MethodGet:
+			return s.publicGet(r)
+		case http.MethodDelete:
+			return s.publicDelete(r)
+		}
+	}
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1beta/") {
+		return s.publicDelete(r)
 	}
 	switch {
 	case r.URL.Path == "/tun/m/assign":
@@ -543,47 +615,131 @@ func (s *Server) publicRuntimes() (int, []byte, string) {
 	if s.publicBody != "" {
 		return 200, []byte(s.publicBody), "application/json"
 	}
-	type conn struct {
-		ExpireTime string `json:"expireTime"`
-		Endpoint   string `json:"endpoint,omitempty"`
-		URL        string `json:"url"`
-		Token      string `json:"token"`
-	}
-	type spec struct {
-		Variant     string `json:"variant"`
-		Accelerator string `json:"accelerator"`
-		Shape       string `json:"shape"`
-	}
-	type runtime struct {
-		Name           string `json:"name"`
-		Version        string `json:"version,omitempty"`
-		ConnectionInfo conn   `json:"connectionInfo"`
-		RuntimeSpec    spec   `json:"runtimeSpec"`
-	}
-	runtimes := make([]runtime, 0, len(s.runtimes))
+	runtimes := make([]map[string]any, 0, len(s.runtimes))
 	for _, rt := range s.runtimes {
-		variant := rt.Variant
-		if variant == "" {
-			variant = "VARIANT_CPU"
-		}
-		shape := rt.Shape
-		if shape == "" {
-			shape = "SHAPE_STANDARD"
-		}
-		acc := rt.Accelerator
-		if acc == "" {
-			acc = "NONE"
-		}
-		runtimes = append(runtimes, runtime{
-			Name: rt.Name, Version: rt.Version,
-			ConnectionInfo: conn{
-				ExpireTime: rt.ExpireTime.UTC().Format(time.RFC3339),
-				Endpoint:   rt.Endpoint, URL: rt.URL, Token: rt.Token,
-			},
-			RuntimeSpec: spec{Variant: variant, Accelerator: acc, Shape: shape},
-		})
+		runtimes = append(runtimes, publicRuntimeWire(rt))
 	}
 	return 200, mustJSON(map[string]any{"runtimes": runtimes}), "application/json"
+}
+
+// publicRuntimeWire mirrors upstream's Runtime model (client.py::Runtime).
+func publicRuntimeWire(rt Runtime) map[string]any {
+	variant := rt.Variant
+	if variant == "" {
+		variant = "VARIANT_CPU"
+	}
+	shape := rt.Shape
+	if shape == "" {
+		shape = "SHAPE_STANDARD"
+	}
+	acc := rt.Accelerator
+	if acc == "" {
+		acc = "NONE"
+	}
+	return map[string]any{
+		"name":    rt.Name,
+		"version": rt.Version,
+		"connectionInfo": map[string]any{
+			"expireTime": rt.ExpireTime.UTC().Format(time.RFC3339),
+			"endpoint":   rt.Endpoint,
+			"url":        rt.URL,
+			"token":      rt.Token,
+		},
+		"runtimeSpec": map[string]any{
+			"variant": variant, "accelerator": acc, "shape": shape,
+		},
+	}
+}
+
+// assignResponseRuntime fills in defaults so an operation response is always a
+// usable Runtime, even when the test did not configure one explicitly.
+func (s *Server) assignResponseRuntime() Runtime {
+	rt := s.publicAssign.Runtime
+	if rt.Name == "" {
+		id := s.publicLastRuntimeID
+		if id == "" {
+			id = "r-1"
+		}
+		rt.Name = "runtimes/" + id
+	}
+	if rt.Endpoint == "" {
+		rt.Endpoint = strings.TrimPrefix(rt.Name, "runtimes/")
+	}
+	if rt.URL == "" {
+		rt.URL = "https://runtime.example"
+	}
+	if rt.Token == "" {
+		rt.Token = "proxy-token"
+	}
+	if rt.ExpireTime.IsZero() {
+		rt.ExpireTime = time.Now().UTC().Add(time.Hour)
+	}
+	return rt
+}
+
+func (s *Server) publicCreateRuntime(r *http.Request) (int, []byte, string) {
+	s.mu.Lock()
+	s.publicLastRuntimeID = r.URL.Query().Get("runtimeId")
+	spec := s.publicAssign
+	s.mu.Unlock()
+
+	op := map[string]any{"name": "operations/op-1", "done": spec.ErrorCode != 0 || spec.Polls == 0}
+	if spec.ErrorCode != 0 {
+		op["error"] = map[string]any{"code": spec.ErrorCode, "message": spec.ErrorMessage}
+	} else if spec.Polls == 0 {
+		op["response"] = publicRuntimeWire(s.assignResponseRuntime())
+	}
+	return 200, mustJSON(op), "application/json"
+}
+
+func (s *Server) publicWait() (int, []byte, string) {
+	s.mu.Lock()
+	s.publicWaits++
+	spec := s.publicAssign
+	done := s.publicWaits >= spec.Polls
+	s.mu.Unlock()
+
+	op := map[string]any{"name": "operations/op-1", "done": done}
+	if done {
+		if spec.ErrorCode != 0 {
+			op["error"] = map[string]any{"code": spec.ErrorCode, "message": spec.ErrorMessage}
+		} else {
+			op["response"] = publicRuntimeWire(s.assignResponseRuntime())
+		}
+	}
+	return 200, mustJSON(op), "application/json"
+}
+
+func (s *Server) publicGet(r *http.Request) (int, []byte, string) {
+	s.mu.Lock()
+	rt := s.publicGetRuntime
+	status := s.publicGetRuntimeHTTP
+	s.mu.Unlock()
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status != http.StatusOK {
+		return status, []byte(`{"error":"not found"}`), "application/json"
+	}
+	if rt.Name == "" {
+		rt.Name = strings.TrimPrefix(r.URL.Path, "/v1beta/")
+	}
+	return 200, mustJSON(publicRuntimeWire(rt)), "application/json"
+}
+
+func (s *Server) publicDelete(r *http.Request) (int, []byte, string) {
+	name := strings.TrimPrefix(r.URL.Path, "/v1beta/")
+	s.mu.Lock()
+	s.publicDeleted = append(s.publicDeleted, name)
+	kept := s.runtimes[:0]
+	for _, rt := range s.runtimes {
+		if rt.Name != name {
+			kept = append(kept, rt)
+		}
+	}
+	s.runtimes = kept
+	s.mu.Unlock()
+	return 200, []byte(`{}`), "application/json"
 }
 
 func mapVariantInt(v string) int {

@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
+	"encoding/asn1"
 	"errors"
 	"fmt"
 	"regexp"
@@ -18,6 +20,36 @@ import (
 // GitHub Actions workloads. It is pinned; no other issuer can satisfy the
 // identity policy below.
 const githubIssuer = "https://token.actions.githubusercontent.com"
+
+// oidSCTList is the X.509 extension that carries embedded Signed Certificate
+// Timestamps (RFC 6962 §3.3.1 / RFC 9162).
+var oidSCTList = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 4, 2}
+
+// certHasSCT is a structural presence check only. The cryptographic SCT
+// verification is always delegated to sigstore-go's
+// verify.WithSignedCertificateTimestamps option, never faked here.
+func certHasSCT(cert *x509.Certificate) bool {
+	if cert == nil {
+		return false
+	}
+	for _, ext := range cert.Extensions {
+		if ext.Id.Equal(oidSCTList) && len(ext.Value) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// sctRequired reports whether the SCT verifier option must be enabled.
+// Production (nil) always requires one. The documented test-CA opt-out only
+// relaxes the requirement when the bundle has no SCT at all: a present SCT is
+// still verified, so the opt-out can never turn a real SCT check off.
+func sctRequired(cfg Config, cert *x509.Certificate) bool {
+	if cfg.RequireSCT == nil || *cfg.RequireSCT {
+		return true
+	}
+	return certHasSCT(cert)
+}
 
 // verifyChecksum compares the artifact SHA-256 against the (hex) digest from
 // the signed release metadata.
@@ -55,10 +87,12 @@ func verifyArtifact(ctx context.Context, cfg Config, artifact []byte, rel *Relea
 
 // verifySignature loads a Sigstore bundle produced by cosign and verifies it
 // with sigstore-go against the Sigstore public good trusted root. Verification
-// covers the Fulcio CA chain, the Rekor inclusion proof / signed entry
-// timestamp, the signing time against the certificate validity window, the
-// OIDC issuer and the release workflow identity, and finally the in-toto
-// statement's SHA-256 subject digest against the artifact bytes.
+// covers the Fulcio CA chain and its Signed Certificate Timestamp, the Rekor
+// inclusion proof / signed entry timestamp, the signing time against the
+// certificate validity window, the OIDC issuer and the release workflow
+// identity, and finally the in-toto statement's SHA-256 subject digest against
+// the artifact bytes. SCT verification is required by default (see
+// Config.RequireSCT).
 //
 // There is deliberately no "structural checks only" path: if the bundle, its
 // verification material or the trusted root is missing or invalid, the update
@@ -112,14 +146,22 @@ func verifyBundle(ctx context.Context, cfg Config, artifact []byte, entity verif
 		return nil, fmt.Errorf("%w: no Sigstore trust anchors available", ErrTrustedRoot)
 	}
 
-	// Fulcio chain + SCT-free offline verification: the transparency log entry
-	// (inclusion proof and SET) and the RFC3161 timestamp establish the time at
-	// which the short-lived certificate is validated. Requiring an observer
+	// Fulcio chain + offline verification: the transparency log entry
+	// (inclusion proof and SET) and the RFC3161 timestamp establish the time
+	// at which the short-lived certificate is validated. Requiring an observer
 	// timestamp also rejects bundles with no proof of logging.
-	sev, err := verify.NewVerifier(trustedMaterial,
+	opts := []verify.VerifierOption{
 		verify.WithTransparencyLog(1),
 		verify.WithObserverTimestamps(1),
-	)
+	}
+	// AUDIT-02 S-8: verify the Fulcio SCT with the trusted CT log key. The
+	// library performs the actual RFC 9162 check; we only decide whether to
+	// enable it. Production always requires it; the test-CA opt-out applies
+	// only to SCT-less bundles and never skips a present SCT.
+	if sctRequired(cfg, verification.Certificate()) {
+		opts = append(opts, verify.WithSignedCertificateTimestamps(1))
+	}
+	sev, err := verify.NewVerifier(trustedMaterial, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: configure verifier: %w", ErrInvalidSignature, err)
 	}

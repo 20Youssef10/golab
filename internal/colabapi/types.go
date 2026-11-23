@@ -99,6 +99,21 @@ func RandomNotebookHash() (NotebookHash, error) {
 
 func (h NotebookHash) String() string { return string(h) }
 
+// RuntimeID returns the Public API resource id ("r-<uuid>") corresponding to
+// this notebook hash. The tunnel hash is just a UUID with '-' replaced by '_'
+// and padded with dots, so the original UUID can be recovered deterministically
+// (docs/public_api_migration_plan.md §5). A malformed hash falls back to a
+// deterministic UUIDv5 derived from the string, so the result always conforms
+// to ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$.
+func (h NotebookHash) RuntimeID() string {
+	core := strings.TrimRight(string(h), ".")
+	id, err := uuid.Parse(strings.ReplaceAll(core, "_", "-"))
+	if err != nil {
+		id = uuid.NewSHA1(uuid.NameSpaceOID, []byte(string(h)))
+	}
+	return "r-" + id.String()
+}
+
 // Valid reports whether h has the exact upstream encoding.
 func (h NotebookHash) Valid() bool { return nbhPattern.MatchString(string(h)) }
 
@@ -127,6 +142,7 @@ type Assignment struct {
 type AssignmentResponse struct {
 	Accelerator      Accelerator       `json:"accelerator"`
 	Endpoint         string            `json:"endpoint"`
+	RuntimeName      string            `json:"runtimeName,omitempty"`
 	RuntimeProxyInfo RuntimeProxyInfo  `json:"runtimeProxyInfo"`
 	Variant          AssignmentVariant `json:"variant"`
 	Reattached       bool              `json:"-"`
@@ -136,6 +152,7 @@ type AssignmentResponse struct {
 type ListedAssignment struct {
 	Accelerator      Accelerator       `json:"accelerator"`
 	Endpoint         string            `json:"endpoint"`
+	RuntimeName      string            `json:"runtimeName,omitempty"`
 	Variant          AssignmentVariant `json:"variant"`
 	MachineShape     Shape             `json:"machineShape"`
 	RuntimeProxyInfo RuntimeProxyInfo  `json:"runtimeProxyInfo"`

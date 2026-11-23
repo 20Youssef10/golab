@@ -3,8 +3,10 @@ package update
 // Ported from upstream tests/test_update.py (google-colab-cli). Upstream used
 // pytest fixtures (fake_settings, mock_pypi, app_version); here we build an
 // httptest fake GitHub Releases server plus real Sigstore bundles produced by
-// sigstore-go's virtual Sigstore (Fulcio CA chain, SCT, Rekor entry with an
-// inclusion proof and SET, RFC3161 timestamp). Verification is exercised
+// sigstore-go's virtual Sigstore (Fulcio CA chain, Rekor entry with an
+// inclusion proof and SET, RFC3161 timestamp). Its test CA cannot embed SCTs,
+// so fakeConfig opts out of the SCT requirement for these bundles only.
+// Verification is exercised
 // end-to-end without ever touching the network or the real GitHub/TUF APIs.
 
 import (
@@ -41,8 +43,9 @@ const (
 	assetPath  = "/download/asset/golab_Linux_x86_64.tar.gz"
 	pathPrefix = "/" + testOwner + "/" + testRepo
 
-	bundleAssetName = "checksums.txt.sigstore.json"
-	sbomAssetName   = "checksums.txt.sbom.sigstore.json"
+	// Real releases use one bundle per archive (see .github/workflows/release.yml).
+	bundleAssetName = assetName + ".sigstore.json"
+	sbomAssetName   = assetName + ".sbom.sigstore.json"
 )
 
 // testVS is the trusted (virtual) Sigstore used by every test. It issues real
@@ -422,6 +425,10 @@ func fakeConfig(s *httptest.Server) Config {
 		CurrentVersion: "0.9.0",
 		Enabled:        true,
 		HTTPClient:     client,
+		// The virtual test CA cannot embed SCTs in its Fulcio leaf
+		// certificates. Opt out of the SCT requirement for test bundles only;
+		// production leaves this nil and therefore requires an SCT.
+		RequireSCT: func() *bool { v := false; return &v }(),
 	}
 }
 

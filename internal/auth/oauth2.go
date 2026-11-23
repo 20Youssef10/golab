@@ -51,31 +51,51 @@ type clientConfigDetails struct {
 	TokenURI     string `json:"token_uri"`
 }
 
-// storedToken is the on-disk/keyring payload: refresh token plus only the
-// metadata needed to mint access tokens. secrets are logx.Secret so an
-// accidental fmt/slog of the struct renders REDACTED.
+// storedToken is the on-disk/keyring payload. Security decision (AUDIT-02
+// S-4, AGENTS.md "store the refresh token only"): only the refresh token and
+// the metadata needed to mint a new access token are persisted. The
+// short-lived access token and the OAuth client secret are in-memory only —
+// a stolen token file must not grant immediate data-plane access, and the
+// bundled public client's secret is not ours to duplicate on disk. If no
+// valid access token is available, one is minted from the refresh token at
+// startup (one bounded HTTP exchange per process). The `json:"-"` fields stay
+// in the Go struct for the one-time legacy import and for in-memory use only.
 type storedToken struct {
-	AccessToken  logx.Secret `json:"access_token,omitempty"`
+	AccessToken  logx.Secret `json:"-"`
 	RefreshToken logx.Secret `json:"refresh_token,omitempty"`
 	TokenType    string      `json:"token_type,omitempty"`
 	Expiry       time.Time   `json:"expiry,omitempty"`
 	Scopes       []string    `json:"scopes,omitempty"`
 	ClientID     string      `json:"client_id,omitempty"`
-	ClientSecret logx.Secret `json:"client_secret,omitempty"`
+	ClientSecret logx.Secret `json:"-"`
 	TokenURI     string      `json:"token_uri,omitempty"`
 }
 
-// decodeStored also accepts Python google.oauth2.credentials' "token" field.
+// decodeStored also accepts Python google.oauth2.credentials' "token" field
+// and older golab files that carried an access_token/client_secret. Those
+// values are honoured in memory for this process (one-time legacy import) but
+// are never written back by save().
 func decodeStored(data []byte) (storedToken, error) {
 	var s storedToken
 	if err := json.Unmarshal(data, &s); err != nil {
 		return storedToken{}, err
 	}
 	var legacy struct {
-		Token string `json:"token"`
+		Token        string `json:"token"`
+		AccessToken  string `json:"access_token"`
+		ClientSecret string `json:"client_secret"`
 	}
-	if err := json.Unmarshal(data, &legacy); err == nil && s.AccessToken.Reveal() == "" && legacy.Token != "" {
-		s.AccessToken = logx.NewSecret(legacy.Token)
+	if err := json.Unmarshal(data, &legacy); err == nil {
+		if s.AccessToken.Reveal() == "" {
+			if legacy.AccessToken != "" {
+				s.AccessToken = logx.NewSecret(legacy.AccessToken)
+			} else if legacy.Token != "" {
+				s.AccessToken = logx.NewSecret(legacy.Token)
+			}
+		}
+		if s.ClientSecret.Reveal() == "" && legacy.ClientSecret != "" {
+			s.ClientSecret = logx.NewSecret(legacy.ClientSecret)
+		}
 	}
 	return s, nil
 }
@@ -289,7 +309,7 @@ func (p *oauth2Provider) runRemoteFlow(ctx context.Context, conf *oauth2.Config)
 		oauth2.S256ChallengeOption(verifier),
 	)
 	fmt.Fprintln(p.stderr)
-	fmt.Fprintln(p.stderr, "To authorize colab-go, visit this URL in any browser:")
+	fmt.Fprintln(p.stderr, "To authorize golab, visit this URL in any browser:")
 	fmt.Fprintln(p.stderr)
 	fmt.Fprintln(p.stderr, "  "+authURL)
 	fmt.Fprintln(p.stderr)
@@ -378,14 +398,14 @@ func (p *oauth2Provider) save(old storedToken, tok *oauth2.Token, granted []stri
 	if refresh == "" {
 		refresh = old.RefreshToken.Reveal()
 	}
+	// S-4: persist refresh token + metadata only. The access token and client
+	// secret deliberately use json:"-" and never reach the token file/keyring.
 	out := storedToken{
-		AccessToken:  logx.NewSecret(tok.AccessToken),
 		RefreshToken: logx.NewSecret(refresh),
 		TokenType:    tok.TokenType,
 		Expiry:       tok.Expiry,
 		Scopes:       append([]string(nil), granted...),
 		ClientID:     cc.ClientID,
-		ClientSecret: logx.NewSecret(cc.ClientSecret),
 		TokenURI:     cc.TokenURL,
 	}
 	data, err := json.Marshal(out)

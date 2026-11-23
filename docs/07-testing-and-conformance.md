@@ -2,6 +2,19 @@
 
 > Upstream's own rule, which we keep: **mocks are not enough; a feature is not done until it has passed against a live Colab runtime.** Upstream has 38 test files (~360 tests) and 7 live suites. We port the *intent* of every one and add layers the Python project lacks.
 
+> **Implementation status — 2026-11-23 (v0.1.0).** **L1 Unit** and **L2
+> Component** (fake Colab control plane + fake Jupyter kernel + fake sshd) are
+> green and blocking in CI. **L3 Golden, L4 Differential and L5 Live e2e are
+> scaffolding only**: `scripts/golden.sh`, `scripts/differential.sh` and
+> `.github/workflows/live-e2e.yml` exist (kill switch, secrets gate, sweeper),
+> but there are zero scenario fixtures and no recorded live pass — fakes are
+> not live proof. The authoritative, up-to-date layer/porting/coverage matrix
+> is [CONFORMANCE.md](CONFORMANCE.md); the tables below are the design target.
+> The §11 coverage gates are **advisory** at v0.1.0:
+> `scripts/coverage-gate.sh` floors at 70 % via `vars.COVERAGE_MIN`, and
+> `scripts/goleak-check.sh` runs in ADVISORY mode. Human-only blockers are in
+> [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and [CONFORMANCE.md](CONFORMANCE.md) §6.
+
 ## 1. Layers
 
 | Layer | What | Runs | Gate |

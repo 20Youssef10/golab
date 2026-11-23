@@ -42,6 +42,8 @@ func newFakeContents(t *testing.T, handler func(http.ResponseWriter, *http.Reque
 	f := &fakeContents{}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		// Restore the body so stateful fakes (recursive tests) can decode it too.
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		q, _ := url.ParseQuery(r.URL.RawQuery)
 		f.mu.Lock()
 		f.reqs = append(f.reqs, recordedRequest{
@@ -102,17 +104,19 @@ func assertWire(t *testing.T, req recordedRequest, wantParams int) {
 	if len(req.query) != wantParams {
 		t.Errorf("query params = %v, want exactly %d", req.query, wantParams)
 	}
-	// Doc 02 §3.1: for the Contents API the token goes in the query ONLY.
-	for _, h := range []string{"X-Colab-Runtime-Proxy-Token", "Authorization", "X-Goog-Colab-Token"} {
+	// Doc 02 §3.1 / AUDIT-02 F-1 (S-1): for the Contents API the token goes in
+	// the query ONLY, and upstream sends no client-agent header at all. A
+	// supplied ClientAgent is accepted for API compatibility but not emitted.
+	for _, h := range []string{
+		"X-Colab-Runtime-Proxy-Token", "Authorization", "X-Goog-Colab-Token",
+		"X-Colab-Client-Agent",
+	} {
 		if got := req.header.Get(h); got != "" {
 			t.Errorf("unexpected %s header: %q", h, got)
 		}
 	}
 	if got := req.header.Get("Accept"); got != "application/json" {
 		t.Errorf("Accept = %q, want application/json", got)
-	}
-	if got := req.header.Get("X-Colab-Client-Agent"); got != "colab-go-test" {
-		t.Errorf("X-Colab-Client-Agent = %q, want colab-go-test", got)
 	}
 }
 
@@ -325,27 +329,39 @@ func TestReadDirectoryIsTyped(t *testing.T) {
 	}
 }
 
-// TestWriteChunked extends upstream tests/test_contents.py::test_upload_file to
-// the streaming, chunked upload required by D-4 / Δ5.
+// TestWriteChunked ports upstream tests/test_contents.py::test_upload_large_file_in_chunks
+// (PR #272): a file that does not fit in one request is sent as chunk 1, 2, …,
+// with the LAST data chunk marked -1 and no empty trailing PUT (S-2).
 func TestWriteChunked(t *testing.T) {
 	data := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
 	var got bytes.Buffer
 	srv := newFakeContents(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"name": "test.txt", "type": "file"})
 	})
-	c := mustClient(t, testConfig(srv.URL))
+	c := smallBudgetClient(t, testConfig(srv.URL), "content/test.txt", 18)
 
 	if err := c.Write(context.Background(), "content/test.txt", data, 10); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
 	reqs := srv.requests()
-	if len(reqs) != 5 { // 36 bytes / 10 => 4 data chunks + final chunk:-1
-		t.Fatalf("requests = %d, want 5", len(reqs))
+	var puts []recordedRequest
+	for _, req := range reqs {
+		if req.method == http.MethodPut {
+			puts = append(puts, req)
+		}
+	}
+	if len(puts) != 4 { // 36 bytes / 10 => 4 data chunks, last one finalised
+		t.Fatalf("PUTs = %d, want 4 (all requests: %+v)", len(puts), reqs)
+	}
+	// The final optional GET checks a server-reported size; it must not send
+	// the token as a header (AUDIT-02 F-1).
+	for _, req := range reqs {
+		assertWire(t, req, 2)
 	}
 	var chunks []int
-	for _, req := range reqs {
-		if req.method != http.MethodPut || req.escapedPath != "/api/contents/content/test.txt" {
+	for _, req := range puts {
+		if req.escapedPath != "/api/contents/content/test.txt" {
 			t.Fatalf("request = %s %s", req.method, req.escapedPath)
 		}
 		assertWire(t, req, 2)
@@ -357,16 +373,13 @@ func TestWriteChunked(t *testing.T) {
 			t.Errorf("payload metadata = %+v", p)
 		}
 		chunks = append(chunks, p.Chunk)
-		if p.Chunk == -1 {
-			continue
-		}
 		b, err := base64.StdEncoding.DecodeString(p.Content)
 		if err != nil {
 			t.Fatalf("bad base64 in chunk %d: %v", p.Chunk, err)
 		}
 		got.Write(b)
 	}
-	wantChunks := []int{1, 2, 3, 4, -1} // 35 bytes / 10 => 4 chunks
+	wantChunks := []int{1, 2, 3, -1} // 36 bytes / 10 => 4 chunks, last marked -1
 	if fmt.Sprint(chunks) != fmt.Sprint(wantChunks) {
 		t.Errorf("chunks = %v, want %v", chunks, wantChunks)
 	}
@@ -375,10 +388,11 @@ func TestWriteChunked(t *testing.T) {
 	}
 }
 
-// TestWriteFallbackSingleShot verifies the single-shot fallback when a server
-// rejects chunked uploads (Δ5). The fake rejects the first chunk with 400 and
-// accepts a whole-file PUT with chunk:1, exactly like upstream uploads.
-func TestWriteFallbackSingleShot(t *testing.T) {
+// TestWriteRejectedFirstChunk ports upstream
+// tests/test_contents.py::test_rejected_first_chunk_raises_original_error (PR
+// #272): a runtime that refuses chunk 1 wrote nothing, so the plain typed
+// error is kept and no incomplete-upload error is manufactured.
+func TestWriteRejectedFirstChunk(t *testing.T) {
 	data := []byte("Hello upload! - a payload longer than a tiny chunk size")
 	calls := 0
 	srv := newFakeContents(t, func(w http.ResponseWriter, r *http.Request) {
@@ -389,34 +403,25 @@ func TestWriteFallbackSingleShot(t *testing.T) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"name": "test.txt"})
 	})
-	c := mustClient(t, testConfig(srv.URL))
+	c := smallBudgetClient(t, testConfig(srv.URL), "content/test.txt", 18)
 
-	if err := c.Write(context.Background(), "content/test.txt", data, 8); err != nil {
-		t.Fatalf("Write: %v", err)
+	err := c.Write(context.Background(), "content/test.txt", data, 8)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != http.StatusBadRequest {
+		t.Fatalf("err = %v (%T), want StatusError 400", err, err)
 	}
-	if calls != 2 {
-		t.Fatalf("server calls = %d, want 2 (chunk rejected, single-shot accepted)", calls)
+	if errors.Is(err, ErrIncompleteUpload) {
+		t.Fatal("a refused first chunk must not be reported as an incomplete upload")
 	}
-	reqs := srv.requests()
-	fallback := chunkPayload(t, reqs[1].body)
-	if fallback.Chunk != 1 {
-		t.Errorf("fallback chunk = %d, want 1", fallback.Chunk)
-	}
-	b, err := base64.StdEncoding.DecodeString(fallback.Content)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(b, data) {
-		t.Errorf("fallback content = %q, want %q", b, data)
-	}
-	for _, req := range reqs {
-		assertWire(t, req, 2)
+	if calls != 1 {
+		t.Fatalf("server calls = %d, want 1", calls)
 	}
 }
 
-// TestWriteStream verifies the io.Reader upload helper (no whole-file buffer in
-// the public API).
-func TestWriteStream(t *testing.T) {
+// TestWriteStreamSingleShot ports upstream
+// tests/test_contents.py::test_upload_that_fits_is_one_request (PR #272): a
+// small file is one chunk:1 PUT, so the unproven empty chunk:-1 is never sent.
+func TestWriteStreamSingleShot(t *testing.T) {
 	data := bytes.Repeat([]byte("x"), 25)
 	srv := newFakeContents(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{})
@@ -426,22 +431,22 @@ func TestWriteStream(t *testing.T) {
 	if err := c.WriteStream(context.Background(), "content/blob.bin", bytes.NewReader(data), 7); err != nil {
 		t.Fatalf("WriteStream: %v", err)
 	}
-	var got bytes.Buffer
-	var seen []int
-	for _, req := range srv.requests() {
-		p := chunkPayload(t, req.body)
-		seen = append(seen, p.Chunk)
-		if p.Chunk > 0 {
-			b, _ := base64.StdEncoding.DecodeString(p.Content)
-			got.Write(b)
-		}
+	reqs := srv.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %d, want 1 (single-shot)", len(reqs))
 	}
-	if fmt.Sprint(seen) != fmt.Sprint([]int{1, 2, 3, 4, -1}) {
-		t.Errorf("chunks = %v", seen)
+	p := chunkPayload(t, reqs[0].body)
+	if p.Chunk != 1 {
+		t.Errorf("chunk = %d, want 1", p.Chunk)
 	}
-	if !bytes.Equal(got.Bytes(), data) {
-		t.Errorf("uploaded %d bytes, want %d", got.Len(), len(data))
+	b, err := base64.StdEncoding.DecodeString(p.Content)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if !bytes.Equal(b, data) {
+		t.Errorf("uploaded %d bytes, want %d", len(b), len(data))
+	}
+	assertWire(t, reqs[0], 2)
 }
 
 // TestReadStream verifies the io.Writer download helper: content is written to

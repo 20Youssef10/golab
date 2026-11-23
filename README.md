@@ -1,74 +1,121 @@
-# Colab CLI → Go: Port Planning Pack
+# golab — the Colab CLI, in Go
 
-Unofficial analysis and plan for rewriting Google's official **`google-colab-cli`** (Python, v0.8.0+2, Apache-2.0) in **Go**, as one static binary for **Linux · macOS · Windows · Termux** on **amd64 · arm64 · armv7 · 386 · riscv64** and more.
+`golab` is an **unofficial** Go implementation of Google's [`google-colab-cli`](https://github.com/googlecolab/google-colab-cli). It gives you a single static binary for creating Colab runtimes, executing Python on them, moving files, opening SSH sessions and scripting the whole workflow — from Linux, macOS, Windows or Termux. It targets upstream **HEAD `0abf82d`** (the `v0.8.0` release line plus five commits) and keeps the same on-disk state format, so you can move from the Python `colab` command without re-authenticating or losing sessions.
 
-## Verdict
-**Feasible, worthwhile, and bounded: ≈ 45–60 focused working days to v1.0.** The Python tool is small (≈ 5.7k LOC). The cost is not code volume; it is (1) an **undocumented, moving protocol** and (2) **platform edge cases** (Termux networking, Windows console, keyrings). Both are de-risked by a one-week spike phase with a hard go/no-go.
+This is a community port, not a Google product. “Google” and “Colab” are trademarks of Google LLC.
 
-Why Go pays off: no Python runtime, **no system `ssh`/`ssh-keygen` needed** (embedded SSH client), real Windows and Termux support (upstream says it has no Windows machines), faster start-up, trivial distribution.
+## Why Go?
 
-## Ten findings that shaped the plan
-1. Two planes, two credentials: control plane (`/tun/m/*`, user bearer) and data plane (runtime-proxy token).
-2. The "kernel client" is a Colab fork of `jupyter-kernel-client`; **Go has no equivalent**, so ~600 LOC of Jupyter-over-WebSocket must be written (spec: doc 02).
-3. Colab extends Jupyter (`colab_request` / `input_reply` + `colab_reply`) for Drive mounting.
-4. Control-plane quirks: XSSI prefix, GET-then-POST XSRF, ambiguous allocations that must be **reconciled by GET** (double-billing otherwise).
-5. SSH is a WebSocket carrying raw SSH bytes; Go can embed the client and drop OpenSSH entirely.
-6. Upstream `SKILL.md`/blogs are **stale** (auth default, A100 fallback, keep-alive daemon). Code was used as truth.
-7. **11 defects found in the Python tool** that must *not* be ported: state silently wiped on parse error, path traversal via session name, code injection via `install`, `edit` can overwrite a remote file after a network blip, unbounded memory upload, no HTTP timeouts, always-on DEBUG log, and more (doc 01 §10).
-8. Termux needs an in-binary **DNS + CA-bundle shim**; `GOOS=android` without cgo builds but is the wrong artefact (verified: PIE linked to `/system/bin/linker64`).
-9. Upstream moves fast (a command removed and one added within weeks) ⇒ permanent **upstream-sync policy**.
-10. The bundled OAuth client is **Google's cloud-SDK client**: a legal/operational risk for a third-party port (R-02).
+- **One static binary.** `CGO_ENABLED=0`, no Python runtime, no virtualenv, no system `ssh` or `ssh-keygen` to install.
+- **Real cross-platform support.** First-class Windows (console handling, in-place self-update) and Termux (DNS/CA shim) alongside Linux and macOS — upstream officially supports only Linux and macOS.
+- **Signed updates, not PyPI.** Releases are checked against published checksums, a cosign keyless signature and a signed SBOM before installation.
+- **Safe to pipe.** Program output goes to stdout; every `[colab] …` status line goes to stderr. `golab exec < code.py`, `golab ssh -- CMD` and `--output json|ndjson` produce clean, byte-exact streams.
+- **Loud about failures.** Atomic state writes, corrupt-state aborts, explicit HTTP timeouts and typed errors instead of string matching.
 
-## Implementation status (2026-11-23)
+## Status (v0.1.0)
 
-The Go port is now under active implementation. `golab` builds and runs:
+`v0.1.0` is released and is the first feature-complete port of the upstream command surface. Unit tests, race tests, lint, `govulncheck` and cross-builds are green.
+
+**What is not yet proven:** no live Colab virtual machine was allocated during implementation. Interactive auth/OAuth consent, interactive `repl`/`ssh`, Drive mounting, large (>75 MiB) uploads, signed-release verification against a real tag, and Termux/Windows device checks still require a human. These are tracked in [docs/REMEDIATION.md](docs/REMEDIATION.md); nothing here should be read as a claim of live end-to-end certification. See also [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
+
+## Install
+
+Pick one:
 
 ```bash
-make build          # produces ./golab (CGO_ENABLED=0)
-./golab version
-./golab --help
-make check          # go vet + go test -race ./...
+# 1. Go toolchain (canonical module path)
+go install github.com/20Youssef10/golab/cmd/golab@latest
+
+# 2. Prebuilt binary from GitHub Releases:
+#    download the .tar.gz for your OS/arch, its checksums, the .sigstore.json
+#    bundle and the *.sbom.sigstore.json attestation for your platform.
+#    `golab update --install` verifies all of these for you.
+
+# 3. Build from source (produces ./golab, CGO_ENABLED=0)
+git clone https://github.com/20Youssef10/golab.git
+cd golab
+make build
 ```
 
-All protocol and foundation packages exist with test-first coverage and fake
-servers: `colabapi`, `auth`, `runtime`, `contents`, `sshx`, `state`, `history`,
-`nb`, `render`, `repl`, `update`, `platform`, `logx`, `version`, `app`, and the
-`internal/cli` command layer. See `docs/09-implementation-contracts.md` for the
-package boundaries and `docs/COMPAT.md` for upstream drift.
+The binary is named **`golab`** in all three cases. Put it on your `PATH` (on Windows, the installer/release archive contains `golab.exe`). To verify a release manually, see [docs/FAQ.md](docs/FAQ.md#how-do-i-verify-a-release).
 
-**Not yet proven:** live Colab behaviour (no Google account / billable VM in this
-environment). Per `AGENTS.md`, no feature is called complete until a human has
-run the live e2e — in particular `colab auth` equivalents, interactive `ssh`,
-`drivemount`, and a real `run` allocation.
+## Quick start
 
-## Contents
-| File | Purpose |
+```bash
+golab new -s demo --gpu t4                      # allocate a named T4 runtime
+echo 'print(2 + 2)' | golab exec -s demo        # run code from stdin
+golab run train.py --gpu t4                     # fresh VM, run script, release it
+golab sessions                                  # list what is still allocated
+golab stop -s demo                              # shut it down
+```
+
+With only one active session you can omit `-s`; `golab` selects it automatically and tells you on stderr which one it picked.
+
+## Commands at a glance
+
+| Area | Commands |
 |---|---|
-| `docs/01-python-cli-analysis.md` | what the tool is, module map, state schema, behaviour contracts, quirks, **defects** |
-| `docs/02-protocol-spec.md` | **wire specification**: OAuth, `/tun/m/*`, Jupyter WS, outputs, `colab_request`, Contents, SSH; 🔴 items to capture |
-| `docs/03-go-architecture.md` | goals, repo layout, interfaces, concurrency, **ADR-001…014**, dependency shortlist |
-| `docs/04-platform-matrix.md` | OS/arch tiers, per-platform concerns, **Termux deep-dive**, distribution, CI matrix, definition of done |
-| `docs/05-command-parity.md` | every command and flag, behaviour to match, Go notes, priorities, deliberate deviations |
-| `docs/06-roadmap.md` | spikes S0–S8, work packages WP-01…22, phases, milestones, v1.0 criteria, upstream-sync |
-| `docs/07-testing-and-conformance.md` | test layers, porting map of the 360 upstream tests, fakes, golden/differential tests, **live capture**, live-e2e safety |
-| `docs/08-risks-decisions-security.md` | risk register, **decisions needing you**, threat model, licensing, verification status, sources |
-| `AGENTS.md` | ready-to-drop guidelines for the Go repo (adapted from upstream's) |
+| Sessions | `new`, `sessions`, `status`, `stop`, `restart-kernel` |
+| Execution | `exec` (`-f`, `--env`, `--timeout`), `repl`, `run` |
+| Files | `ls`, `rm`, `upload` / `download` (`-r`), `edit` |
+| Remote access | `ssh` (`-- CMD`, `--proxy-mode`, `--rm`, `--force`) |
+| Automation | `install`, `drivemount`, `auth` (hidden) |
+| Account & info | `usage`, `url`, `log`, `pay`, `whoami` (hidden), `version`, `help`, `completion` |
+| Maintenance | `update`, `logout`, `readme`, `skill`, `test-public-api` (hidden) |
+| Go-only extras | `doctor`, `audit`, `budget`, `bundle`, `sync`, `agentout` |
 
-## Decisions I need from you (defaults in doc 08 §2)
-1. **DEC-02 OAuth client:** ADC-first + BYO client, with the bundled Google client only as a disclosed fallback?
-2. **DEC-01 Name/licence:** `colab-go`, binary `colab`, Apache-2.0 + NOTICE?
-3. **DEC-07 stdout/stderr:** move all `[colab]` chatter to stderr (deviates from Python)?
-4. **DEC-05 Ctrl-C:** interrupt the remote kernel before exiting?
-5. **Scope:** target parity with 0.8.x only, or also track upstream's future commands?
+Full flags, examples and workflows are in **[docs/USAGE.md](docs/USAGE.md)**.
 
-## First five actions
-1. Create a throw-away Google account; run **S0** (traffic capture) with the official CLI and fill the 🔴 items of doc 02.
-2. Run **S1** (Go: assign → exec → stop) and **S5** (OAuth/ADC in Go): these decide go/no-go.
-3. Run **S3** on your Termux phone (resolver/CA shim, Android version matrix).
-4. Bootstrap the repo (WP-01) with `AGENTS.md`, CI on six runners, lint gates.
-5. Post a short note in upstream Discussions asking about third-party clients and the OAuth client (R-02/R-03).
+## Global flags and environment
 
-## What was and was not verified
-Verified: full upstream source read; effective wire presentation of tokens (both library versions); a 12-target Go cross-compile; Android no-cgo behaviour. **Not** verified: live Colab responses (no account in the sandbox), Termux behaviour on a real device, Go library versions, Windows/macOS keyring details. Doc 08 §6 lists everything precisely.
+These flags work on every command (Cobra also provides `-h`/`--help`).
 
-*Unofficial. "Google" and "Colab" are trademarks of Google LLC. This pack is analysis, not legal advice.*
+| Flag | Default | Environment | Meaning |
+|---|---|---|---|
+| `-c`, `--client-oauth-config` | `~/.colab-cli-oauth-config.json` | — | Custom OAuth client JSON; a missing file falls back to the bundled client. |
+| `--config` | `<config dir>/sessions.json` | `COLAB_SESSIONS_FILE` | Alternate session-state file. |
+| `--auth` | `oauth2` | `COLAB_AUTH` | `oauth2` or `adc` (case-insensitive). |
+| `--public-api` / `--no-public-api` | tunnel API | `COLAB_CLI_PUBLIC_API` | Choose the control-plane path. |
+| `--output` | `text` | `COLAB_OUTPUT` | `text`, `json` or `ndjson`; diagnostics stay on stderr. |
+| `--explain` | off | — | Print a redacted dry-run plan for billable commands and exit. |
+| `--yes` | off | `COLAB_ASSUME_YES` | Assume yes for non-destructive confirmations. Never bypasses a budget guard. |
+| `--logtostderr` | off | `COLAB_DEBUG=1` | Verbose logs on stderr (debug logging is off by default). |
+
+Additional environment overrides: `COLAB_CONFIG_DIR`, `COLAB_CLI_REQUEST_TIMEOUT`, `COLAB_CLI_ASSIGN_RETRIES`, `COLAB_CLI_RETRY_BACKOFF`, `GOLAB_BUDGET_FILE`, `GOLAB_LIVE_PROBES`, `NO_COLOR`, `VISUAL`/`EDITOR`. The complete table is in [docs/USAGE.md](docs/USAGE.md#9-environment-variables).
+
+## Configuration paths
+
+`golab` uses the same `colab-cli` directory name as the Python CLI, so an existing installation is picked up automatically.
+
+| Platform | Base config directory |
+|---|---|
+| Linux / macOS / Termux | `~/.config/colab-cli/` |
+| Windows | `%APPDATA%\colab-cli\` |
+
+Inside it: `sessions.json` (active runtimes and proxy tokens), `settings.json` (update throttle and API probes), `history/` (per-session JSONL event logs). Override the base with `COLAB_CONFIG_DIR`, or just the session file with `--config` / `COLAB_SESSIONS_FILE`. Temporary files prefer `$TMPDIR` (Termux: `$PREFIX/tmp`); caches live in `~/.cache/colab-cli` or `$XDG_CACHE_HOME/colab-cli`.
+
+## Compatibility with the Python CLI
+
+- **Same state schema.** `sessions.json`, `settings.json` and the per-session history are read and written in the Python CLI's format, with a few added fields for the Public API. Existing sessions survive the switch; see [docs/MIGRATION.md](docs/MIGRATION.md).
+- **Chatter moved to stderr.** All `[colab] …` diagnostics go to stderr so stdout is pipe-safe.
+- **SSH embedded.** No external OpenSSH binary or key generation; `--proxy-mode` remains as an escape hatch for external clients.
+- **Atomic state.** Locked temp-file + fsync + rename; a corrupt file aborts rather than being silently reset.
+- **Signed self-update.** `golab update --install` replaces the unverified PyPI/pip path.
+- **Happy-path parity plus fixes.** Upstream defects D-1…D-11 are fixed; upstream HEAD additions (`stop --all`, `--public-api`, `ssh --force`, `logout`, recursive transfers) are included. Full detail in [docs/COMPAT.md](docs/COMPAT.md).
+
+## Documentation
+
+- [User guide — flags, workflows, exit codes](docs/USAGE.md)
+- [Migrating from Python `colab`](docs/MIGRATION.md)
+- [Frequently asked questions](docs/FAQ.md)
+- [Compatibility declaration](docs/COMPAT.md)
+- [Remediation & human-only verification status](docs/REMEDIATION.md)
+- [Conformance status](docs/CONFORMANCE.md)
+- [Changelog](CHANGELOG.md)
+- Architecture & analysis: [docs/01](docs/01-python-cli-analysis.md) · [docs/02](docs/02-protocol-spec.md) · [docs/03](docs/03-go-architecture.md) · [docs/04](docs/04-platform-matrix.md) · [docs/05](docs/05-command-parity.md) · [docs/06](docs/06-roadmap.md) · [docs/07](docs/07-testing-and-conformance.md) · [docs/08](docs/08-risks-decisions-security.md) · [docs/09](docs/09-implementation-contracts.md)
+- Audits: [index](docs/AUDIT-INDEX.md) · [00 live upstream](docs/AUDIT-00-live-upstream.md) · [01 parity](docs/AUDIT-01-parity.md) · [02 protocol/security](docs/AUDIT-02-protocol-security.md) · [03 platform/testing](docs/AUDIT-03-platform-testing.md) · [04 surpass](docs/AUDIT-04-surpass.md)
+- [Dependencies](DEPENDENCIES.md) · [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md)
+
+## Contributing, license, trademark
+
+Contributions are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md) and please do not report security issues in public — use [SECURITY.md](SECURITY.md). This project is licensed under the Apache License, Version 2.0 (the same license as upstream); portions are derived from `google-colab-cli`, © Google LLC, with modifications. `golab` is unofficial and is not endorsed by or affiliated with Google LLC.

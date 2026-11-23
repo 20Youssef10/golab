@@ -1,0 +1,56 @@
+name: termux-nightly
+
+# L6 Termux emulator nightly (docs/04 §3.4, docs/07 §10, AUDIT-03 P2-2).
+# SKELETON, DISABLED BY DEFAULT. Set repo variable TERMUX_NIGHTLY_ENABLED=true
+# (and provide a self-hosted runner with KVM) before enabling the schedule.
+# A real-device pre-release checklist remains HUMAN REQUIRED (Android 10/12/14):
+# DNS/CA shim, TMPDIR, no-D-Bus keyring fallback, strace faccessat2/execve.
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "43 3 * * *"   # enable only after TERMUX_NIGHTLY_ENABLED=true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: termux-nightly
+  cancel-in-progress: true
+
+jobs:
+  termux:
+    if: vars.TERMUX_NIGHTLY_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, kvm] # TODO(owner): confirm runner label/plan
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Guard - emulator prerequisites
+        env:
+          ENABLED: ${{ vars.TERMUX_NIGHTLY_ENABLED }}
+        run: |
+          if [[ "$ENABLED" != "true" ]]; then
+            echo "Termux nightly is disabled (set TERMUX_NIGHTLY_ENABLED=true)." >&2
+            echo "This is a SKELETON: Android emulator + Termux image bootstrap" >&2
+            echo "and shim/fake-server tests are TODO (see docs/CONFORMANCE.md)." >&2
+            exit 1
+          fi
+
+      - name: Build the Termux artifact (linux/arm64)
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+            -o dist/golab-linux-arm64 ./cmd/golab
+
+      # TODO(human/tooling): boot an x86_64 Android emulator image, install
+      # Termux via F-Droid, `pkg install golang`, copy the arm64 binary in, then
+      # run the DNS/CA/TMPDIR/no-D-Bus tests from docs/04 §3.2 and the
+      # fake-server integration suite. Record strace output for faccessat2.
+      - name: Shim tests (TODO)
+        run: |
+          echo "TODO: emulator bootstrap + shim/fake-server tests not yet automated"
+          echo "See docs/04 §3.4 and docs/CONFORMANCE.md for the human checklist"
+          exit 1

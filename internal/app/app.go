@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	goruntime "runtime"
 	"sync"
 	"time"
@@ -79,6 +80,12 @@ type Deps struct {
 // work without credentials.
 func New(ctx context.Context, cfg Config) (*Deps, error) {
 	platform.InstallNetFix()
+	// A Windows self-update leaves <exe>.old behind; remove it on the next
+	// start. Failure is non-fatal (e.g. permissions) and never removes the
+	// running executable.
+	if exe, err := os.Executable(); err == nil {
+		_ = update.CleanupOld(exe)
+	}
 	if err := logx.Setup(cfg.LogToStderr, cfg.Debug); err != nil {
 		return nil, err
 	}
@@ -86,7 +93,9 @@ func New(ctx context.Context, cfg Config) (*Deps, error) {
 		cfg.AuthProvider = auth.DefaultAuthProvider
 	}
 	if cfg.Owner == "" {
-		cfg.Owner = "golab-cli"
+		// Must match the cosign OIDC identity pinned by internal/update/verify.go
+		// and the release workflow, or our own signed releases are rejected.
+		cfg.Owner = "20Youssef10"
 	}
 	if cfg.Repo == "" {
 		cfg.Repo = "golab"
@@ -206,9 +215,11 @@ func (d *Deps) UpdateConfig(ctx context.Context) (update.Config, error) {
 		return update.Config{}, err
 	}
 	return update.Config{
-		Owner:          d.Config.Owner,
-		Repo:           d.Config.Repo,
-		AssetPattern:   "golab_*_" + platformOS() + "_" + platformArch() + ".tar.gz",
+		Owner: d.Config.Owner,
+		Repo:  d.Config.Repo,
+		// Anchored regex: a bare `*` would quantify the preceding underscore
+		// and never match real GoReleaser asset names.
+		AssetPattern:   "^golab_" + regexp.QuoteMeta(version.Number) + "_" + platformOS() + "_" + platformArch() + `\.tar\.gz$`,
 		CurrentVersion: version.Number,
 		LastCheck:      settings.LastCheck,
 		Enabled:        settings.EnableUpdateCheck,
@@ -267,9 +278,10 @@ func (d *Deps) GetSession(ctx context.Context, name string) (*state.Session, err
 		return nil, err
 	}
 	for _, a := range assignments {
-		if a.Endpoint != s.Endpoint {
+		if !state.MatchAssignment(*s, a.Endpoint, a.RuntimeName) {
 			continue
 		}
+		s.RuntimeName = a.RuntimeName
 		s.Token = a.RuntimeProxyInfo.Token
 		s.URL = a.RuntimeProxyInfo.URL
 		expiry := a.RuntimeProxyInfo.ExpiresAt(time.Now())
@@ -344,13 +356,20 @@ func (d *Deps) SyncSessions(ctx context.Context) (map[string]state.Session, []co
 		return nil, nil, err
 	}
 	byEndpoint := make(map[string]colabapi.ListedAssignment, len(assignments))
+	byRuntime := make(map[string]colabapi.ListedAssignment, len(assignments))
 	for _, a := range assignments {
 		byEndpoint[a.Endpoint] = a
+		if a.RuntimeName != "" {
+			byRuntime[a.RuntimeName] = a
+		}
 	}
 	pruned := 0
 	for name, s := range local {
 		a, ok := byEndpoint[s.Endpoint]
-		if !ok {
+		if !ok && s.RuntimeName != "" {
+			a, ok = byRuntime[s.RuntimeName]
+		}
+		if !ok || !state.MatchAssignment(s, a.Endpoint, a.RuntimeName) {
 			if err := d.PruneSession(name); err != nil {
 				return nil, nil, err
 			}
@@ -358,6 +377,7 @@ func (d *Deps) SyncSessions(ctx context.Context) (map[string]state.Session, []co
 			pruned++
 			continue
 		}
+		s.RuntimeName = a.RuntimeName
 		s.Token = a.RuntimeProxyInfo.Token
 		s.URL = a.RuntimeProxyInfo.URL
 		expiry := a.RuntimeProxyInfo.ExpiresAt(time.Now())

@@ -10,7 +10,8 @@
 > Dated: 2026-11-23. This file is the **integration contract** between packages.
 > It is intentionally short. The authoritative behaviour specs remain docs/01–08 and
 > the upstream Python source cloned at `/tmp/opencode/google-colab-cli` (HEAD).
-> Module path: `golab`. Binary: `golab`. Go 1.27.4, `CGO_ENABLED=0`.
+> Module path: `github.com/20Youssef10/golab`. Binary: `golab`. Go 1.27.4,
+> `CGO_ENABLED=0`. Current release: `v0.1.0`.
 
 ## Ground rules for every package
 

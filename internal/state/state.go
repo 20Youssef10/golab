@@ -38,10 +38,14 @@ type LastExecution struct {
 
 // Session is the JSON schema of one entry in sessions.json.
 type Session struct {
-	Name           string         `json:"name"`
-	Token          logx.Secret    `json:"token"`
-	URL            string         `json:"url"`
-	Endpoint       string         `json:"endpoint"`
+	Name     string      `json:"name"`
+	Token    logx.Secret `json:"token"`
+	URL      string      `json:"url"`
+	Endpoint string      `json:"endpoint"`
+	// RuntimeName is the Public API resource name ("runtimes/r-…"). It is
+	// optional so legacy sessions.json files (which only have Endpoint) still
+	// deserialize, and is omitted from the file when empty.
+	RuntimeName    string         `json:"runtime_name,omitempty"`
 	TokenExpiresAt *time.Time     `json:"token_expires_at,omitempty"`
 	Variant        string         `json:"variant,omitempty"`
 	Accelerator    string         `json:"accelerator,omitempty"`
@@ -136,6 +140,30 @@ func (s *Store) Get(name string) (*Session, error) {
 		return nil
 	})
 	return out, err
+}
+
+// MatchAssignment reports whether a locally stored session corresponds to a
+// server assignment. The tunnel API identifies an assignment by Endpoint
+// ("m-s-…"); the Public API uses the resource name ("runtimes/r-…"). Either
+// identity is sufficient (docs/public_api_migration_plan.md §4).
+func MatchAssignment(sess Session, endpoint, runtimeName string) bool {
+	return (endpoint != "" && sess.Endpoint == endpoint) ||
+		(runtimeName != "" && sess.RuntimeName == runtimeName)
+}
+
+// FindByRuntimeName locates a persisted session by its Public API runtime name.
+func (s *Store) FindByRuntimeName(name string) (*Session, bool) {
+	sessions, err := s.List()
+	if err != nil || name == "" {
+		return nil, false
+	}
+	for _, sess := range sessions {
+		if sess.RuntimeName == name {
+			found := sess
+			return &found, true
+		}
+	}
+	return nil, false
 }
 
 // Put inserts or replaces a session.

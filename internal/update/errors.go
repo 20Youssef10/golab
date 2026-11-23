@@ -3,6 +3,8 @@ package update
 import (
 	"errors"
 	"fmt"
+
+	"github.com/20Youssef10/golab/internal/logx"
 )
 
 // Sentinel errors returned by this package. Callers should use errors.Is /
@@ -45,5 +47,26 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
-	return fmt.Sprintf("update request to %s returned HTTP %d", e.URL, e.StatusCode)
+	return fmt.Sprintf("update request to %s returned HTTP %d", logx.Redact(e.URL), e.StatusCode)
+}
+
+// redactErr keeps the original cause (errors.Is/As still work) while removing
+// credentials that net/http may embed in a url.Error's request URL.
+type redactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.cause }
+
+func redactErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := logx.Redact(err.Error())
+	if msg == err.Error() {
+		return err
+	}
+	return &redactedError{msg: msg, cause: err}
 }

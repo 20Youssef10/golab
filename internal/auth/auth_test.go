@@ -275,19 +275,19 @@ func contains(xs []string, x string) bool {
 // OAuth2 provider
 // ---------------------------------------------------------------------------
 
-// Ports upstream test_get_credentials_valid_token: a valid cached token means
-// no prompt, no token request and an authenticated HTTP client.
+// Ports upstream test_get_credentials_valid_token with AUDIT-02 S-4 applied:
+// the token file holds only a refresh token, so a valid access token is minted
+// from it on demand (one bounded exchange) instead of being read from disk.
 func TestOAuth2ValidTokenFromKeyring(t *testing.T) {
 	var tokenHits int
 	srv := fakeTokenServer(t, func(url.Values) (int, string) {
 		tokenHits++
-		return 200, tokenJSON("should-not-be-used", "", 3600, Scopes)
+		return 200, tokenJSON("minted-access", "", 3600, Scopes)
 	})
 	defer srv.Close()
 
 	cfg, kr, stdout, stderr := testConfig(t, srv.URL, "") // empty stdin: any read would block/fail
 	saved := storedToken{
-		AccessToken:  logx.NewSecret("valid-access"),
 		RefreshToken: logx.NewSecret("valid-refresh"),
 		TokenType:    "Bearer",
 		Expiry:       time.Now().Add(time.Hour),
@@ -296,6 +296,9 @@ func TestOAuth2ValidTokenFromKeyring(t *testing.T) {
 	b, err := json.Marshal(saved)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "access_token") {
+		t.Fatalf("stored JSON must not contain an access token: %s", b)
 	}
 	if err := kr.Set(KeyringService, KeyringUser, string(b)); err != nil {
 		t.Fatal(err)
@@ -313,11 +316,11 @@ func TestOAuth2ValidTokenFromKeyring(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if gotAuth != "Bearer valid-access" {
+	if gotAuth != "Bearer minted-access" {
 		t.Fatalf("Authorization = %q", gotAuth)
 	}
-	if tokenHits != 0 {
-		t.Fatalf("token endpoint hit %d times; cached token should be used", tokenHits)
+	if tokenHits != 1 {
+		t.Fatalf("token endpoint hit %d times; want one on-demand mint", tokenHits)
 	}
 	if stdout.Len() != 0 || stderr.Len() != 0 {
 		t.Fatalf("unexpected chatter: stdout=%q stderr=%q", stdout.String(), stderr.String())
@@ -365,12 +368,20 @@ func TestOAuth2ExpiredTokenRefreshesWithGrantedScopes(t *testing.T) {
 	if got := form.Get("scope"); got != strings.Join(granted, " ") {
 		t.Errorf("refresh scope = %q; want %q", got, strings.Join(granted, " "))
 	}
+	raw := kr.value()
 	var out storedToken
-	if err := json.Unmarshal([]byte(kr.value()), &out); err != nil {
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		t.Fatalf("decoding persisted token: %v", err)
 	}
-	if out.AccessToken.Reveal() != "refreshed-access" {
-		t.Errorf("refreshed access token not persisted")
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["access_token"]; ok {
+		t.Errorf("S-4: refreshed access token must not be persisted: %s", raw)
+	}
+	if _, ok := fields["client_secret"]; ok {
+		t.Errorf("S-4: client secret must not be persisted: %s", raw)
 	}
 	if out.RefreshToken.Reveal() != "the-refresh-token" {
 		t.Errorf("refresh token lost on refresh")
@@ -447,8 +458,11 @@ func TestOAuth2NoTokenRunsRemoteCopyPasteFlow(t *testing.T) {
 	if err := json.Unmarshal([]byte(kr.value()), &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.AccessToken.Reveal() != "new-access" || saved.RefreshToken.Reveal() != "new-refresh" {
-		t.Fatal("exchange result not persisted")
+	if saved.RefreshToken.Reveal() != "new-refresh" {
+		t.Fatal("exchange refresh token not persisted")
+	}
+	if strings.Contains(kr.value(), "new-access") || strings.Contains(kr.value(), "test-secret") {
+		t.Fatalf("S-4: access token or client secret persisted: %s", kr.value())
 	}
 }
 
@@ -502,8 +516,8 @@ func TestOAuth2RefreshFailureFallsBackToRemoteFlow(t *testing.T) {
 	}
 	var out storedToken
 	_ = json.Unmarshal([]byte(kr.value()), &out)
-	if out.AccessToken.Reveal() != "replacement-access" {
-		t.Fatal("replacement token not persisted")
+	if out.RefreshToken.Reveal() != "replacement-refresh" {
+		t.Fatal("replacement refresh token not persisted")
 	}
 }
 
@@ -519,7 +533,7 @@ func TestOAuth2CorruptStoredTokenFallsBackToRemoteFlow(t *testing.T) {
 
 	mustClient(t, mustProvider(t, cfg))
 	var out storedToken
-	if err := json.Unmarshal([]byte(kr.value()), &out); err != nil || out.AccessToken.Reveal() != "fresh-access" {
+	if err := json.Unmarshal([]byte(kr.value()), &out); err != nil || out.RefreshToken.Reveal() != "fresh-refresh" {
 		t.Fatalf("corrupt token was not replaced: %q, %v", kr.value(), err)
 	}
 }
@@ -546,9 +560,12 @@ func TestOAuth2PartialGrantPersistsOnlyGrantedScopes(t *testing.T) {
 // test_keyring_read_failure_warns_on_stderr: keyring failures fall back to the
 // 0600 file tier and emit a single, secret-free stderr notice.
 func TestOAuth2KeyringInaccessibleFallsBackToFile(t *testing.T) {
+	// S-4: the file holds a refresh token only, so minting the access token
+	// legitimately contacts this endpoint once.
+	var refreshes int
 	srv := fakeTokenServer(t, func(f url.Values) (int, string) {
-		t.Fatal("token endpoint must not be contacted when a file token is valid")
-		return 500, ""
+		refreshes++
+		return 200, tokenJSON("minted-from-file", "", 3600, Scopes)
 	})
 	defer srv.Close()
 	cfg, kr, _, stderr := testConfig(t, srv.URL, "")
@@ -556,10 +573,10 @@ func TestOAuth2KeyringInaccessibleFallsBackToFile(t *testing.T) {
 	kr.setErr = fmt.Errorf("No recommended backend was available")
 
 	saved := storedToken{
-		AccessToken: logx.NewSecret("file-access"),
-		TokenType:   "Bearer",
-		Expiry:      time.Now().Add(time.Hour),
-		Scopes:      Scopes,
+		RefreshToken: logx.NewSecret("file-refresh"),
+		TokenType:    "Bearer",
+		Expiry:       time.Now().Add(time.Hour),
+		Scopes:       Scopes,
 	}
 	b, _ := json.Marshal(saved)
 	path := filepath.Join(cfg.ConfigDir, OAuthTokenFileName)
@@ -568,6 +585,9 @@ func TestOAuth2KeyringInaccessibleFallsBackToFile(t *testing.T) {
 	}
 
 	mustClient(t, mustProvider(t, cfg))
+	if refreshes != 1 {
+		t.Fatalf("refreshes = %d, want 1", refreshes)
+	}
 	msg := stderr.String()
 	if !strings.Contains(msg, "keyring") || !strings.Contains(msg, "--auth=adc") {
 		t.Fatalf("missing keyring fallback notice: %q", msg)
@@ -611,8 +631,11 @@ func TestLegacyTokenFileMigrated(t *testing.T) {
 	}
 	var out storedToken
 	_ = json.Unmarshal([]byte(kr.value()), &out)
-	if out.RefreshToken.Reveal() != "legacy-refresh" || out.AccessToken.Reveal() != "legacy-access" {
-		t.Fatalf("legacy credentials not preserved: %+v", out)
+	if out.RefreshToken.Reveal() != "legacy-refresh" {
+		t.Fatalf("legacy refresh token not preserved: %+v", out)
+	}
+	if strings.Contains(kr.value(), "legacy-access") || strings.Contains(kr.value(), "legacy-secret") {
+		t.Fatalf("S-4: one-time legacy import persisted a short-lived secret: %s", kr.value())
 	}
 }
 

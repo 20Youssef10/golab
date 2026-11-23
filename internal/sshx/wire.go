@@ -27,7 +27,7 @@ const (
 
 // DefaultClientAgent is our honest identity (DEC-03 / R-03): we do not
 // impersonate the upstream colab-cli agent.
-func DefaultClientAgent() string { return "colab-go/" + version.Number }
+func DefaultClientAgent() string { return version.ClientAgent() }
 
 // BuildWSURL builds the SSH upgrade URL. The token is revealed only here, at
 // the point of use; it is never formatted into a log or error message.
@@ -83,6 +83,13 @@ func DialWS(ctx context.Context, u, pubkey, agent string, client *http.Client) (
 	if client == nil {
 		client = DefaultHTTPClient(0)
 	}
+	// The token lives in the upgrade URL; recover it here so a server that
+	// echoes it verbatim (without a field name) cannot smuggle it into a typed
+	// error. The URL itself is never logged.
+	token := ""
+	if parsed, perr := url.Parse(u); perr == nil {
+		token = parsed.Query().Get("colab-runtime-proxy-token")
+	}
 	header := http.Header{}
 	header.Set(PubkeyHeader, pubkey)
 	header.Set(ClientAgentHeader, agent)
@@ -98,9 +105,10 @@ func DialWS(ctx context.Context, u, pubkey, agent string, client *http.Client) (
 				_ = resp.Body.Close()
 			}
 			return nil, &HandshakeError{
-				Status:  resp.StatusCode,
-				Body:    body,
-				Message: logx.Redact(ExplainHandshakeFailure(resp.StatusCode, body)),
+				Status: resp.StatusCode,
+				Body:   []byte(redactHandshake(string(body), token)),
+				Message: redactHandshake(
+					ExplainHandshakeFailure(resp.StatusCode, body), token),
 			}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {

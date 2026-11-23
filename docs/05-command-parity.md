@@ -3,8 +3,11 @@
 > **Implementation note (2026-11-23):** all commands listed below are implemented
 > in `internal/cli` and exercised against the fake control plane / kernel / sshd.
 > Upstream HEAD additions (`stop --all`, `--public-api/--no-public-api`,
-> `test-public-api`) are included; `ssh --force` is deliberately out of scope.
-> Live e2e against a real billable VM has **not** been run and requires a human.
+> `test-public-api`) are included, as is `ssh --force` (upstream `cda02bc`) and
+> the community PR features `logout` and `upload/download -r`. New Go-only
+> commands (`doctor`, `audit`, `budget`, `bundle`, `sync`, `agentout`) are
+> additive. Live e2e against a real billable VM has **not** been run and requires
+> a human; see `docs/REMEDIATION.md` for the v0.1.0 status.
 
 > Flags and defaults below were extracted programmatically (AST) from `src/colab_cli/commands/*.py` at upstream `v0.8.0+2`. Exact message strings are **not** reproduced here: harvest them from `tests/` into golden files (doc 07 §Golden outputs) so they cannot drift.
 > **Priority:** P0 = MVP (Phase 1–2) · P1 = parity-complete (Phase 3) · P2 = nice-to-have.

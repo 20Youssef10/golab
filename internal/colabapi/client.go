@@ -24,7 +24,7 @@ const (
 	// DefaultPublicAPI serves GET /v1beta/runtimes.
 	DefaultPublicAPI = "https://colaboratory.googleapis.com"
 	// DefaultClientAgent identifies this implementation to Colab.
-	DefaultClientAgent = "colab-go"
+	DefaultClientAgent = "golab"
 	// DefaultRetries and DefaultBackoff mirror COLAB_CLI_ASSIGN_RETRIES / BACKOFF.
 	DefaultRetries = 3
 	DefaultBackoff = 10 * time.Second
@@ -40,6 +40,9 @@ const (
 type Client interface {
 	Assign(ctx context.Context, req AssignRequest) (*AssignmentResponse, error)
 	Unassign(ctx context.Context, endpoint string) error
+	// UnassignRuntime is the additive Public API-aware delete. runtimeName may
+	// be empty, in which case it is resolved from the endpoint.
+	UnassignRuntime(ctx context.Context, endpoint, runtimeName string) error
 	List(ctx context.Context) ([]ListedAssignment, error)
 	Usage(ctx context.Context) (*Consumption, error)
 	CredentialsPropagation(ctx context.Context, endpoint string) (*CredProp, error)
@@ -50,15 +53,22 @@ type Client interface {
 
 // Config configures New. HTTPClient must already carry the caller's OAuth/ADC
 // bearer credentials; New clones it and installs explicit timeouts.
+//
+// RequestTimeout, Retries and Backoff may be set explicitly. A zero value
+// means "derive from the COLAB_CLI_* environment variable, then its default"
+// (see env.go); a negative value explicitly disables retries / the backoff
+// delay. This keeps backward compatibility with callers that relied on the
+// previous zero-value behaviour while honouring the three env vars.
 type Config struct {
-	Domain       string
-	PublicAPI    string
-	HTTPClient   *http.Client
-	ClientAgent  string
-	UsePublicAPI bool
-	Logger       *slog.Logger
-	Retries      int
-	Backoff      time.Duration
+	Domain         string
+	PublicAPI      string
+	HTTPClient     *http.Client
+	ClientAgent    string
+	UsePublicAPI   bool
+	Logger         *slog.Logger
+	RequestTimeout time.Duration
+	Retries        int
+	Backoff        time.Duration
 }
 
 type client struct {
@@ -90,16 +100,30 @@ func New(cfg Config) (Client, error) {
 	if agent == "" {
 		agent = DefaultClientAgent
 	}
+	// Zero values mean "unset": derive from the environment (or its default).
+	// Negative values explicitly disable retries / the backoff delay.
 	retries := cfg.Retries
-	if retries < 0 {
+	switch {
+	case retries > 0:
+	case retries < 0:
 		retries = 0
+	default:
+		retries = EnvAssignRetries()
 	}
 	backoff := cfg.Backoff
-	if backoff < 0 {
+	switch {
+	case backoff > 0:
+	case backoff < 0:
 		backoff = 0
+	default:
+		backoff = EnvRetryBackoff()
+	}
+	timeout := cfg.RequestTimeout
+	if timeout <= 0 {
+		timeout = EnvRequestTimeout()
 	}
 	return &client{
-		domain: domain, publicAPI: pub, http: cloneClient(cfg.HTTPClient),
+		domain: domain, publicAPI: pub, http: cloneClient(cfg.HTTPClient, timeout),
 		agent: agent, usePublicAPI: cfg.UsePublicAPI,
 		logger: logger, retries: retries, backoff: backoff,
 	}, nil
@@ -121,13 +145,20 @@ func parseBase(raw, fallback string) (*url.URL, error) {
 
 // cloneClient copies the caller's client (preserving its authenticator) and
 // fills in explicit connect/TLS/header/idle timeouts where absent.
-func cloneClient(base *http.Client) *http.Client {
+func cloneClient(base *http.Client, timeout time.Duration) *http.Client {
 	c := &http.Client{}
 	if base != nil {
 		*c = *base
 	}
-	if c.Timeout <= 0 {
-		c.Timeout = defaultHTTPTimeout
+	if timeout <= 0 {
+		timeout = defaultHTTPTimeout
+	}
+	// The auth layer installs a 60 s client-level default. Treat that value
+	// (and an unset timeout) as "not explicitly chosen by the caller" so the
+	// COLAB_CLI_REQUEST_TIMEOUT override can shorten or lengthen it, while
+	// preserving a deliberately smaller test/integration timeout.
+	if c.Timeout <= 0 || c.Timeout == defaultHTTPTimeout {
+		c.Timeout = timeout
 	}
 	if c.Transport == nil {
 		c.Transport = http.DefaultTransport
@@ -240,6 +271,26 @@ func (c *client) tunURL(path string, params url.Values) *url.URL {
 
 func (c *client) publicURL(path string, params url.Values) *url.URL {
 	return makeURL(c.publicAPI, path, params, false)
+}
+
+// backoffDelay computes base*2^attempt with an overflow guard so a large
+// attempt index can never wrap into a negative (or immediate) delay.
+func backoffDelay(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	if attempt < 0 {
+		attempt = 0
+	}
+	shift := attempt
+	if shift > 30 {
+		shift = 30
+	}
+	delay := base * time.Duration(1<<shift)
+	if delay/time.Duration(1<<shift) != base {
+		return time.Duration(1<<63 - 1)
+	}
+	return delay
 }
 
 func (c *client) sleep(ctx context.Context, d time.Duration) error {
@@ -359,6 +410,9 @@ func fromAssignment(a *Assignment, req AssignRequest) *AssignmentResponse {
 // uncertain POST never double-bills.
 func (c *client) Assign(ctx context.Context, req AssignRequest) (*AssignmentResponse, error) {
 	req = normalizeAssignRequest(req)
+	if c.usePublicAPI {
+		return c.assignPublic(ctx, req)
+	}
 	pending, existing, err := c.getAssignment(ctx, req)
 	if err != nil {
 		return nil, mapAssignError(err, req)
@@ -393,15 +447,7 @@ func (c *client) Assign(ctx context.Context, req AssignRequest) (*AssignmentResp
 			return nil, err
 		}
 
-		shift := attempt
-		if shift > 30 {
-			shift = 30
-		}
-		delay := c.backoff * time.Duration(1<<shift)
-		if c.backoff > 0 && delay/time.Duration(1<<shift) != c.backoff {
-			delay = time.Duration(1<<63 - 1)
-		}
-		if err := c.sleep(ctx, delay); err != nil {
+		if err := c.sleep(ctx, backoffDelay(c.backoff, attempt)); err != nil {
 			return nil, err
 		}
 
@@ -417,8 +463,25 @@ func (c *client) Assign(ctx context.Context, req AssignRequest) (*AssignmentResp
 	return nil, ErrUnexpectedResponse
 }
 
-// Unassign implements C4+C5.
+// Unassign implements C4+C5 (tunnel) or the Public API DELETE path. It keeps
+// its original signature; callers that already know the Public API runtime
+// name can use UnassignRuntime to avoid the list lookup.
 func (c *client) Unassign(ctx context.Context, endpoint string) error {
+	return c.UnassignRuntime(ctx, endpoint, "")
+}
+
+// UnassignRuntime deletes a runtime by endpoint and/or Public API runtime
+// name. On the tunnel plane runtimeName is ignored; on the Public API plane it
+// is the resource name ("runtimes/r-…"). Unknown endpoints are treated as a
+// no-op because the Public API DELETE uses allowMissing=true.
+func (c *client) UnassignRuntime(ctx context.Context, endpoint, runtimeName string) error {
+	if c.usePublicAPI {
+		return c.unassignPublic(ctx, endpoint, runtimeName)
+	}
+	return c.unassignTunnel(ctx, endpoint)
+}
+
+func (c *client) unassignTunnel(ctx context.Context, endpoint string) error {
 	u := c.tunURL("/unassign/"+url.PathEscape(endpoint), nil)
 	var wire struct {
 		Token logx.Secret `json:"token"`
@@ -488,47 +551,54 @@ func (c *client) listPublic(ctx context.Context) ([]ListedAssignment, error) {
 	now := time.Now()
 	out := make([]ListedAssignment, 0, len(wire.Runtimes))
 	for _, r := range wire.Runtimes {
-		shape := ShapeStandard
-		if r.RuntimeSpec.Shape == "SHAPE_HIGHMEM" {
-			shape = ShapeHighRAM
-		}
-		variant := AssignmentDefault
-		switch r.RuntimeSpec.Variant {
-		case "VARIANT_GPU":
-			variant = AssignmentGPU
-		case "VARIANT_TPU":
-			variant = AssignmentTPU
-		}
-		acc := Accelerator(r.RuntimeSpec.Accelerator)
-		switch acc {
-		case AccelG4, AccelT4, AccelL4, AccelA100, AccelH100, AccelV5E1, AccelV6E1:
-		default:
-			acc = AccelNone
-		}
-		expiresIn := 3600
-		if dt, err := time.Parse(time.RFC3339, r.ConnectionInfo.ExpireTime); err == nil {
-			expiresIn = int(dt.Sub(now).Seconds())
-			if expiresIn < 0 {
-				expiresIn = 0
-			}
-		}
-		endpoint := r.ConnectionInfo.Endpoint
-		if endpoint == "" {
-			endpoint = strings.TrimPrefix(r.Name, "runtimes/")
-		}
-		out = append(out, ListedAssignment{
-			Accelerator:  acc,
-			Endpoint:     endpoint,
-			Variant:      variant,
-			MachineShape: shape,
-			RuntimeProxyInfo: RuntimeProxyInfo{
-				Token:                 logx.NewSecret(r.ConnectionInfo.Token),
-				TokenExpiresInSeconds: expiresIn,
-				URL:                   r.ConnectionInfo.URL,
-			},
-		})
+		out = append(out, mapPublicRuntime(r, now))
 	}
 	return out, nil
+}
+
+// mapPublicRuntime converts upstream's Runtime model into our wire-neutral
+// ListedAssignment (client.py::_list_assignments_public).
+func mapPublicRuntime(r publicRuntime, now time.Time) ListedAssignment {
+	shape := ShapeStandard
+	if r.RuntimeSpec.Shape == "SHAPE_HIGHMEM" {
+		shape = ShapeHighRAM
+	}
+	variant := AssignmentDefault
+	switch r.RuntimeSpec.Variant {
+	case "VARIANT_GPU":
+		variant = AssignmentGPU
+	case "VARIANT_TPU":
+		variant = AssignmentTPU
+	}
+	acc := Accelerator(r.RuntimeSpec.Accelerator)
+	switch acc {
+	case AccelG4, AccelT4, AccelL4, AccelA100, AccelH100, AccelV5E1, AccelV6E1:
+	default:
+		acc = AccelNone
+	}
+	expiresIn := 3600
+	if dt, err := time.Parse(time.RFC3339, r.ConnectionInfo.ExpireTime); err == nil {
+		expiresIn = int(dt.Sub(now).Seconds())
+		if expiresIn < 0 {
+			expiresIn = 0
+		}
+	}
+	endpoint := r.ConnectionInfo.Endpoint
+	if endpoint == "" {
+		endpoint = strings.TrimPrefix(r.Name, "runtimes/")
+	}
+	return ListedAssignment{
+		Accelerator:  acc,
+		Endpoint:     endpoint,
+		RuntimeName:  r.Name,
+		Variant:      variant,
+		MachineShape: shape,
+		RuntimeProxyInfo: RuntimeProxyInfo{
+			Token:                 logx.NewSecret(r.ConnectionInfo.Token),
+			TokenExpiresInSeconds: expiresIn,
+			URL:                   r.ConnectionInfo.URL,
+		},
+	}
 }
 
 // Usage implements C6 and applies consumption.py's tunnel→display mapping.

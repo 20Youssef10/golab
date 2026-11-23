@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/20Youssef10/golab/internal/agentout"
 	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/auth"
 	"github.com/20Youssef10/golab/internal/platform"
@@ -19,6 +20,7 @@ import (
 )
 
 type depsContextKey struct{}
+type outputWriterKey struct{}
 
 // WithDeps injects a pre-built dependency graph. It is intended for tests and
 // for embedding golab's CLI inside another program.
@@ -50,6 +52,9 @@ type rootOptions struct {
 	publicAPI         bool
 	noPublicAPI       bool
 	debug             bool
+	outputFormat      string
+	explain           bool
+	assumeYes         bool
 }
 
 // NewRootCommand builds the command tree with the global flags of upstream's
@@ -60,6 +65,8 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		authProvider:      envOr("COLAB_AUTH", string(auth.DefaultAuthProvider)),
 		publicAPI:         parseBoolEnv(os.Getenv("COLAB_CLI_PUBLIC_API")),
 		debug:             parseBoolEnv(os.Getenv("COLAB_DEBUG")),
+		outputFormat:      envOr("COLAB_OUTPUT", "text"),
+		assumeYes:         parseBoolEnv(os.Getenv("COLAB_ASSUME_YES")),
 	}
 	root := &cobra.Command{
 		Use:           "golab",
@@ -90,11 +97,23 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 				autoUpdateNotice(cmd.Context(), d, cmd.Name())
 			}
 			// Cobra's writers win so help output and command output share the
-			// same streams, including in golden tests.
-			d.SetStreams(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			// same streams, including in golden tests. In structured mode,
+			// stdout is wrapped in the agent-safe event writer; diagnostics
+			// stay on stderr.
+			outWriter, err := agentout.NewWriter(cmd.OutOrStdout(), opts.outputFormat)
+			if err != nil {
+				return flagError(err)
+			}
+			d.SetStreams(cmd.InOrStdin(), outWriter, cmd.ErrOrStderr())
+			ctx := context.WithValue(cmd.Context(), depsContextKey{}, d)
+			if outWriter != cmd.OutOrStdout() {
+				ctx = context.WithValue(ctx, outputWriterKey{}, outWriter)
+			}
 			// RunE handlers read the dependency graph from the command context.
-			// Without this, a real (non-injected) invocation panics.
-			cmd.SetContext(context.WithValue(cmd.Context(), depsContextKey{}, d))
+			// Without this, a real (non-injected) invocation panics. Store it on
+			// the root too so execute() can finalise the structured writer.
+			cmd.SetContext(ctx)
+			cmd.Root().SetContext(ctx)
 			return nil
 		},
 	}
@@ -117,6 +136,12 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		"Use the Colab Public API instead of the legacy tunnel API")
 	pf.BoolVar(&opts.noPublicAPI, "no-public-api", !opts.publicAPI,
 		"Use the legacy Colab tunnel API instead of the Public API")
+	pf.StringVar(&opts.outputFormat, "output", opts.outputFormat,
+		"Program output format: text, json or ndjson (diagnostics stay on stderr)")
+	pf.BoolVar(&opts.explain, "explain", false,
+		"Print a redacted dry-run plan for billable commands and exit")
+	pf.BoolVar(&opts.assumeYes, "yes", opts.assumeYes,
+		"Assume yes for non-destructive confirmations (never bypasses budget enforcement)")
 	// Debug logging is enabled through COLAB_DEBUG (or --logtostderr); there is
 	// deliberately no --debug flag in the upstream CLI surface.
 
@@ -134,6 +159,11 @@ func execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	root := NewRootCommand(in, out, errOut)
 	root.SetArgs(args)
 	err := root.ExecuteContext(ctx)
+	if w, ok := root.Context().Value(outputWriterKey{}).(io.Writer); ok {
+		if closeErr := agentout.Close(w); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
 	if err == nil {
 		return 0
 	}
@@ -182,7 +212,8 @@ func autoUpdateNotice(ctx context.Context, d *app.Deps, invoked string) {
 func suppressed(command string) bool {
 	switch command {
 	case "update", "version", "log", "pay", "help", "url", "whoami",
-		"test-public-api", "readme", "README", "skill", "SKILL":
+		"test-public-api", "readme", "README", "skill", "SKILL",
+		"doctor", "audit", "budget":
 		return true
 	default:
 		return false

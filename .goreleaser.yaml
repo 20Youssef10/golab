@@ -1,0 +1,88 @@
+# GoReleaser v2 config. Produces CGO-free archives for the Tier-1 matrix
+# (docs/04 §1), SHA-256 checksums, and the exact asset names the updater parses
+# (internal/update/check.go: asset pattern `golab_*_<os>_<arch>.tar.gz`,
+# checksums.txt, *.sigstore.json, *.sbom.sigstore.json).
+#
+# Signing (cosign sign-blob + attest-blob) is done in .github/workflows/release.yml
+# after this pipeline runs, because the bundles must be uploaded to the same
+# GitHub Release. Validate with: goreleaser check && goreleaser release --snapshot --clean
+version: 2
+
+project_name: golab
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: golab
+    main: ./cmd/golab
+    binary: golab
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    # Pin the build timestamp from the commit for reproducible archives.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64, "386", arm, riscv64]
+    goarm: ["7"]
+    ignore:
+      - goos: darwin
+        goarch: "386"
+      - goos: darwin
+        goarch: arm
+      - goos: darwin
+        goarch: riscv64
+      - goos: windows
+        goarch: arm
+      - goos: windows
+        goarch: riscv64
+      - goos: freebsd
+        goarch: arm
+      - goos: freebsd
+        goarch: riscv64
+
+archives:
+  - id: default
+    # The updater expects .tar.gz for EVERY target, including Windows.
+    formats: [tar.gz]
+    # No OS/arch "replacements": runtime.GOOS/runtime.GOARCH must match exactly
+    # (linux/amd64 -> golab_0.1.0-alpha.1_linux_amd64.tar.gz).
+    name_template: "golab_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  # Must be literally `checksums.txt` (internal/update/check.go:192-195).
+  name_template: checksums.txt
+  algorithm: sha256
+
+release:
+  # Keep in sync with the up-to-date repo identity. NOTE: internal/update pins
+  # Owner/Repo to 20Youssef10/golab by default; see docs/CONFORMANCE.md for the
+  # identity mismatch that must be resolved by the owner / updater agent.
+  github:
+    owner: 20Youssef10
+    name: golab
+  prerelease: auto
+  name_template: "v{{ .Version }}"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+
+snapshot:
+  version_template: "{{ .Version }}-next"

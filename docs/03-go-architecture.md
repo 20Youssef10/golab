@@ -1,5 +1,23 @@
 # 03 · Go Architecture & Decision Records
 
+> **Implementation status — 2026-11-23 (v0.1.0).** The canonical module path is
+> `github.com/20Youssef10/golab` (binary `golab`, Go 1.27.4, `CGO_ENABLED=0`),
+> enabling `go install github.com/20Youssef10/golab/cmd/colab@latest`; the
+> `github.com/<owner>/colab-go` placeholder in ADR-001 (§9) is historical.
+> **ADR-014 is now fully implemented:** GoReleaser (`.goreleaser.yaml`) builds
+> the CGO-free Tier-1 archives, SHA-256 checksums and a GitHub Release for
+> `20Youssef10/golab`; `release.yml` adds cosign keyless signatures and a
+> signed SBOM per archive. `internal/update` performs real sigstore
+> verification via `sigstore-go/pkg/verify` (Fulcio CA-chain, Rekor proof/SET,
+> certificate-time checks, pinned OIDC identity, in-toto digest binding) and
+> **requires** the signed `*.sbom.sigstore.json` attestation (`ErrMissingSBOM`);
+> see the ADR-014 note in §9. New Go-only packages since the skeleton:
+> `internal/doctor`, `internal/auditsec`, `internal/budget`, `internal/bundle`
+> and `internal/agentout`, exposed as `doctor`, `audit`, `budget`, `bundle`,
+> `agentout` (plus `sync` and `logout`) from `internal/cli/register.go`.
+> Live release verification and live VM e2e remain human-gated
+> ([AUDIT-INDEX.md](AUDIT-INDEX.md) §5).
+
 ## 1. Goals and non-goals
 
 **Goals**

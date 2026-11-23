@@ -24,6 +24,18 @@ import (
 // more memory per chunk.
 const DefaultChunkSize = 1 << 20 // 1 MiB
 
+// MaxRequestBytes is Colab's request-body ceiling (100 MiB). Content is sent
+// base64-encoded inside JSON (4/3 of the file size), so a "small" upload is
+// one that fits under this budget after encoding — roughly 75 MiB.
+const MaxRequestBytes = 100 << 20 // 100 MiB
+
+// UploadChunkSize is the chunk size for files too large for one request. A
+// 64 MiB chunk is ~85 MiB encoded, comfortably inside MaxRequestBytes.
+const UploadChunkSize = 64 << 20 // 64 MiB
+
+// MaxRecursionDepth bounds recursive directory walks (upstream PR #267).
+const MaxRecursionDepth = 64
+
 const (
 	requestTimeout = 2 * time.Minute
 	uploadTimeout  = 10 * time.Minute
@@ -39,16 +51,92 @@ var (
 	ErrNotFound = errors.New("contents: file or directory not found")
 	// ErrIsDirectory means a file-only operation was attempted on a directory.
 	ErrIsDirectory = errors.New("contents: path is a directory")
+	// ErrIncompleteUpload means a chunked upload failed after data may already
+	// have been written remotely. Callers must not treat the remote file as
+	// valid; see IncompleteUploadError for the number of chunks sent.
+	ErrIncompleteUpload = errors.New("contents: incomplete upload")
+	// ErrNotDirectory means UploadDir was given a non-directory source.
+	ErrNotDirectory = errors.New("contents: source is not a directory")
+	// ErrUnsafePath means a remote path or an untrusted remote entry name
+	// contained traversal characters (.., /, \\, NUL).
+	ErrUnsafePath = errors.New("contents: unsafe path")
+	// ErrSymlink means a local symlink was found on a recursive transfer path.
+	ErrSymlink = errors.New("contents: local symlink not allowed")
+	// ErrMaxDepth means a recursive walk exceeded MaxRecursionDepth.
+	ErrMaxDepth = errors.New("contents: maximum recursion depth exceeded")
+	// ErrMissingContent means a remote file model had no content field.
+	ErrMissingContent = errors.New("contents: missing file content")
 )
+
+// IncompleteUploadError is returned when a chunked upload fails after the
+// first chunk was accepted. The remote file may hold only part of the local
+// data — even a failed chunk 1 may have been stored if only the response was
+// lost. Only a redacted, token-free detail string is retained: the underlying
+// transport error's text can embed the tokenised request URL.
+type IncompleteUploadError struct {
+	RemotePath string
+	ChunksSent int
+	Detail     string
+}
+
+func (e *IncompleteUploadError) Error() string {
+	return fmt.Sprintf("contents: upload of %s incomplete after %d chunk(s): %s",
+		logx.Redact(e.RemotePath), e.ChunksSent, e.Detail)
+}
+
+// Unwrap deliberately exposes only the sentinel, never the token-bearing
+// cause, so errors.Is works without leaking a secret through the chain.
+func (e *IncompleteUploadError) Unwrap() error { return ErrIncompleteUpload }
+
+func describeUploadError(err error) string {
+	if err == nil {
+		return ""
+	}
+	// Only typed, token-free details from our own errors are rendered
+	// verbatim. Anything else gets a defensive redaction pass; a refresh
+	// callback's plain errors (e.g. "credential refresh denied") survive.
+	var se *StatusError
+	var te *TransportError
+	switch {
+	case errors.As(err, &se):
+		return fmt.Sprintf("HTTP %d", se.Status)
+	case errors.As(err, &te):
+		return te.Error()
+	case errors.Is(err, ErrNotFound):
+		return ErrNotFound.Error()
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline exceeded"
+	}
+	return logx.Redact(err.Error())
+}
+
+// RefreshInfo carries a renewed data-plane credential for a long upload.
+// An empty BaseURL leaves the current base URL unchanged.
+type RefreshInfo struct {
+	Token   logx.Secret
+	BaseURL string
+}
+
+// TokenRefresher is called before every chunk after the first so an upload
+// that outlives the runtime proxy token can pick up a renewed one (upstream
+// PR #272). It must never return a token in an error message.
+type TokenRefresher func(ctx context.Context) (RefreshInfo, error)
 
 // Config holds the dependencies of a Contents API client. Token is the data-
 // plane runtime-proxy token, never the control-plane OAuth bearer.
 type Config struct {
-	BaseURL     string
-	Token       logx.Secret
-	HTTPClient  *http.Client
+	BaseURL    string
+	Token      logx.Secret
+	HTTPClient *http.Client
+	// ClientAgent is accepted for API compatibility with the other planes but
+	// is deliberately NOT sent: upstream's Contents API uses query-only
+	// credentials and no client-agent header (AUDIT-02 F-1 / S-1).
 	ClientAgent string
 	Logger      *slog.Logger
+	// RefreshToken, if set, is called before each chunk after the first.
+	RefreshToken TokenRefresher
 }
 
 // Client is the subset of Jupyter's contents API needed by the CLI.
@@ -62,8 +150,9 @@ type Client interface {
 	// other formats are treated as UTF-8 text.
 	Read(ctx context.Context, remotePath string) (*Model, error)
 
-	// Write uploads data in chunkSize-sized chunks, followed by a final
-	// chunk:-1. Servers that reject chunking get one single-shot PUT instead.
+	// Write uploads data. A file that fits in one request is one atomic
+	// chunk:1 PUT; larger files use the Jupyter chunked protocol and surface
+	// *IncompleteUploadError if any chunk fails (AUDIT-02 S-2).
 	Write(ctx context.Context, remotePath string, data []byte, chunkSize int) error
 
 	// Delete removes a file or directory.
@@ -75,6 +164,18 @@ type Client interface {
 
 	// WriteStream is Write but takes an io.Reader instead of a byte slice.
 	WriteStream(ctx context.Context, remotePath string, src io.Reader, chunkSize int) error
+
+	// Mkdir creates a remote directory with a model PUT.
+	Mkdir(ctx context.Context, remotePath string) error
+
+	// UploadDir recursively uploads a local directory tree, preserving empty
+	// directories and skipping local symlinks; it returns the file count.
+	UploadDir(ctx context.Context, localDir, remoteDir string) (int, error)
+
+	// DownloadDir recursively downloads a remote directory tree into a local
+	// directory (including empty directories), or downloads a single remote file
+	// when the target is not a directory. It returns the file count.
+	DownloadDir(ctx context.Context, remotePath, localPath string) (int, error)
 }
 
 // StatusError reports a non-404, non-2xx response. It deliberately omits the
@@ -102,11 +203,13 @@ func (e *TransportError) Error() string { return fmt.Sprintf("contents: %s: requ
 func (e *TransportError) Unwrap() error { return e.Err }
 
 type client struct {
-	base  string
-	token logx.Secret
-	http  *http.Client
-	agent string
-	log   *slog.Logger
+	base            string
+	token           logx.Secret
+	http            *http.Client
+	log             *slog.Logger
+	refreshToken    TokenRefresher
+	maxRequestBytes int // tests may lower this to exercise chunking
+	maxDepth        int // tests may lower this to exercise the depth guard
 }
 
 // New validates cfg and returns a ready client. A nil HTTPClient gets one with
@@ -125,27 +228,35 @@ func New(cfg Config) (Client, error) {
 		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("contents: BaseURL must be an http(s) URL with a host and no credentials, query or fragment")
 	}
-	agent := strings.TrimSpace(cfg.ClientAgent)
-	if agent == "" {
-		agent = "colab-go"
-	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = logx.Logger()
 	}
 	return &client{
-		base:  strings.TrimRight(base, "/"),
-		token: cfg.Token,
-		http:  cloneClient(cfg.HTTPClient),
-		agent: agent,
-		log:   logger,
+		base:            strings.TrimRight(base, "/"),
+		token:           cfg.Token,
+		http:            cloneClient(cfg.HTTPClient),
+		log:             logger,
+		refreshToken:    cfg.RefreshToken,
+		maxRequestBytes: MaxRequestBytes,
+		maxDepth:        MaxRecursionDepth,
 	}, nil
 }
 
 func (c *client) List(ctx context.Context, remotePath string) (*Model, error) {
+	return c.getModel(ctx, remotePath, false)
+}
+
+// getModel fetches a model, optionally asking for content. It is shared by
+// List, the recursive walk and upload-size verification.
+func (c *client) getModel(ctx context.Context, remotePath string, withContent bool) (*Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	resp, err := c.send(ctx, "list", http.MethodGet, remotePath, nil, nil)
+	var extra url.Values
+	if withContent {
+		extra = url.Values{"content": {"1"}}
+	}
+	resp, err := c.send(ctx, "list", http.MethodGet, remotePath, extra, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -194,63 +305,248 @@ func (c *client) Write(ctx context.Context, remotePath string, data []byte, chun
 	return c.WriteStream(ctx, remotePath, bytes.NewReader(data), chunkSize)
 }
 
-// WriteStream sends chunk:1, chunk:2, … then chunk:-1 as documented by
-// Jupyter's chunked save contract. If the very first chunk is rejected with a
-// client error (or 501), the server is assumed not to support chunking and the
-// whole file is retried as a single chunk:1 PUT, matching upstream's upload.
+// WriteStream implements the safe upload policy of AUDIT-02 S-2 / upstream
+// PR #272:
+//
+//   - A file that fits in one request is sent as ONE `chunk:1` PUT. That is the
+//     upstream-proven behaviour and it is atomic: the remote file is either
+//     replaced completely or left as it was. The unproven empty `chunk:-1`
+//     finalisation is never used for small files.
+//   - A larger file streams chunk:1, chunk:2, … with the last DATA chunk
+//     marked -1 (no empty trailing PUT). Failed chunks after data was sent
+//     produce *IncompleteUploadError, never a silent truncation.
+//   - If the server reports a final `size`, a chunked upload verifies it and
+//     reports a mismatch as an incomplete upload.
+//   - `Config.RefreshToken` is called before every chunk after the first so a
+//     long upload survives proxy-token expiry.
 func (c *client) WriteStream(ctx context.Context, remotePath string, src io.Reader, chunkSize int) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
+	if chunkSize > UploadChunkSize {
+		chunkSize = UploadChunkSize
+	}
+	if !c.fitsOneRequest(remotePath, int64(chunkSize), -1) {
+		return fmt.Errorf("contents: chunk size %d does not fit in one request", chunkSize)
+	}
 	ctx, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
 
-	buf := make([]byte, chunkSize)
-	chunk := 0
-	for {
-		n, readErr := io.ReadFull(src, buf)
-		if n > 0 {
-			chunk++
-			if err := c.putChunk(ctx, remotePath, buf[:n], chunk); err != nil {
-				if chunk == 1 && chunkRejected(err) {
-					// Only the first chunk has been consumed from src; replay it
-					// followed by the unread remainder in the single-shot PUT.
-					return c.singleShot(ctx, remotePath, buf[:n], src)
-				}
-				return err
+	if size, ok := sourceSize(src); ok {
+		if c.fitsOneRequest(remotePath, size, 1) {
+			data, err := io.ReadAll(io.LimitReader(src, size+1))
+			if err != nil {
+				return fmt.Errorf("contents: read upload data: %w", err)
 			}
+			return c.singleShot(ctx, remotePath, data)
 		}
-		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-			break
+		return c.writeChunks(ctx, remotePath, src, chunkSize, size)
+	}
+
+	// Non-seekable source: buffer up to one request's worth. If EOF arrives
+	// inside the budget it is a small, atomic single-shot upload; otherwise
+	// continue with the streaming path (the buffer becomes the first chunks).
+	budget := c.maxRequestBytes - uploadEnvelopeSize(remotePath, 1)
+	if budget < 1 {
+		budget = 1
+	}
+	prefix, err := io.ReadAll(io.LimitReader(src, int64(budget)+1))
+	if err != nil {
+		return fmt.Errorf("contents: read upload data: %w", err)
+	}
+	if int64(len(prefix)) <= int64(budget) {
+		return c.singleShot(ctx, remotePath, prefix)
+	}
+	return c.writeChunks(ctx, remotePath, io.MultiReader(bytes.NewReader(prefix), src), chunkSize, -1)
+}
+
+func (c *client) singleShot(ctx context.Context, remotePath string, data []byte) error {
+	return c.putChunk(ctx, remotePath, data, 1)
+}
+
+// writeChunks streams src in chunkSize-sized PUTs. The last data chunk carries
+// chunk:-1; "size" is the known content length or -1 when unknown.
+func (c *client) writeChunks(ctx context.Context, remotePath string, src io.Reader, chunkSize int, size int64) error {
+	buf := make([]byte, chunkSize)
+	read := func() ([]byte, error) {
+		n, err := io.ReadFull(src, buf)
+		if n == 0 {
+			return nil, err
 		}
-		if readErr != nil {
+		return append([]byte(nil), buf[:n]...), err
+	}
+	isEOF := func(err error) bool {
+		return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	}
+	hardError := func(err error) bool { return err != nil && !isEOF(err) }
+
+	current, readErr := read()
+	if len(current) == 0 {
+		if hardError(readErr) {
 			return fmt.Errorf("contents: read upload data: %w", readErr)
 		}
+		// Empty file: one atomic chunk:1 PUT (never a lone chunk:-1).
+		return c.singleShot(ctx, remotePath, nil)
 	}
-	// Jupyter requires the content key on every chunk, including the last;
-	// an empty string appends nothing when finalising the upload.
-	return c.putChunk(ctx, remotePath, nil, -1)
+	if hardError(readErr) {
+		return fmt.Errorf("contents: read upload data: %w", readErr)
+	}
+
+	// One-chunk lookahead: `current` is final exactly when the next read
+	// produced no data. This marks the last DATA chunk -1 (no empty tail) and
+	// also handles exact multiples of chunkSize correctly.
+	next, nextErr := []byte(nil), error(nil)
+	if !isEOF(readErr) {
+		next, nextErr = read()
+	}
+	sent := 0
+	for {
+		readFailed := hardError(nextErr)
+		// A hard read error means we cannot know whether more data followed,
+		// so never finalise on it: send what we have and report it incomplete.
+		final := len(next) == 0 && !readFailed
+		if sent > 0 {
+			if err := c.refreshTokenForChunk(ctx); err != nil {
+				return c.incomplete(remotePath, sent, "token refresh", err)
+			}
+		}
+		marker := sent + 1
+		if final {
+			marker = -1
+		}
+		if err := c.putChunk(ctx, remotePath, current, marker); err != nil {
+			return c.chunkFailure(remotePath, sent, err)
+		}
+		sent++
+		if final {
+			break
+		}
+		if readFailed {
+			return c.incomplete(remotePath, sent, "read upload data", nextErr)
+		}
+		current = next
+		if isEOF(nextErr) {
+			next, nextErr = nil, io.EOF // final data chunk; no further lookahead
+		} else {
+			next, nextErr = read()
+		}
+	}
+	if err := c.verifyRemoteSize(ctx, remotePath, size, sent); err != nil {
+		return err
+	}
+	return nil
 }
 
-func (c *client) singleShot(ctx context.Context, remotePath string, first []byte, rest io.Reader) error {
-	// This path is only taken by servers that reject chunking. We cannot rewind
-	// an arbitrary io.Reader, so this exceptional retry buffers the remainder
-	// in memory; the normal streaming path never does.
-	var all bytes.Buffer
-	all.Grow(len(first))
-	all.Write(first)
-	if _, err := io.Copy(&all, rest); err != nil {
-		return fmt.Errorf("contents: buffer fallback upload: %w", err)
+func (c *client) refreshTokenForChunk(ctx context.Context) error {
+	if c.refreshToken == nil {
+		return nil
 	}
-	return c.putChunk(ctx, remotePath, all.Bytes(), 1)
+	info, err := c.refreshToken(ctx)
+	if err != nil {
+		return err
+	}
+	if info.Token.Reveal() != "" {
+		c.token = info.Token
+	}
+	if base := strings.TrimSpace(info.BaseURL); base != "" {
+		c.base = strings.TrimRight(base, "/")
+	}
+	return nil
 }
 
-func chunkRejected(err error) bool {
+// chunkFailure keeps the original error only when the very first chunk was
+// explicitly refused (nothing can have been written). Every other failure is
+// reported as a typed incomplete upload.
+func (c *client) chunkFailure(remotePath string, sent int, err error) error {
 	var se *StatusError
-	if !errors.As(err, &se) {
+	rejected := errors.Is(err, ErrNotFound) ||
+		(errors.As(err, &se) && se.Status >= 400 && se.Status < 500)
+	if sent == 0 && rejected {
+		return err
+	}
+	return c.incomplete(remotePath, sent, "chunk", err)
+}
+
+func (c *client) incomplete(remotePath string, sent int, op string, err error) error {
+	return &IncompleteUploadError{
+		RemotePath: remotePath,
+		ChunksSent: sent,
+		Detail:     op + ": " + describeUploadError(err),
+	}
+}
+
+// verifyRemoteSize compares the server-reported model size with the local
+// length when — and only when — the server actually reports one. Caveat (also
+// noted in upstream PR #272): Jupyter reports os.lstat sizes, so an upload
+// through a symlinked remote destination can look short. We prefer a loud
+// incomplete-upload error over silent truncation; a live GET/SHA-256 probe
+// (AUDIT-02 §2 item 4) remains HUMAN REQUIRED before declaring D-4 proven.
+func (c *client) verifyRemoteSize(ctx context.Context, remotePath string, size int64, sent int) error {
+	if size < 0 {
+		return nil
+	}
+	m, err := c.getModel(ctx, remotePath, false)
+	if err != nil || m.Size == nil || *m.Size == size {
+		return nil // no size reported: cannot verify; the live probe is HUMAN REQUIRED
+	}
+	return &IncompleteUploadError{
+		RemotePath: remotePath,
+		ChunksSent: sent,
+		Detail:     fmt.Sprintf("remote size %d does not match local size %d", *m.Size, size),
+	}
+}
+
+// sourceSize reports the remaining length of a seekable reader without moving
+// its read offset.
+func sourceSize(src io.Reader) (int64, bool) {
+	s, ok := src.(io.Seeker)
+	if !ok {
+		return 0, false
+	}
+	cur, err := s.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, false
+	}
+	end, err := s.Seek(0, io.SeekEnd)
+	if err != nil {
+		_, _ = s.Seek(cur, io.SeekStart)
+		return 0, false
+	}
+	if _, err := s.Seek(cur, io.SeekStart); err != nil {
+		return 0, false
+	}
+	return end - cur, true
+}
+
+// uploadEnvelopeSize is the exact JSON body size of an empty upload payload
+// for the given remote path and chunk marker.
+func uploadEnvelopeSize(remotePath string, chunk int) int {
+	clean := strings.Trim(remotePath, "/")
+	body, err := json.Marshal(struct {
+		Name    string `json:"name"`
+		Path    string `json:"path"`
+		Type    string `json:"type"`
+		Format  string `json:"format"`
+		Content string `json:"content"`
+		Chunk   int    `json:"chunk"`
+	}{Name: path.Base(clean), Path: clean, Type: "file", Format: "base64", Content: "", Chunk: chunk})
+	if err != nil {
+		return 0
+	}
+	return len(body)
+}
+
+// fitsOneRequest mirrors upstream's fits_in_one_request: base64 expands data
+// to 4*ceil(n/3) bytes inside the JSON envelope.
+func (c *client) fitsOneRequest(remotePath string, size int64, chunk int) bool {
+	if c.maxRequestBytes <= 0 {
+		return true
+	}
+	if size < 0 {
 		return false
 	}
-	return (se.Status >= 400 && se.Status < 500) || se.Status == http.StatusNotImplemented
+	encoded := 4 * ((size + 2) / 3)
+	return int64(uploadEnvelopeSize(remotePath, chunk))+encoded <= int64(c.maxRequestBytes)
 }
 
 func (c *client) putChunk(ctx context.Context, remotePath string, data []byte, chunk int) error {
@@ -303,7 +599,8 @@ func (c *client) send(ctx context.Context, op, method, remotePath string, extra 
 		return nil, &TransportError{Op: op, Err: err}
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Colab-Client-Agent", c.agent)
+	// AUDIT-02 F-1/S-1: upstream sends NO client-agent header here; the token
+	// is query-only. Do not reintroduce one without a live GET probe.
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -348,11 +645,19 @@ type Model struct {
 	Writable     *bool      `json:"writable,omitempty"`
 	Created      *time.Time `json:"created,omitempty"`
 	LastModified *time.Time `json:"last_modified,omitempty"`
+	// Size is the server-reported byte size (Jupyter reports os.lstat sizes).
+	Size *int64 `json:"size,omitempty"`
 
 	Content []byte          `json:"-"`
 	Entries []Model         `json:"-"`
 	Raw     json.RawMessage `json:"-"`
+
+	contentPresent bool
 }
+
+// ContentPresent reports whether the server actually supplied a content field.
+// A file model with no content must not be written as an empty local file.
+func (m Model) ContentPresent() bool { return m.contentPresent }
 
 // UnmarshalJSON decodes a Jupyter contents model, including the polymorphic
 // content field (string for files, array of models for directories, and a JSON
@@ -393,11 +698,12 @@ func (m Model) MarshalJSON() ([]byte, error) {
 		Writable     *bool      `json:"writable,omitempty"`
 		Created      *time.Time `json:"created,omitempty"`
 		LastModified *time.Time `json:"last_modified,omitempty"`
+		Size         *int64     `json:"size,omitempty"`
 		Content      any        `json:"content,omitempty"`
 	}{
 		Name: m.Name, Path: m.Path, Type: m.Type, Format: m.Format,
 		MimeType: m.MimeType, Writable: m.Writable, Created: m.Created,
-		LastModified: m.LastModified, Content: content,
+		LastModified: m.LastModified, Size: m.Size, Content: content,
 	})
 }
 
@@ -445,6 +751,8 @@ func decodeModel(dec *json.Decoder, dst io.Writer) (*Model, error) {
 			err = decodeTime(dec, &m.Created)
 		case "last_modified":
 			err = decodeTime(dec, &m.LastModified)
+		case "size":
+			err = dec.Decode(&m.Size)
 		case "content":
 			err = dec.Decode(&rawContent)
 		default:
@@ -485,6 +793,7 @@ func (m *Model) applyContent(raw json.RawMessage, dst io.Writer) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return nil
 	}
+	m.contentPresent = true
 	switch raw[0] {
 	case '[':
 		entries := make([]Model, 0)

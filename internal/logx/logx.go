@@ -75,15 +75,31 @@ func redactAttr(groups []string, a slog.Attr) slog.Attr {
 	if a.Value.Kind() == slog.KindString {
 		a.Value = slog.StringValue(Redact(a.Value.String()))
 	}
-	switch strings.ToLower(a.Key) {
-	case "authorization", "cookie", "set-cookie", "x-colab-runtime-proxy-token",
-		"x-goog-colab-token", "token", "refresh_token", "client_secret", "code",
-		"verifier", "password":
+	if isSensitiveKey(a.Key) {
 		if a.Value.Kind() != slog.KindAny || !isSecret(a.Value.Any()) {
 			a.Value = slog.StringValue("REDACTED")
 		}
 	}
 	return a
+}
+
+// isSensitiveKey matches credential-bearing slog keys. The key is normalised
+// (lower-cased with separators removed) so snake_case, kebab-case, camelCase and
+// SCREAMING_SNAKE spellings of the same field are all covered — callers do not
+// have to agree on a naming convention to stay safe.
+func isSensitiveKey(key string) bool {
+	k := strings.ToLower(key)
+	k = strings.NewReplacer("_", "", "-", "", ".", "").Replace(k)
+	switch k {
+	case "authorization", "proxyauthorization", "cookie", "setcookie",
+		"xcolabruntimeproxytoken",
+		"xgoogcolabtoken", "xcolabtoken", "xcolabsshtoken",
+		"token", "accesstoken", "refreshtoken", "idtoken", "sessiontoken",
+		"clientsecret", "secret", "code", "authcode", "verifier",
+		"codeverifier", "password", "passwd", "assertion":
+		return true
+	}
+	return false
 }
 
 func isSecret(v any) bool {
@@ -106,9 +122,12 @@ func Logger() *slog.Logger {
 
 var freeFormPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}=*`),
-	regexp.MustCompile(`(?i)("(?:token|access_token|refresh_token|client_secret|code|code_verifier)"\s*:\s*)"[^"]{2,}"`),
-	regexp.MustCompile(`(?i)([?&](?:colab-runtime-proxy-token|token|access_token|code|auth_code|verifier|code_verifier)=)[^&\s"'#]+`),
-	regexp.MustCompile(`(?i)(\b(?:x-colab-runtime-proxy-token|x-goog-colab-token|authorization|cookie)\b[ \t]*:[ \t]*)[^\r\n]+`),
+	// JSON field forms. [_-]? absorbs snake_case, kebab-case and camelCase;
+	// (?i) covers SCREAMING_SNAKE and any other capitalisation.
+	regexp.MustCompile(`(?i)("(?:id[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|code[_-]?verifier|password|passwd|secret|assertion|token|code)"\s*:\s*)"[^"]{2,}"`),
+	// Query-string forms (proxy tokens, OAuth codes, password/secret fields).
+	regexp.MustCompile(`(?i)([?&](?:colab[_-]runtime[_-]proxy[_-]token|id[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|auth[_-]?code|code[_-]?verifier|password|passwd|secret|assertion|token|code|verifier)=)[^&\s"'#]+`),
+	regexp.MustCompile(`(?i)(\b(?:x-colab-runtime-proxy-token|x-goog-colab-token|x-colab-token|authorization|proxy-authorization|cookie|set-cookie)\b[ \t]*:[ \t]*)[^\r\n]+`),
 }
 
 // Redact is a defensive pass over free-form bodies before they are logged.

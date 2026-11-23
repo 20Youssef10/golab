@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/20Youssef10/golab/internal/logx"
 )
 
 // ErrNoSSHKey means no usable key was found in the documented search order.
@@ -30,7 +32,7 @@ func (e *HandshakeError) Error() string {
 		return "<nil>"
 	}
 	if e.Message != "" {
-		return e.Message
+		return logx.Redact(e.Message)
 	}
 	return fmt.Sprintf("WebSocket upgrade failed (HTTP %d)", e.Status)
 }
@@ -69,6 +71,10 @@ func ExplainHandshakeFailure(status int, body []byte) string {
 	if len(snippet) > 200 {
 		snippet = snippet[:200]
 	}
+	// The response body is untrusted and may echo credentials. Redact here as
+	// well as at the call site so direct callers of this exported helper are
+	// safe by default (AUDIT-02 S-6).
+	snippet = logx.Redact(snippet)
 	switch status {
 	case 400:
 		switch {
@@ -119,6 +125,16 @@ func ExplainHandshakeFailure(status int, body []byte) string {
 	default:
 		return fmt.Sprintf("WebSocket upgrade rejected (HTTP %d): %s", status, snippet)
 	}
+}
+
+// redactHandshake removes field-named credentials and the known proxy token
+// verbatim. A server can echo the raw token without any key prefix; only the
+// dialling call site knows the token, so it supplies it here.
+func redactHandshake(s, token string) string {
+	if token != "" {
+		s = strings.ReplaceAll(s, token, "REDACTED")
+	}
+	return logx.Redact(s)
 }
 
 // KeyError is a user-facing key discovery/derivation failure.

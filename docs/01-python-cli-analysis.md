@@ -4,6 +4,17 @@
 > **Method:** full clone and read of `src/`, `docs/`, `AGENTS.md`, `CHANGELOG.md`, `cloudbuild.yaml`, `uv.lock`; plus the Colab fork of `jupyter-kernel-client` it depends on (commit `f18e982`) and PyPI release `0.9.0`.
 > **Rule used throughout:** where documentation and code disagree, **code wins**. Disagreements are listed in §9.
 
+> **Implementation status — 2026-11-23 (v0.1.0).** All eleven Python defects
+> D-1…D-11 in §10 are fixed in golab (atomic state, validated session names,
+> JSON/`repr`-quoted VM payloads, explicit HTTP timeouts, typed redaction with
+> logging off by default, exact host matching, Windows ACLs, signed updates, a
+> 5 s keyring probe with file fallback, and a safe `edit` that aborts on
+> non-404 errors). No regressions found at v0.1.0; see
+> [AUDIT-INDEX.md](AUDIT-INDEX.md) §1. The analysis target has moved: upstream
+> HEAD is now `0abf82d` (**v0.8.0 + 5 commits**), not the v0.8.0+2 snapshot
+> named above — see [AUDIT-00-live-upstream.md](AUDIT-00-live-upstream.md) and
+> [COMPAT.md](COMPAT.md).
+
 ---
 
 ## 1. What it is

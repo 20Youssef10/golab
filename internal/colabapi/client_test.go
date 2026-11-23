@@ -52,6 +52,15 @@ func fixedHash(t *testing.T) colabapi.NotebookHash {
 	return h
 }
 
+// Ports docs/public_api_migration_plan.md §5's runtimeId derivation rule.
+func TestNotebookHashRuntimeID(t *testing.T) {
+	h := colabapi.NewNotebookHash(uuid.MustParse("12345678-1234-5678-1234-567812345678"))
+	require.Equal(t, "r-12345678-1234-5678-1234-567812345678", h.RuntimeID())
+	require.Equal(t, h.RuntimeID(), h.RuntimeID(), "must be deterministic for reconciliation")
+	// A malformed hash still yields a syntactically valid runtime id.
+	require.Regexp(t, `^r-[a-z0-9-]+$`, colabapi.NotebookHash("garbage").RuntimeID())
+}
+
 // Ports docs/02 §2.1 (uuid_to_web_safe_base64).
 func TestNotebookHashEncoding(t *testing.T) {
 	h := colabapi.NewNotebookHash(uuid.MustParse("12345678-1234-5678-1234-567812345678"))

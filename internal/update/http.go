@@ -50,11 +50,11 @@ func httpClient(cfg Config) *http.Client {
 func getBytes(ctx context.Context, client *http.Client, requestURL string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build update request: %w", err)
+		return nil, redactErr(fmt.Errorf("build update request: %w", err))
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("update request failed: %w", err)
+		return nil, redactErr(fmt.Errorf("update request failed: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

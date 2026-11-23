@@ -23,7 +23,7 @@ func newSSHClientConfig(signers []ssh.Signer) *ssh.ClientConfig {
 		// #nosec G106 -- ephemeral VM host keys; documented in ADR-005.
 		//nolint:gosec // Colab runtime host keys are regenerated per runtime.
 		HostKeyCallback: func(string, net.Addr, ssh.PublicKey) error { return nil },
-		ClientVersion:   "SSH-2.0-colab-go",
+		ClientVersion:   "SSH-2.0-golab",
 		Timeout:         15 * time.Second,
 	}
 }

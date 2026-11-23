@@ -43,7 +43,7 @@ func rawObject(v any) json.RawMessage {
 func newMessage(msgType, channel, sessionID string, parent MessageHeader, content any) *Message {
 	return &Message{
 		Header: MessageHeader{
-			MsgID: uuid.NewString(), MsgType: msgType, Username: "colab-go",
+			MsgID: uuid.NewString(), MsgType: msgType, Username: "golab",
 			Session: sessionID, Date: time.Now().UTC().Format(time.RFC3339Nano),
 			Version: "5.3",
 		},

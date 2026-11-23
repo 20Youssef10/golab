@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -246,20 +247,102 @@ func waitForEnter(ctx context.Context, d *app.Deps) {
 	fmt.Fprintln(d.Stderr)
 }
 
+// cleanDetail strips ANSI/CSI/OSC escapes and control characters from an
+// untrusted server string, collapses whitespace and caps the result. Only the
+// returned text may reach the terminal or the history log.
+func cleanDetail(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == 0x1b: // ESC: CSI, OSC or a two-byte escape.
+			i++
+			if i < len(s) && s[i] == '[' { // CSI: skip params, stop at 0x40..0x7e.
+				i++
+				for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
+					i++
+				}
+				if i < len(s) {
+					i++
+				}
+				continue
+			}
+			for i < len(s) && s[i] != 0x07 { // OSC: BEL or ESC \ terminates.
+				if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
+					i += 2
+					break
+				}
+				i++
+			}
+			if i < len(s) && s[i] == 0x07 {
+				i++
+			}
+		case c < 0x20 || c == 0x7f:
+			// Keep word boundaries for whitespace controls; drop the rest.
+			if c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' {
+				b.WriteByte(' ')
+			}
+			i++
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	d := strings.Join(strings.Fields(b.String()), " ")
+	runes := []rune(d)
+	if len(runes) > 300 {
+		d = string(runes[:300])
+	}
+	return d
+}
+
+// propagationDetail mirrors upstream's _parse_propagation_response followed by
+// its whitelist of error/message fields. It accepts the "<prefix>\n{json}"
+// bodies Colab returns, never raises, and never returns raw HTML or unknown
+// fields (which may carry tokens).
+func propagationDetail(body string) string {
+	const maxBody = 64 << 10
+	if len(body) > maxBody {
+		body = body[:maxBody]
+	}
+	candidates := []string{body}
+	if i := strings.IndexByte(body, '\n'); i >= 0 {
+		candidates = append(candidates, body[i+1:])
+	}
+	if i := strings.LastIndexByte(body, '\n'); i >= 0 {
+		candidates = append(candidates, body[i+1:])
+	}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate[0] != '{' {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(candidate), &obj); err != nil || obj == nil {
+			continue
+		}
+		for _, key := range []string{"error", "message"} {
+			if s, ok := obj[key].(string); ok {
+				if d := cleanDetail(s); d != "" {
+					return d
+				}
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
 // driveFailureMessage is the actionable message from upstream's
 // drive_propagation_failure_message. The raw response body (often HTML) is
-// never echoed; only an already-redacted detail string is included.
+// never echoed; only a sanitised detail string is included.
 func driveFailureMessage(status int, detail string) string {
 	headline := "[colab] Drive credentials could not be propagated"
 	if status != 0 && status != 200 {
 		headline += fmt.Sprintf(" (HTTP %d)", status)
 	}
 	lines := []string{headline + "."}
-	if d := strings.TrimSpace(detail); d != "" {
-		runes := []rune(d)
-		if len(runes) > 300 {
-			d = string(runes[:300])
-		}
+	if d := cleanDetail(detail); d != "" {
 		lines = append(lines, "[colab] Server said: "+d)
 	}
 	return strings.Join(append(lines,
@@ -282,9 +365,15 @@ func reportDriveFailure(d *app.Deps, name string, err error) {
 	status, detail := 0, ""
 	var se *colabapi.StatusError
 	if errors.As(err, &se) {
-		status, detail = se.Code, se.Body
+		status = se.Code
+		// Never echo StatusError.Body: it is untrusted and often raw HTML.
+		detail = propagationDetail(se.Body)
+		if detail == "" {
+			// Fall back to the status code's reason, not the body.
+			detail = logx.Redact(http.StatusText(se.Code))
+		}
 	} else if err != nil {
-		detail = logx.Redact(err.Error())
+		detail = cleanDetail(logx.Redact(err.Error()))
 	}
 	fmt.Fprintln(d.Stderr, driveFailureMessage(status, detail))
 	writeEvent(d, name, "drive_auth_failed", map[string]any{

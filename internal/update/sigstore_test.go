@@ -3,8 +3,10 @@ package update
 // Ports the security checks required by docs/08 §3 ("checksum and cosign
 // identity verification") and ADR-014 to sigstore-go's real keyless verifier.
 // Every bundle below is produced by sigstore-go's virtual Sigstore: a Fulcio
-// CA chain, an embedded SCT, a Rekor entry with an inclusion proof and SET and
-// an RFC3161 timestamp. No test contacts TUF, Rekor, Fulcio or GitHub.
+// CA chain, a Rekor entry with an inclusion proof and SET and an RFC3161
+// timestamp. Its test CA cannot emit SCTs, so fakeConfig opts out of that one
+// check; production still requires and verifies an SCT. No test contacts TUF,
+// Rekor, Fulcio or GitHub.
 
 import (
 	"context"

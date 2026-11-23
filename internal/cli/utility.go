@@ -2,12 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -213,7 +217,7 @@ func helpCommand() *cobra.Command {
 			}
 			target, _, err := root.Find(args)
 			if err != nil || target == nil || target.Name() != args[0] {
-				return exitf(2, "[colab] No such command '%s'.", args[0])
+				return exitf(2, "No such command '%s'.", args[0])
 			}
 			fmt.Fprint(d.Stdout, target.UsageString())
 			return nil
@@ -256,10 +260,60 @@ func registerUtilityCommands(root *cobra.Command) {
 	root.AddCommand(versionCommand())
 }
 
-// openBrowser is deliberately a no-op when no suitable launcher exists; the
-// URL is always printed so piping remains useful (docs/05).
-func openBrowser(target string) {
-	_ = target
-	// platform.OpenBrowser is intentionally not assumed; the URL on stdout is
-	// the contract. A future integration can wire a launcher here.
+// launchBrowserFunc is a package variable so tests can stub it and assert that
+// `url --open` launches exactly the URL it printed (and that the default does
+// not). Production uses launchSystemBrowser.
+var launchBrowserFunc = launchSystemBrowser
+
+// browserLaunchCommand selects a launcher for the current host. lookPath and
+// isWSL are parameters so the choice is testable without touching the real
+// filesystem. Termux and WSL get their native launchers when available.
+func browserLaunchCommand(target, goos string, isWSL bool, lookPath func(string) (string, error)) (string, []string) {
+	if goos == "windows" {
+		return "rundll32", []string{"url.dll,FileProtocolHandler", target}
+	}
+	if _, err := lookPath("termux-open-url"); err == nil {
+		return "termux-open-url", []string{target}
+	}
+	if goos == "darwin" {
+		return "open", []string{target}
+	}
+	if goos == "linux" && isWSL {
+		if _, err := lookPath("wslview"); err == nil {
+			return "wslview", []string{target}
+		}
+	}
+	return "xdg-open", []string{target}
 }
+
+// detectWSL is a cheap, read-only probe; no environment-variable workarounds
+// are introduced (AGENTS.md platform rules).
+func detectWSL() bool {
+	if goruntime.GOOS != "linux" {
+		return false
+	}
+	b, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	v := strings.ToLower(string(b))
+	return strings.Contains(v, "microsoft") || strings.Contains(v, "wsl")
+}
+
+// launchSystemBrowser makes a best-effort, bounded attempt to open the URL.
+// Start() does not block the command, and with no Stdout/Stderr wired the
+// launcher's output goes to os.DevNull — piped stdout stays byte-exact. On a
+// headless host the caller has already printed the URL, so a false return is
+// harmless; no URL (which may carry a token) is ever put in an error message.
+func launchSystemBrowser(target string) bool {
+	name, args := browserLaunchCommand(target, goruntime.GOOS, detectWSL(), exec.LookPath)
+	if _, err := exec.LookPath(name); err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- fixed launcher, URL is an argument
+	return cmd.Start() == nil
+}
+
+func openBrowser(target string) bool { return launchBrowserFunc(target) }

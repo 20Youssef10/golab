@@ -9,8 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os/exec"
-	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,27 +30,10 @@ var bundledReadme string
 var bundledSkill string
 
 // openURL makes a best-effort attempt to launch the system browser. The URL is
-// always printed by the caller first, so a headless host stays usable. We use a
-// tiny launcher instead of github.com/pkg/browser: go.mod is owned by another
-// work package and importing an undeclared module would break the build.
-func openURL(target string) bool {
-	var name string
-	var args []string
-	switch goruntime.GOOS {
-	case "windows":
-		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", target}
-	case "darwin":
-		name, args = "open", []string{target}
-	default:
-		name, args = "xdg-open", []string{target}
-	}
-	if _, err := exec.LookPath(name); err != nil {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return exec.CommandContext(ctx, name, args...).Start() == nil // #nosec G204 -- target is a fixed Colab URL
-}
+// always printed by the caller first, so a headless host stays usable. It
+// delegates to the shared launcher in utility.go so Termux/WSL detection and
+// stubbing behave identically for `pay`, `url --open` and Drive consent URLs.
+func openURL(target string) bool { return openBrowser(target) }
 
 func payCommand() *cobra.Command {
 	return &cobra.Command{

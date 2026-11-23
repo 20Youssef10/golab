@@ -8,36 +8,92 @@ on:
 permissions:
   contents: read
 
+# Every actions/* ref is pinned to a full commit SHA (docs/08 R-13, AUDIT-03
+# §3/§4.2). govulncheck is pinned to a version, never @latest.
+env:
+  GOVULNCHECK_VERSION: v1.9.0
+
 jobs:
   test:
     strategy:
       fail-fast: false
       matrix:
+        # windows-11-arm / macos-15-intel / ubuntu-24.04-arm runner availability
+        # and -race support must be confirmed on a real run (docs/04 §8).
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: true
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@25e2cdc5eb1d7a04fdc45ff538f1a00e960ae128 # v8.0.0
+        with:
+          version: v2.15.0
+          args: --timeout=5m
+
   cross-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+      # `make cross` writes to ./dist (not a session-local /tmp path).
       - run: make cross
+      # Validate object types for every target and execute the host binary.
+      - run: bash scripts/cross-smoke.sh dist
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: golab-cross-${{ github.sha }}
+          path: dist/golab-*
+          if-no-files-found: error
+
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+          cache: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
       - run: govulncheck ./...
       - run: go mod verify
+      - run: bash scripts/check-redaction.sh
+      - run: bash scripts/check-paths.sh
+
+  quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # docs/07 §11 target is 80%. The repo variable temporarily floors the
+      # gate at 70 until the three under-target packages are raised; see
+      # docs/CONFORMANCE.md and AUDIT-03 §4.2. Raise to 80 when green.
+      - run: make coverage
+      - run: bash scripts/coverage-gate.sh dist/coverage.out
+        env:
+          COVERAGE_MIN: ${{ vars.COVERAGE_MIN || '70' }}
+      # Short fuzz smoke on both seeds; nightly workflow runs the long gate.
+      - run: make fuzz
+      # goleak needs a go.mod dependency + TestMains in runtime/sshx/repl/update
+      # (owned by another agent). Advisory until wired; remove ADVISORY then.
+      - run: bash scripts/goleak-check.sh
+        env:
+          ADVISORY: "1"

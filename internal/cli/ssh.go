@@ -4,14 +4,59 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/logx"
+	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/sshx"
 	"github.com/20Youssef10/golab/internal/state"
 )
+
+// staleSSHDKillCode is upstream cda02bc's --force payload, byte-for-byte. It
+// is a constant: no user input is ever spliced into code executed on the VM.
+const staleSSHDKillCode = "import os; os.system('pkill -P $(pgrep -o -x sshd)')"
+
+// Upstream execute_code(timeout=10.0) bounds the kill; the kernel is always
+// closed afterwards (rt.stop() in the finally block).
+const staleSSHDKillTimeout = 10 * time.Second
+
+// killStaleSSHdFn and attachSSHForceKernel are package variables so CLI-level
+// tests can inject a recorder/spy (upstream patches ssh_module._killStaleSshd).
+var killStaleSSHdFn = killStaleSSHd
+
+var attachSSHForceKernel = func(ctx context.Context, d *app.Deps, s *state.Session) (runtime.Kernel, error) {
+	return d.RuntimeFor(ctx, s)
+}
+
+// killStaleSSHd kills stale per-connection sshd children on the runtime before
+// connecting. Failures are tolerated (the connection may still succeed) and
+// reported on stderr; the piped stdout byte stream is never touched.
+func killStaleSSHd(ctx context.Context, d *app.Deps, s state.Session) {
+	fmt.Fprintln(d.Stderr, "[colab] --force: killing stale SSH sessions...")
+	kctx, cancel := context.WithTimeout(ctx, staleSSHDKillTimeout)
+	defer cancel()
+	kernel, err := attachSSHForceKernel(kctx, d, &s)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "[colab] --force: failed to kill sshd: %s\n", logx.Redact(err.Error()))
+		return
+	}
+	defer func() { _ = kernel.Close() }()
+	if _, err := kernel.Execute(kctx, staleSSHDKillCode, runtime.ExecOptions{
+		IdleTimeout: staleSSHDKillTimeout,
+	}); err != nil {
+		fmt.Fprintf(d.Stderr, "[colab] --force: failed to kill sshd: %s\n", logx.Redact(err.Error()))
+	}
+}
+
+// forceKillApplies mirrors upstream's branches (ssh.py:842-866): every SSH path
+// honours --force except the hidden `proxy_mode + cmd-mode` bridge re-invocation,
+// which never forwards the flag.
+func forceKillApplies(force, proxyMode bool, mode sshx.Mode) bool {
+	return force && (!proxyMode || mode != sshx.ModeCmd)
+}
 
 // sshTarget is the resolved session plus whether this command created it.
 // `created` gates --rm (interactive --rm only removes a runtime we allocated).
@@ -143,7 +188,7 @@ func mapSSHRunError(err error) error {
 
 func sshCommand() *cobra.Command {
 	var name, identity, gpu, tpu, internalMode string
-	var proxyMode, highMem, rm bool
+	var proxyMode, highMem, rm, force bool
 	cmd := &cobra.Command{
 		Use:   "ssh [-- CMD...]",
 		Short: "Connect to a Colab runtime via SSH",
@@ -156,9 +201,22 @@ func sshCommand() *cobra.Command {
 				return usagef("[colab] --proxy-mode takes no command.")
 			}
 			mode := selectSSHMode(proxyMode, internalMode, args)
+			if explainRequested(cmd) {
+				creates := name == "" && len(args) == 0 && mode != sshx.ModeCmd
+				fmt.Fprintln(d.Stdout, ExplainPlan(cmd, PlanFields{
+					Operation: "ssh", Session: name, Cleanup: "none",
+					CreatesSession: creates, Billable: creates,
+				}))
+				return nil
+			}
 			target, err := resolveSSHTarget(cmd.Context(), d, name, gpu, tpu, highMem, mode, args)
 			if err != nil {
 				return err
+			}
+			// Upstream kills stale sshd children via the kernel BEFORE dialling
+			// the WebSocket. Diagnostics go to stderr, never to the piped stream.
+			if forceKillApplies(force, proxyMode, mode) {
+				killStaleSSHdFn(cmd.Context(), d, target.session)
 			}
 
 			// --rm is honoured for proxy bridges and auto-created runtimes, but
@@ -212,6 +270,8 @@ func sshCommand() *cobra.Command {
 	cmd.Flags().StringVar(&tpu, "tpu", "", "TPU accelerator for an auto-created runtime")
 	cmd.Flags().BoolVar(&highMem, "high-mem", false, "Request a high-RAM machine shape")
 	cmd.Flags().BoolVar(&rm, "rm", false, "Stop the runtime when the session ends")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"Kill all existing SSH sessions on the runtime before connecting")
 	cmd.Flags().StringVar(&internalMode, "colab-internal-mode", "", "Internal SSH mode")
 	_ = cmd.Flags().MarkHidden("colab-internal-mode")
 	// Options after the first CMD word belong to CMD, not to golab.

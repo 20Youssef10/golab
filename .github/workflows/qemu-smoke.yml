@@ -1,0 +1,50 @@
+name: qemu-smoke
+
+# L6 QEMU user-mode smoke (docs/04 §8, docs/07 §10, AUDIT-03 P2-1).
+# SKELETON: runs `colab version` for each Tier-2 architecture under
+# qemu-user-static. The fake-server end-to-end suite under QEMU is a TODO
+# (needs a test-only endpoint injection wire-in; see ADR-013).
+# Disabled by default: run manually, or set repo variable QEMU_SMOKE_ENABLED=true
+# to allow the optional nightly schedule below.
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "17 4 * * 2"   # enable only after QEMU_SMOKE_ENABLED=true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qemu-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: vars.QEMU_SMOKE_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install qemu-user-static
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user-static
+
+      - name: Build cross binaries
+        run: make cross
+
+      - name: Run `version` under QEMU
+        run: |
+          set -euo pipefail
+          for triple in arm:arm riscv64:riscv64 386:386 arm64:arm64; do
+            qemu_arch="${triple%%:*}"; go_arch="${triple##*:}"
+            bin="dist/golab-linux-${go_arch}"
+            echo "--- linux/${go_arch} via qemu-${qemu_arch}-static ---"
+            "qemu-${qemu_arch}-static" "$bin" version
+          done
+
+      # TODO(human): run the fake-server scenario suite under each QEMU arch
+      # once the CLI supports a test-only host hook under -tags testhooks.

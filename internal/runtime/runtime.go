@@ -11,7 +11,7 @@ import (
 
 const (
 	maxAttempts       = 3
-	defaultAgent      = "colab-go"
+	defaultAgent      = "golab"
 	defaultGraceful   = 2 * time.Second
 	firstRetryBackoff = 2 * time.Second
 )

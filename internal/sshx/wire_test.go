@@ -146,6 +146,28 @@ func TestHandshakeStatusMappingViaServer(t *testing.T) {
 	}
 }
 
+// A failing upgrade that echoes the proxy token in its body must not store it
+// in the typed error's Message or Body (AUDIT-02 S-6 cross-check).
+func TestHandshakeErrorNeverContainsProxyToken(t *testing.T) {
+	const token = "ECHOPROXYCANARY7f3a99"
+	srv := newFakeServer(t, fakesshd.Options{Failure: &fakesshd.Failure{
+		Status: 400, Body: "invalid pubkey " + token,
+	}})
+	identity := writePub(t, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIuser host")
+	r := newRunner(t, Config{
+		ProxyURL: srv.URL(), Token: logx.NewSecret(token), Mode: ModeProxy,
+		Identity: identity, Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{},
+	})
+	_, err := r.Run(context.Background())
+	var he *HandshakeError
+	if !errors.As(err, &he) {
+		t.Fatalf("want *HandshakeError, got %T: %v", err, err)
+	}
+	if strings.Contains(he.Message, token) || strings.Contains(string(he.Body), token) {
+		t.Fatalf("typed handshake error leaked the proxy token: %+v", he)
+	}
+}
+
 func TestBuildWSURL(t *testing.T) {
 	got := BuildWSURL("https://abc.colab.googleusercontent.com", logx.NewSecret("TOK"), ModeCmd, "colab-go/0.0.1-dev")
 	want := "wss://abc.colab.googleusercontent.com/colab/ssh?colab-runtime-proxy-token=TOK&colab-client-agent=colab-go/0.0.1-dev&colab-client-agent=ssh-mode-cmd"

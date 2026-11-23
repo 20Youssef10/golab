@@ -26,6 +26,28 @@ func TestSafeErrorRedactsTokenAndPreservesCause(t *testing.T) {
 	}
 }
 
+// Cross-check (AUDIT-02 S-6): field-named OAuth codes and passwords can appear
+// in HTTP error bodies; safeError must scrub them even when no proxy token is
+// supplied, while keeping the typed cause intact.
+func TestSafeErrorRedactsOAuthAndPasswordFields(t *testing.T) {
+	msg := `request failed: {"id_token":"IDTOKC7f3a","password":"PASSWC7f3a",` +
+		`"code_verifier":"VERIFYC7f3a"} at https://x/cb?code=AUTHCODEC7f3a&state=ok`
+	canaries := []string{"IDTOKC7f3a", "PASSWC7f3a", "VERIFYC7f3a", "AUTHCODEC7f3a"}
+	err := safeError(errors.New(msg), "")
+	for _, c := range canaries {
+		if strings.Contains(err.Error(), c) {
+			t.Errorf("safeError leaked %q: %q", c, err.Error())
+		}
+	}
+	if !strings.Contains(err.Error(), "request failed") {
+		t.Errorf("redaction destroyed the diagnostic: %q", err.Error())
+	}
+	// Typed errors from this package never interpolate remote strings.
+	if got := (&HTTPStatusError{Op: "inspect", Code: 401}).Error(); strings.Contains(got, "TOKEN") {
+		t.Errorf("HTTPStatusError leaked: %q", got)
+	}
+}
+
 func TestTypedErrorSentinels(t *testing.T) {
 	for _, tc := range []struct {
 		err  error

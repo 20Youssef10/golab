@@ -1,0 +1,136 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Keyless cosign needs the OIDC token. The workflow filename is part of the
+# pinned certificate identity in internal/update/verify.go: the SAN regex is
+#   ^https://github.com/<Owner>/<Repo>/.github/workflows/release\.yml@
+# It must therefore stay exactly `.github/workflows/release.yml`.
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      COSIGN_VERSION: v2.6.5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # GoReleaser changelog/tag handling expects an annotated tag (our AGENTS.md
+      # release rule). Fail loudly if a lightweight tag was pushed by mistake.
+      - name: Require annotated tag
+        run: |
+          test "$(git cat-file -t "${GITHUB_REF_NAME}")" = "tag" || {
+            echo "release requires an annotated tag (git tag -a)" >&2; exit 1;
+          }
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      # --- Dry-run validation (no publish) ---------------------------------
+      - name: Validate GoReleaser config
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: '~> v2'
+          args: check
+
+      - name: Dry-run build (snapshot, no publish)
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: '~> v2'
+          args: release --snapshot --clean
+
+      # --- Real release (archives + checksums.txt) --------------------------
+      - name: Release archives and checksums
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Signed artifacts + signed CycloneDX SBOM -------------------------
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@f6c3d0fe42c3cf876e3462574e4c9416b5e0f07a # v0.9.0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/sbom.cdx.json
+
+      - name: Sign archives and attest the SBOM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/golab_*.tar.gz)
+          if (( ${#archives[@]} == 0 )); then
+            echo "no archives built" >&2; exit 1
+          fi
+          for artifact in "${archives[@]}"; do
+            base="$(basename "$artifact")"
+            # Keyless signature bundle -> contains "sigstore", not "sbom":
+            # internal/update/check.go isSignatureAsset() picks this one.
+            cosign sign-blob --yes --bundle "dist/${base}.sigstore.json" "$artifact"
+            # DSSE attestation: subject digest is the *artifact*; predicate is a
+            # CycloneDX SBOM. Name matches `*.sbom.sigstore.json`, which is what
+            # internal/update/check.go isSBOMAsset() requires.
+            cosign attest-blob --yes --type cyclonedx \
+              --predicate dist/sbom.cdx.json \
+              --bundle "dist/${base}.sbom.sigstore.json" "$artifact"
+          done
+          # Upload every bundle to the release GoReleaser just created.
+          gh release upload "$TAG" dist/*.sigstore.json --clobber
+
+      # --- Post-release proof ----------------------------------------------
+      - name: Verify published asset classes and signing identity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
+          for pattern in '^checksums\.txt$' '^golab_.*\.tar\.gz$' \
+                         '^golab_.*\.tar\.gz\.sigstore\.json$' \
+                         '^golab_.*\.sbom\.sigstore\.json$'; do
+            grep -E "$pattern" /tmp/assets.txt >/dev/null || {
+              echo "FAIL: no release asset matches $pattern" >&2; exit 1;
+            }
+          done
+          # Prove the keyless material is valid under the *actual* repo identity.
+          # NOTE: internal/update pins 20Youssef10/golab by default. That is a
+          # different identity; see docs/CONFORMANCE.md (owner action required).
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          shopt -s nullglob
+          archive_bundles=(dist/golab_*.tar.gz.sigstore.json)
+          if (( ${#archive_bundles[@]} == 0 )); then
+            echo "FAIL: no archive signature bundles" >&2; exit 1
+          fi
+          sample="${archive_bundles[0]}"
+          artifact="${sample%.sigstore.json}"
+          cosign verify-blob \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle "$sample" "$artifact"
+          echo "verified keyless signature for $(basename "$artifact")"
+          echo "release assets by class:"; cat /tmp/assets.txt

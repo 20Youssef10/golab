@@ -1,0 +1,18 @@
+# Single-maintainer project: one default owner for everything.
+# Last matching pattern takes precedence; see GitHub CODEOWNERS docs.
+* @20Youssef10
+
+# Protocol packages — wire fidelity and security-sensitive.
+/internal/colabapi/ @20Youssef10
+/internal/runtime/ @20Youssef10
+/internal/contents/ @20Youssef10
+/internal/sshx/ @20Youssef10
+
+# Credentials, state and the signed updater.
+/internal/auth/ @20Youssef10
+/internal/state/ @20Youssef10
+/internal/update/ @20Youssef10
+
+# Docs, release engineering and CI.
+/docs/ @20Youssef10
+/.github/ @20Youssef10

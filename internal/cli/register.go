@@ -15,4 +15,11 @@ func registerCommands(root *cobra.Command) {
 	registerAutomationCommands(root)
 	registerUpdateCommand(root)
 	registerExtraUtilityCommands(root)
+	RegisterLogoutCommands(root)
+	RegisterDoctorCommands(root)
+	RegisterAuditCommands(root)
+	RegisterBudgetCommands(root)
+	RegisterBundleCommands(root)
+	RegisterAgentOutCommands(root)
+	RegisterSyncCommands(root)
 }

@@ -12,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/20Youssef10/golab/internal/app"
+	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/sshx"
+	"github.com/20Youssef10/golab/internal/state"
 	"github.com/20Youssef10/golab/internal/testutil/fakesshd"
 )
 
@@ -260,5 +263,160 @@ func TestSSHUnknownInternalModeNormalizesToProxy(t *testing.T) {
 	// A simple non-network assertion that the CLI's typed-error mapping is used.
 	if !errors.Is(context.Canceled, context.Canceled) {
 		t.Fatal("unreachable")
+	}
+}
+
+// Ports upstream tests/test_ssh.py::test_force_kills_stale_sshd (commit cda02bc).
+// Each SSH path must call the stale-sshd killer exactly once with --force, and
+// never without it. The helper is injected so the assertion is independent of
+// how the fake kernel would answer the pkill snippet.
+func TestSSHForceFlagKillsStaleSSHd(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		argv  []string
+		kills int
+	}{
+		{name: "interactive", argv: []string{"--force"}, kills: 1},
+		{name: "proxy-mode", argv: []string{"--proxy-mode", "--force"}, kills: 1},
+		{name: "cmd", argv: []string{"--force", "--", "true"}, kills: 1},
+		{name: "no-force", argv: []string{}, kills: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			srv := newFakeSSH(t, fakesshd.Options{
+				Output: []byte("OK\n"), ShellHold: time.Millisecond,
+			})
+			key := writeEd25519Key(t)
+			putSSHSession(t, h, "s1", srv.URL(), "proxy-ssh-token")
+
+			orig := killStaleSSHdFn
+			calls := 0
+			killStaleSSHdFn = func(context.Context, *app.Deps, state.Session) { calls++ }
+			defer func() { killStaleSSHdFn = orig }()
+
+			args := append([]string{"ssh", "-s", "s1", "-i", key}, tc.argv...)
+			code := h.run(t, "", args...)
+			if code != 0 {
+				t.Fatalf("exit = %d; stderr=%q", code, h.stderr.String())
+			}
+			if calls != tc.kills {
+				t.Fatalf("stale-sshd kill calls = %d; want %d (stderr=%q)", calls, tc.kills, h.stderr.String())
+			}
+			// Piped output stays byte-exact; all chatter is on stderr.
+			if strings.Contains(h.stdout.String(), "[colab]") {
+				t.Fatalf("chatter leaked to stdout: %q", h.stdout.String())
+			}
+		})
+	}
+}
+
+// forceKillApplies mirrors upstream: the hidden `proxy_mode + cmd-mode`
+// re-invocation is a bridge and never forwards --force (ssh.py:851-854).
+func TestSSHForceSkipsHiddenCmdModeBridge(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		force     bool
+		proxyMode bool
+		mode      sshx.Mode
+		want      bool
+	}{
+		{"interactive", true, false, sshx.ModeInteractive, true},
+		{"proxy", true, true, sshx.ModeProxy, true},
+		{"cmd", true, false, sshx.ModeCmd, true},
+		{"hidden-cmd-bridge", true, true, sshx.ModeCmd, false},
+		{"no-force", false, true, sshx.ModeProxy, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := forceKillApplies(tc.force, tc.proxyMode, tc.mode); got != tc.want {
+				t.Fatalf("forceKillApplies(%v,%v,%q) = %v; want %v", tc.force, tc.proxyMode, tc.mode, got, tc.want)
+			}
+		})
+	}
+}
+
+// spyForceKernel satisfies runtime.Kernel via the embedded interface; only the
+// methods the killer uses are overridden.
+type spyForceKernel struct {
+	runtime.Kernel
+	id     string
+	code   string
+	closes int
+}
+
+func (k *spyForceKernel) ID() string { return k.id }
+func (k *spyForceKernel) Execute(_ context.Context, code string, _ runtime.ExecOptions) (*runtime.Result, error) {
+	k.code = code
+	return &runtime.Result{}, nil
+}
+func (k *spyForceKernel) Close() error { k.closes++; return nil }
+
+// Ports upstream tests/test_ssh.py::test_kill_stale_sshd_body (commit cda02bc):
+// the kernel is addressed by its id, executes the exact pkill snippet and is
+// always closed; the chatter is on stderr with a bounded (10 s) context.
+func TestKillStaleSSHDBody(t *testing.T) {
+	h := newHarness(t)
+	setStreams(h)
+	s := h.putSession(t, "s1")
+	s.KernelID = "k123"
+	if err := h.deps.Store.Put(s); err != nil {
+		t.Fatal(err)
+	}
+	spy := &spyForceKernel{id: "k123"}
+	var attached state.Session
+	var deadline time.Time
+	orig := attachSSHForceKernel
+	attachSSHForceKernel = func(ctx context.Context, _ *app.Deps, target *state.Session) (runtime.Kernel, error) {
+		attached = *target
+		if dl, ok := ctx.Deadline(); ok {
+			deadline = dl
+		}
+		return spy, nil
+	}
+	defer func() { attachSSHForceKernel = orig }()
+
+	killStaleSSHd(context.Background(), h.deps, s)
+
+	if attached.KernelID != "k123" {
+		t.Fatalf("attached kernel id = %q; want k123", attached.KernelID)
+	}
+	if attached.URL != h.kernel.URL() {
+		t.Fatalf("attached URL = %q; want %q", attached.URL, h.kernel.URL())
+	}
+	want := "import os; os.system('pkill -P $(pgrep -o -x sshd)')"
+	if spy.code != want {
+		t.Fatalf("snippet = %q; want %q", spy.code, want)
+	}
+	if spy.closes != 1 {
+		t.Fatalf("kernel closes = %d; want 1", spy.closes)
+	}
+	if deadline.IsZero() || time.Until(deadline) > 10*time.Second || time.Until(deadline) < 5*time.Second {
+		t.Fatalf("kill deadline = %v; want ~10 s from now", deadline)
+	}
+	if !strings.Contains(h.stderr.String(), "[colab] --force: killing stale SSH sessions...") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if strings.Contains(h.stdout.String(), "[colab]") {
+		t.Fatalf("chatter leaked to stdout: %q", h.stdout.String())
+	}
+}
+
+// Ports the failure half of upstream's _killStaleSshd: a failure is tolerated,
+// reported on stderr and the kernel is still closed.
+func TestKillStaleSSHDFailureIsTolerated(t *testing.T) {
+	h := newHarness(t)
+	setStreams(h)
+	s := h.putSession(t, "s1")
+	orig := attachSSHForceKernel
+	attachSSHForceKernel = func(context.Context, *app.Deps, *state.Session) (runtime.Kernel, error) {
+		return nil, errors.New(`attach failed: {"access_token":"SENSITIVE123"}`)
+	}
+	defer func() { attachSSHForceKernel = orig }()
+
+	killStaleSSHd(context.Background(), h.deps, s)
+	if !strings.Contains(h.stderr.String(), "[colab] --force: failed to kill sshd:") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+	if strings.Contains(h.stderr.String(), "SENSITIVE123") {
+		t.Fatalf("error message leaked sensitive text: %q", h.stderr.String())
 	}
 }

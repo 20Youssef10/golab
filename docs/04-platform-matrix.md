@@ -3,6 +3,27 @@
 > **Evidence labels:** ✅ verified in the research sandbox · 📚 reported by independent sources (links in doc 08 §Sources) · ❓ plausible, **must be verified** in Phase 0/4.
 > The sandbox had Go **1.22.2** only and no access to the Go module proxy; real dependencies (x/sys, keyring, term…) can narrow the matrix, so **CI must build the full binary for every target**, not a stub.
 
+> **Implementation status — 2026-11-23 (v0.1.0).**
+> - **Implemented / green in CI:** every Tier-1 target cross-builds with
+>   `CGO_ENABLED=0` (GoReleaser snapshot, 11 cross-builds); `go test -race`
+>   runs on 6 OS runners; embedded SSH, platform path/TTY/signal handling, the
+>   Termux DNS/CA shim in `internal/platform`, the 0600-file keyring fallback,
+>   and a single cross-platform URL launcher (`termux-open-url` / `wslview` /
+>   `xdg-open` / `open` / `rundll32`) with a print-URL fallback are in the tree.
+>   No `GOOS=android` artefact is shipped (ADR-002).
+> - **Not yet proven (human-required):** live CPU e2e on any platform, real
+>   Termux devices (DNS/CA/`faccessat2`), Windows console/ACL/`.old` cleanup,
+>   macOS keychain timing and notarisation, and enablement of the QEMU/Termux
+>   jobs. No Tier-1 per-OS §9 acceptance pass is recorded. See
+>   [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and
+>   [CONFORMANCE.md](CONFORMANCE.md) §1/§6.
+> - **Distribution actually configured:** GitHub Releases (archives + SHA-256
+>   checksums + cosign signatures + signed SBOMs) via `.goreleaser.yaml` and
+>   `.github/workflows/release.yml`, plus
+>   `go install github.com/20Youssef10/golab/cmd/colab@latest`. The remaining §7 channels
+>   (`install.sh`, `install.ps1`, Homebrew, Scoop, winget, nfpm packages, AUR,
+>   Termux TUR, Docker/Nix) are **planned, not configured** at v0.1.0.
+
 ---
 
 ## 1. Target matrix

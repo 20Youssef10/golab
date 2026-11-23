@@ -103,3 +103,56 @@ func TestHandshakeErrorType(t *testing.T) {
 		t.Fatalf("status = %d", e.Status)
 	}
 }
+
+// AUDIT-02 S-6 + cross-check: an upgrade failure body is attacker-influenced
+// and may echo credentials. Redaction must happen inside the explainer and the
+// typed error, not only at the call site.
+func TestExplainHandshakeRedactsSecrets(t *testing.T) {
+	canaries := []struct{ name, key, value string }{
+		{"id_token", "id_token", "IDTOKCANARY7f3a99"},
+		{"password", "password", "PASSWDCANARY7f3a99"},
+		{"code_verifier", "code_verifier", "VERIFYCANARY7f3a99"},
+	}
+	bodies := []struct {
+		name   string
+		status int
+		build  func(k, v string) string
+	}{
+		{"400 json snippet", 400, func(k, v string) string { return `invalid pubkey {"` + k + `":"` + v + `"}` }},
+		{"503 query snippet", 503, func(k, v string) string { return `upstream said https://x/cb?` + k + `=` + v }},
+		{"no-status json", 0, func(k, v string) string { return `dial failed {"` + k + `":"` + v + `"}` }},
+		{"json body", 400, func(k, v string) string { return `{"` + k + `":"` + v + `"}` }},
+		{"query body", 503, func(k, v string) string { return `https://x/cb?` + k + `=` + v }},
+	}
+	for _, b := range bodies {
+		for _, c := range canaries {
+			t.Run(b.name+"/"+c.name, func(t *testing.T) {
+				body := []byte(b.build(c.key, c.value))
+				msg := ExplainHandshakeFailure(b.status, body)
+				if strings.Contains(msg, c.value) {
+					t.Errorf("ExplainHandshakeFailure leaked %s: %q", c.name, msg)
+				}
+				e := &HandshakeError{Status: b.status, Body: body, Message: msg}
+				if strings.Contains(e.Error(), c.value) {
+					t.Errorf("HandshakeError.Error leaked %s: %q", c.name, e.Error())
+				}
+			})
+		}
+	}
+}
+
+// A server may echo the proxy token verbatim with no field name at all. The
+// pure explainer cannot know it, so the call site removes the known token from
+// both the message and the stored body before constructing the typed error.
+func TestRedactHandshakeKnownToken(t *testing.T) {
+	const token = "RAWPROXYCANARY7f3a99"
+	for _, in := range []string{
+		"invalid pubkey " + token,
+		`{"id_token":"` + token + `"}`,
+	} {
+		got := redactHandshake(in, token)
+		if strings.Contains(got, token) {
+			t.Errorf("redactHandshake leaked the proxy token: %q", got)
+		}
+	}
+}

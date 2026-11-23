@@ -12,11 +12,19 @@ import (
 	"github.com/20Youssef10/golab/internal/testutil/fakekernel"
 )
 
+// The old 50 ms request timeout was shorter than a TLS handshake under the
+// race detector on a loaded runner, making unrelated tests flaky. Keep it only
+// for the test that intentionally hangs requests to exercise retry logic.
 func newTestRuntime(t *testing.T, srv *fakekernel.Server) Runtime {
+	t.Helper()
+	return newTestRuntimeWithTimeout(t, srv, 2*time.Second)
+}
+
+func newTestRuntimeWithTimeout(t *testing.T, srv *fakekernel.Server, timeout time.Duration) Runtime {
 	t.Helper()
 	rt, err := New(Config{
 		HTTPClient:     srv.Client(),
-		RequestTimeout: 50 * time.Millisecond,
+		RequestTimeout: timeout,
 		RetryBackoff:   func(int) time.Duration { return 0 },
 	})
 	if err != nil {
@@ -107,7 +115,7 @@ func TestAttachStaleKernelIDAlwaysPersistsEffectiveID(t *testing.T) {
 func TestAttachRetriesOnlyTimeouts(t *testing.T) {
 	srv := fakekernel.New(t)
 	srv.HangFirstREST(2)
-	rt := newTestRuntime(t, srv)
+	rt := newTestRuntimeWithTimeout(t, srv, 250*time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()

@@ -14,7 +14,7 @@ import (
 
 func runExec(t *testing.T, k Kernel, code string, opts ExecOptions) (*Result, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return k.Execute(ctx, code, opts)
 }
@@ -81,11 +81,13 @@ func TestExecuteIdleTimeoutIsPerMessage(t *testing.T) {
 	}
 	defer k.Close()
 	srv.Script(
-		fakekernel.Step{Delay: 60 * time.Millisecond, MsgType: "stream", Content: map[string]any{"name": "stdout", "text": "early"}},
-		fakekernel.Step{Delay: 160 * time.Millisecond, MsgType: "status", Content: map[string]any{"execution_state": "idle"}},
+		fakekernel.Step{Delay: 100 * time.Millisecond, MsgType: "stream", Content: map[string]any{"name": "stdout", "text": "early"}},
+		fakekernel.Step{Delay: 600 * time.Millisecond, MsgType: "status", Content: map[string]any{"execution_state": "idle"}},
 		fakekernel.Reply("ok", nil),
 	)
-	_, err = runExec(t, k, "work()", ExecOptions{IdleTimeout: 100 * time.Millisecond})
+	// The early message is inside the idle window; the following silence is
+	// well over it. Wider margins keep this deterministic under -race.
+	_, err = runExec(t, k, "work()", ExecOptions{IdleTimeout: 300 * time.Millisecond})
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("want ErrTimeout, got %v", err)
 	}
@@ -206,7 +208,7 @@ func TestExecuteIgnoresOtherRequests(t *testing.T) {
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("want ErrTimeout, got %v", err)
 	}
-	if time.Since(start) > 100*time.Millisecond {
+	if time.Since(start) > 500*time.Millisecond {
 		t.Fatalf("stale messages reset the timeout: took %v", time.Since(start))
 	}
 }

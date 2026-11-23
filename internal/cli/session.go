@@ -12,6 +12,7 @@ import (
 
 	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/colabapi"
+	"github.com/20Youssef10/golab/internal/platform"
 	"github.com/20Youssef10/golab/internal/state"
 )
 
@@ -111,7 +112,8 @@ func createSession(ctx context.Context, d *app.Deps, name string, opts runtimeOp
 	}
 	expiry := res.RuntimeProxyInfo.ExpiresAt(nowUTC())
 	s := state.Session{
-		Name: name, Endpoint: res.Endpoint, URL: res.RuntimeProxyInfo.URL,
+		Name: name, Endpoint: res.Endpoint, RuntimeName: res.RuntimeName,
+		URL:   res.RuntimeProxyInfo.URL,
 		Token: res.RuntimeProxyInfo.Token, TokenExpiresAt: &expiry,
 		Variant: string(opts.variant), Accelerator: string(opts.accelerator),
 		MachineShape: opts.shape.String(),
@@ -164,6 +166,18 @@ func newSessionCommand() *cobra.Command {
 			}
 			if highMem && highMemOnly(opts.accelerator) {
 				fmt.Fprintln(d.Stderr, "[colab] --high-mem ignored: this accelerator only offers one machine shape.")
+			}
+			if explainRequested(cmd) {
+				fmt.Fprintln(d.Stdout, ExplainPlan(cmd, PlanFields{
+					Operation: "assign", Method: "POST", API: apiLabel(d),
+					Variant: string(opts.variant), Accelerator: string(opts.accelerator),
+					Shape: opts.shape.String(), Session: name,
+					CreatesSession: true, Billable: true,
+				}))
+				return nil
+			}
+			if err := guardBudget(cmd.Context(), d, cmd); err != nil {
+				return err
 			}
 			fmt.Fprintf(d.Stderr, "[colab] Creating session '%s'...\n", name)
 			if _, err := createSession(cmd.Context(), d, name, opts); err != nil {
@@ -282,7 +296,7 @@ func stopOne(ctx context.Context, d *app.Deps, name string, s state.Session, qui
 	}
 	client, err := d.ColabClient(ctx)
 	if err == nil {
-		err = client.Unassign(ctx, s.Endpoint)
+		err = client.UnassignRuntime(ctx, s.Endpoint, s.RuntimeName)
 	}
 	// Local state is always removed, even when the backend is already gone.
 	_ = d.Store.Delete(name)
@@ -316,6 +330,16 @@ func stopCommand() *cobra.Command {
 					names = append(names, n)
 				}
 				sort.Strings(names)
+				if !assumeYes(cmd) && platform.IsStdinTTY() {
+					fmt.Fprintf(d.Stderr, "[colab] Stop %d session(s)? [y/N] ", len(local))
+					var answer string
+					_, _ = fmt.Fscanln(d.Stdin, &answer)
+					answer = strings.ToLower(strings.TrimSpace(answer))
+					if answer != "y" && answer != "yes" {
+						fmt.Fprintln(d.Stderr, "[colab] Aborted.")
+						return nil
+					}
+				}
 				for _, n := range names {
 					_ = stopOne(cmd.Context(), d, n, local[n], false)
 				}

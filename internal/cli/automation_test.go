@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/20Youssef10/golab/internal/colabapi"
+	"github.com/20Youssef10/golab/internal/history"
 )
 
 // jsonListArg extracts the Python string passed to json.loads(...) from the
@@ -124,12 +127,22 @@ func TestAuthFlow(t *testing.T) {
 	h.putSession(t, "s1")
 	// A stream message precedes the stdin prompt so the runtime has installed
 	// the active-exec state before the prompt arrives (mirrors upstream's
-	// test_execute_stdin_and_streaming_together).
+	// test_execute_stdin_and_streaming_together). The small delay keeps the
+	// fixture deterministic under -race / a fully loaded test binary.
+	prompt := inputRequest("Enter code: ")
+	prompt.Delay = 50 * time.Millisecond
+	// Keep the WebSocket open after the prompt: the stdin reply is written by
+	// the runtime's independent reader goroutine, so ending the script (and
+	// closing the socket) immediately after the prompt races with that write.
+	idle := statusIdle()
+	idle.Delay = 300 * time.Millisecond
+	reply := replyOK()
+	reply.Delay = 500 * time.Millisecond
 	h.kernel.Script(
 		stream("stdout", "prompt incoming\n"),
-		inputRequest("Enter code: "),
-		statusIdle(),
-		replyOK(),
+		prompt,
+		idle,
+		reply,
 	)
 	code := h.run(t, "secret-code\n", "auth", "-s", "s1")
 	if code != 0 {
@@ -213,5 +226,128 @@ func TestDriveMountQuotesPath(t *testing.T) {
 	}
 	if strings.Contains(snippet, "\nimport os;") {
 		t.Fatalf("path spliced as code: %s", snippet)
+	}
+}
+
+// Ports upstream tests/test_automation.py::test_parse_propagation_response_reads_json
+// and test_parse_propagation_response_never_raises. Only whitelisted string
+// fields may surface; HTML, plain text, arrays and null degrade to empty.
+func TestPropagationDetailOnlyReadsWhitelistedJSONFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"error", `{"success": true, "token": "tok", "error": "quota exceeded"}`, "quota exceeded"},
+		{"message", "prefix\n{\"message\":\"denied\"}", "denied"},
+		{"rendered-prefix", "rendered\nprefix\n{\"error\":\"bad\"}", "bad"},
+		{"prefers-error", `{"error":"first","message":"second"}`, "first"},
+		{"control-chars", `{"error":"bad\u001b[31mRED\u001b[0m\nvalue\u0007"}`, "badRED value"},
+		{"html", `<html><body>400 Bad Request</body></html>`, ""},
+		{"empty", "", ""},
+		{"not-json", "not json", ""},
+		{"null", "null", ""},
+		{"array", "[1, 2]", ""},
+		{"token-only", `{"token":"SUPER_SECRET"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := propagationDetail(tc.body); got != tc.want {
+				t.Fatalf("propagationDetail(%q) = %q; want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// Ports upstream tests/test_automation.py::test_drive_propagation_failure_message_is_actionable
+// and test_drive_propagation_failure_message_includes_server_detail.
+func TestDriveFailureMessagePorted(t *testing.T) {
+	m := driveFailureMessage(400, "")
+	for _, want := range []string{"HTTP 400", "colab whoami", "different Google account"} {
+		if !strings.Contains(m, want) {
+			t.Fatalf("message missing %q: %q", want, m)
+		}
+	}
+	if strings.Contains(m, "<html") {
+		t.Fatalf("message echoed HTML: %q", m)
+	}
+	if m2 := driveFailureMessage(403, "quota exceeded"); !strings.Contains(m2, "Server said: quota exceeded") {
+		t.Fatalf("server detail missing: %q", m2)
+	}
+}
+
+// Ports upstream tests/test_automation.py::test_drivefs_hook_reports_400_without_raw_html
+// (commit aa01a39): a 400 with an HTML body must report the status plus the
+// actionable advice, never the raw body. The same sanitizer keeps ANSI/control
+// characters and untrusted token-like fields out of the terminal and history.
+func TestReportDriveFailureNeverEchoesRawHTML(t *testing.T) {
+	h := newHarness(t)
+	setStreams(h)
+	h.putSession(t, "s1")
+
+	html := "<html><body>400 Bad Request</body></html>\x1b[31mSECRET\x1b[0m"
+	reportDriveFailure(h.deps, "s1", &colabapi.StatusError{
+		Code: 400, Body: html, Method: "POST", Path: "/tun/m/credentials-propagation/ep",
+	})
+	out := h.stderr.String()
+	for _, want := range []string{"HTTP 400", "colab whoami"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("message missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "REQUIRED: Google Drive Authorization") {
+		t.Fatalf("message prompted for consent on a non-auth failure: %q", out)
+	}
+	for _, forbidden := range []string{"<html", "\x1b[31m", "SECRET"} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("message leaked %q: %q", forbidden, out)
+		}
+	}
+	if h.stdout.String() != "" {
+		t.Fatalf("chatter leaked to stdout: %q", h.stdout.String())
+	}
+
+	l, err := history.NewAt(h.dir, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := l.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events {
+		if e.EventType != "drive_auth_failed" {
+			continue
+		}
+		found = true
+		var payload map[string]any
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if body, _ := payload["body"].(string); strings.Contains(body, "<html") {
+			t.Fatalf("history leaked raw body: %q", body)
+		}
+	}
+	if !found {
+		t.Fatalf("no drive_auth_failed event recorded: %+v", events)
+	}
+}
+
+// Ports the server-detail half of the same upstream commit: parsed JSON fields
+// are shown, but never the prefix or the rest of the raw response.
+func TestReportDriveFailureUsesParsedDetail(t *testing.T) {
+	h := newHarness(t)
+	setStreams(h)
+	h.putSession(t, "s1")
+	reportDriveFailure(h.deps, "s1", &colabapi.StatusError{
+		Code: 403, Body: "rendered\nprefix\n{\"error\":\"quota exceeded\",\"token\":\"LEAK-ME\"}",
+		Method: "POST", Path: "/tun/m/credentials-propagation/ep",
+	})
+	out := h.stderr.String()
+	if !strings.Contains(out, "Server said: quota exceeded") {
+		t.Fatalf("parsed detail missing: %q", out)
+	}
+	for _, forbidden := range []string{"rendered", "prefix", "LEAK-ME"} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("raw body leaked %q: %q", forbidden, out)
+		}
 	}
 }

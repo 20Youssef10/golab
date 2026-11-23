@@ -10,27 +10,71 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
-## [0.1.0-alpha.1] - 2026-11-23
+## [0.1.0] - 2026-11-23
+
+First feature-complete release of the Go port against live upstream HEAD
+`0abf82d` (v0.8.0 + 5 commits). Closes the code-fixable findings of
+`docs/AUDIT-00` … `docs/AUDIT-04`; see `docs/REMEDIATION.md` for the per-finding
+statuses and the remaining human-only checks.
 
 ### Added
 
-- Initial Go port of `google-colab-cli` at upstream HEAD `0abf82d` (v0.8.0 + 5
-  commits): all commands, dual tunnel/Public API control plane, Jupyter kernel
-  client, embedded SSH, Contents API, auth providers, history/notebooks,
-  rendering, REPL and signed self-update.
-- Audit reports `docs/AUDIT-00` … `docs/AUDIT-04` and `docs/AUDIT-INDEX.md`,
-  describing parity, security, platform, testing and "surpass upstream" findings.
+- Full Colab **Public API lifecycle** (LRO create/poll/delete, `runtime_name`
+  persisted in session state, operation-code mapping) ahead of upstream, which
+  currently only lists runtimes via the Public API.
+- `ssh --force` (upstream `cda02bc`) to kill stale sshd children before dialling.
+- `logout` (clears keyring/legacy token, invalidates cached proxy tokens and
+  capability flags) and recursive `upload/download -r` with traversal/symlink
+  guards (upstream PRs #266/#267).
+- New Go-only commands: `doctor` (GET-only redacting probe), `audit` (credential
+  and update-verification status), `budget` (advisory compute-unit guard),
+  `bundle` (reproducible provenance), `sync`, and `agentout`.
+- Structured output `--output text|json|ndjson` with the stable `golab/1`
+  schema, `--explain` dry-run plans, and `--yes` confirmation for `stop --all`.
+- GoReleaser config, cosign + signed-SBOM release workflow, live-e2e skeleton
+  with kill switch, QEMU/Termux skeletons, conformance scripts and
+  `docs/CONFORMANCE.md`.
+- Env-var support: `COLAB_CLI_REQUEST_TIMEOUT`, `COLAB_CLI_ASSIGN_RETRIES`,
+  `COLAB_CLI_RETRY_BACKOFF`, `COLAB_OUTPUT`, `COLAB_ASSUME_YES`,
+  `GOLAB_BUDGET_FILE`.
 
 ### Changed
 
-- Module path is now the canonical `github.com/20Youssef10/golab`, enabling the
-  documented `go install …@latest` channel (fixes audit P0-8). This does not
-  change the CLI surface or on-disk schema.
+- Module path is the canonical `github.com/20Youssef10/golab`, enabling
+  `go install …@latest` (audit P0-8). CLI and on-disk schema are unchanged.
+- One honest client identity `golab/<version>` across control, data and SSH
+  planes (audit S-3).
+- Token storage keeps only the refresh token + metadata; access tokens are
+  minted on demand (audit S-4).
+- Small uploads use one atomic `chunk:1` PUT; large uploads report
+  `ErrIncompleteUpload` and verify final size (audit S-2).
+- `url --open` and `pay`/Drive consent URLs share one cross-platform launcher
+  with Termux/WSL support.
+- GitHub Actions pinned to commit SHAs; CI adds lint, fuzz, coverage,
+  cross-build smoke and safety-script gates.
 
 ### Fixed
 
-- Corrected `docs/COMPAT.md`: `url --open` was documented as working when it is
-  currently a no-op (tracked as audit P0-2).
+- `url --open` no-op (audit P0-2); Drive propagation failures echoing raw HTML
+  (P0-7); `make cross` writing to a session-local path (P0-4);
+  `update.CleanupOld` never called (P0-5); updater identity/asset patterns that
+  would reject our own releases (P0-6).
+- Redaction covers `id_token`, passwords, secrets and code verifiers; REPL
+  sanitiser keeps SGR only; cosign verification requires signed certificate
+  timestamps; updater matches signature/SBOM bundles per platform archive.
+- All Python defects D-1…D-11 remain fixed; no regressions found.
+- Test-fixture race in `TestAuthFlow` made deterministic.
 
-[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.0-alpha.1...HEAD
+### Verification
+
+`go vet ./...`, `golangci-lint run` (0 issues), `go test -race -count=1 ./...`,
+11 `CGO_ENABLED=0` cross-builds, `govulncheck`, `go mod verify`, redaction and
+remote-path scans. **Live Colab e2e is still human-gated** per AGENTS.md.
+
+## [0.1.0-alpha.1] - 2026-11-23
+
+- Audit baseline: initial Go port, audit reports AUDIT-00…04, canonical module path.
+
+[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/20Youssef10/golab/compare/v0.1.0-alpha.1...v0.1.0
 [0.1.0-alpha.1]: https://github.com/20Youssef10/golab/releases/tag/v0.1.0-alpha.1

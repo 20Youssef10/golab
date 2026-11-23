@@ -116,7 +116,7 @@ func teardown(ctx context.Context, d *app.Deps, name string, s state.Session, re
 		}
 	}
 	if client, err := d.ColabClient(ctx); err == nil {
-		_ = client.Unassign(ctx, s.Endpoint)
+		_ = client.UnassignRuntime(ctx, s.Endpoint, s.RuntimeName)
 	}
 	_ = d.Store.Delete(name)
 	writeEvent(d, name, "session_terminated", map[string]any{"reason": reason})
@@ -168,6 +168,22 @@ func runCommand() *cobra.Command {
 			}
 			if highMem && highMemOnly(opts.accelerator) {
 				fmt.Fprintln(d.Stderr, "[colab] --high-mem ignored: this accelerator only offers one machine shape.")
+			}
+			if explainRequested(cmd) {
+				cleanup := "unassign"
+				if keep {
+					cleanup = "keep"
+				}
+				fmt.Fprintln(d.Stdout, ExplainPlan(cmd, PlanFields{
+					Operation: "run", Method: "POST", API: apiLabel(d),
+					Variant: string(opts.variant), Accelerator: string(opts.accelerator),
+					Shape: opts.shape.String(), Session: name, Cleanup: cleanup,
+					CreatesSession: true, Billable: true,
+				}))
+				return nil
+			}
+			if err := guardBudget(cmd.Context(), d, cmd); err != nil {
+				return err
 			}
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)

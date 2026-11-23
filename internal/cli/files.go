@@ -118,9 +118,10 @@ func rmCommand() *cobra.Command {
 
 func uploadCommand() *cobra.Command {
 	var name string
+	var recursive bool
 	cmd := &cobra.Command{
 		Use:   "upload LOCAL REMOTE",
-		Short: "Upload a file to a session",
+		Short: "Upload a file or directory to a session",
 		Args:  exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d := depsOf(cmd)
@@ -129,12 +130,31 @@ func uploadCommand() *cobra.Command {
 			}
 			local, remote := args[0], args[1]
 			info, err := os.Stat(local)
-			if err != nil || info.IsDir() {
-				return exitf(1, "[colab] Local file '%s' not found.", local)
+			if err != nil {
+				label := "file"
+				if recursive {
+					label = "path"
+				}
+				return exitf(1, "[colab] Local %s '%s' not found.", label, local)
+			}
+			if info.IsDir() && !recursive {
+				return exitf(1, "[colab] '%s' is a directory. Use -r/--recursive to upload directories.", local)
 			}
 			c, session, err := contentsForSession(cmd.Context(), d, name)
 			if err != nil {
 				return err
+			}
+			if info.IsDir() {
+				count, err := c.UploadDir(cmd.Context(), local, remote)
+				if err != nil {
+					return exitf(1, "[colab] Upload failed: %s", err)
+				}
+				writeEvent(d, session, "file_operation", map[string]any{
+					"op": "upload", "local": local, "remote": remote,
+					"recursive": true, "count": count,
+				})
+				fmt.Fprintf(d.Stderr, "[colab] Uploaded directory '%s' (%d file(s)) to '%s'\n", local, count, remote)
+				return nil
 			}
 			f, err := os.Open(local)
 			if err != nil {
@@ -152,14 +172,16 @@ func uploadCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "Recursively upload a directory")
 	return cmd
 }
 
 func downloadCommand() *cobra.Command {
 	var name string
+	var recursive bool
 	cmd := &cobra.Command{
 		Use:   "download REMOTE LOCAL",
-		Short: "Download a file from a session",
+		Short: "Download a file or directory from a session",
 		Args:  exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d := depsOf(cmd)
@@ -170,6 +192,18 @@ func downloadCommand() *cobra.Command {
 			c, session, err := contentsForSession(cmd.Context(), d, name)
 			if err != nil {
 				return err
+			}
+			if recursive {
+				count, err := c.DownloadDir(cmd.Context(), remote, local)
+				if err != nil {
+					return exitf(1, "[colab] Download failed: %s", err)
+				}
+				writeEvent(d, session, "file_operation", map[string]any{
+					"op": "download", "remote": remote, "local": local,
+					"recursive": true, "count": count,
+				})
+				fmt.Fprintf(d.Stderr, "[colab] Downloaded directory '%s' (%d file(s)) to '%s'\n", remote, count, local)
+				return nil
 			}
 			dir := filepath.Dir(local)
 			if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -186,6 +220,9 @@ func downloadCommand() *cobra.Command {
 				err = closeErr
 			}
 			if err != nil {
+				if errors.Is(err, contents.ErrIsDirectory) {
+					return exitf(1, "[colab] Download failed: %s. Use -r/--recursive to download directories.", err)
+				}
 				return exitf(1, "[colab] Download failed: %s", err)
 			}
 			if err := platform.MakePrivate(tmpPath); err != nil {
@@ -206,6 +243,7 @@ func downloadCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "Recursively download a directory")
 	return cmd
 }
 

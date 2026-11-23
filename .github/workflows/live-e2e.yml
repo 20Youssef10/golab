@@ -1,0 +1,109 @@
+name: live-e2e
+
+# L5 live e2e (docs/07 §9, AUDIT-03 P0-7). MANUAL ONLY, secrets-gated,
+# kill-switched. Colab VMs are billable: the default job is a GET-ONLY probe
+# and never allocates. Billable steps require an explicit human opt-in below.
+on:
+  workflow_dispatch:
+    inputs:
+      allow_allocations:
+        description: "Enable billable allocation steps (requires the ack below)"
+        type: boolean
+        default: false
+      billing_ack:
+        description: "Type 'I ACKNOWLEDGE BILLING' to permit allocations"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Global job concurrency = 1 (docs/07 §9 rule 1): never two live jobs at once.
+concurrency:
+  group: live-e2e
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    # Kill switch defaults to false: an unset repo variable never runs live.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      vars.LIVE_E2E_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COLAB_REFRESH_TOKEN: ${{ secrets.COLAB_REFRESH_TOKEN }}
+      COLAB_BIN: ./golab
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Guard - secrets, kill switch and billing acknowledgement
+        env:
+          ALLOW: ${{ inputs.allow_allocations }}
+          ACK: ${{ inputs.billing_ack }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${COLAB_REFRESH_TOKEN:-}" ]]; then
+            echo "COLAB_REFRESH_TOKEN secret is required" >&2; exit 1
+          fi
+          if [[ "$ALLOW" == "true" && "$ACK" != "I ACKNOWLEDGE BILLING" ]]; then
+            echo "billable run requires billing_ack='I ACKNOWLEDGE BILLING'" >&2
+            exit 1
+          fi
+          echo "mode: $([[ "$ALLOW" == 'true' ]] && echo BILLABLE || echo READ-ONLY)"
+
+      - name: Build CLI
+        run: make build
+
+      # GET-ONLY by default. `colab sessions` reads /tun/m/assignments and
+      # `colab usage` reads /tun/m/ccu-info; neither creates a VM.
+      - name: GET-only read probe
+        run: |
+          set -euo pipefail
+          "$COLAB_BIN" sessions
+          "$COLAB_BIN" usage
+
+      # Billable allocation: only with the explicit human opt-in above. Every
+      # allocated session gets a `finally`-style cleanup via the sweeper below.
+      - name: Billable CPU smoke (opt-in)
+        if: inputs.allow_allocations
+        env:
+          LIVE_SESSION: ci-smoke
+        run: |
+          set -euo pipefail
+          echo "allocating ONE CPU session (billable)"
+          "$COLAB_BIN" new -s "$LIVE_SESSION" --accelerator NONE
+          "$COLAB_BIN" exec -s "$LIVE_SESSION" 'print("live smoke ok")'
+          "$COLAB_BIN" stop -s "$LIVE_SESSION"
+
+      # Sweeper: always runs, even if a step above failed. Dry-run by default;
+      # APPLY=1 only on an acknowledged billable run. Orphans ("[?]") fail the
+      # job so a human must unassign them explicitly.
+      - name: Sweep sessions older than 60 minutes
+        if: always()
+        env:
+          APPLY: ${{ inputs.allow_allocations && '1' || '0' }}
+        run: bash scripts/live-sweeper.sh
+
+      - name: Final emptiness check
+        if: always()
+        run: |
+          set -euo pipefail
+          err="$(mktemp)"
+          out="$("$COLAB_BIN" sessions 2>"$err")"
+          cat "$err"
+          if [[ -n "$out" ]]; then
+            echo "FAIL: live e2e leaked assignments:" >&2
+            echo "$out" >&2
+            exit 1
+          fi
+          grep -q "No active sessions found on server" "$err" || {
+            echo "FAIL: unexpected sessions output" >&2; exit 1;
+          }
+          echo "OK: no sessions left"

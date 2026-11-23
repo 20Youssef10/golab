@@ -4,6 +4,30 @@
 > **Status legend:** 🟢 read directly in source · 🟡 inferred or taken from library defaults · 🔴 must be confirmed by live capture in Phase 0 (doc 06, spike **S0**).
 > These endpoints are **undocumented and unstable**. Treat this file as a *conformance target*, never as a contract Google has published.
 
+> **Implementation status — 2026-11-23 (v0.1.0).** Fake-server conformance
+> (`fakecolab` / `fakekernel` / `fakesshd`, doc 07 §3) has settled part of the
+> §7 🔴 checklist at the *harness* level, but fakes are not live proof:
+> - **Settled in code + fake-server tests:** §7.3 — no `kernel_info_request`
+>   before execute, matching upstream; §7.4 — client-side chunked-upload
+>   safety (single atomic `chunk:1` PUT for small files, typed
+>   `ErrIncompleteUpload`, final-size verification); §7.5 — PKCE S256 and
+>   `access_type=offline` emitted explicitly.
+> - **Encoded in fakes with assertions, still needs live capture:** §7.1
+>   minimal header/query set (we send an extra `X-Colab-Client-Agent` on
+>   Contents) and §7.2 real C1–C8 bodies, including 400/412/429 error bodies.
+> - **Still open / human-required:** §7.6 `GET /tun/m/runtime-proxy-token`
+>   (not implemented; we use `GET /assignments`), §7.7 SSH close codes, idle
+>   timeout, frame size and pings, and §7.8 `X-Colab-Client-Agent` allow-listing.
+>   One honest identity `github.com/20Youssef10/golab/<ver>` is now used on all
+>   planes (audit S-3). See [AUDIT-02-protocol-security.md](AUDIT-02-protocol-security.md)
+>   §2 and [AUDIT-INDEX.md](AUDIT-INDEX.md) §5.
+>
+> Ahead of upstream: the **full Colab Public API lifecycle** (LRO create/poll/
+> delete, `runtime_name` persisted in session state, operation-code mapping) is
+> implemented in `internal/colabapi/public.go`; upstream HEAD only *lists*
+> runtimes via the Public API. See
+> [AUDIT-00-live-upstream.md](AUDIT-00-live-upstream.md) §4.
+
 ---
 
 ## 0. Constants

@@ -62,3 +62,64 @@ func TestRedact(t *testing.T) {
 		}
 	}
 }
+
+// AUDIT-02 S-6: the original patterns missed these credential field names.
+// Each field is exercised in JSON, query-string and slog-attribute form, with
+// both snake_case and Capitalised spellings. A canary that survives any form
+// is a redaction gap.
+func TestRedactNoCredentialFields(t *testing.T) {
+	fields := []struct{ key, canary string }{
+		{"id_token", "IDTOKENCANARY7f3a"},
+		{"IDToken", "CAMELIDCANARY7f3a"},
+		{"ID_TOKEN", "UPPERIDCANARY7f3a"},
+		{"password", "PASSWORDCANARY7f3a"},
+		{"Password", "PWDCANARY7f3a"},
+		{"passwd", "PASSWDCANARY7f3a"},
+		{"PASSWD", "PASSWDUPPERCANARY7f3a"},
+		{"secret", "SECRETCANARY7f3a"},
+		{"client_secret", "CLIENTSECRETCANARY7f3a"},
+		{"code_verifier", "CODEVERCANARY7f3a"},
+		{"CodeVerifier", "CAMELCODEVERCANARY7f3a"},
+	}
+	forms := map[string]func(k, v string) string{
+		"json":  func(k, v string) string { return `{"` + k + `":"` + v + `","next":"ok"}` },
+		"query": func(k, v string) string { return `https://example.test/cb?next=ok&` + k + `=` + v },
+	}
+	for _, f := range fields {
+		for form, build := range forms {
+			in := build(f.key, f.canary)
+			out := Redact(in)
+			if strings.Contains(out, f.canary) {
+				t.Errorf("Redact(%s %s) leaked %q: %q", form, f.key, f.canary, out)
+			}
+		}
+	}
+}
+
+// Golden-style slog test: the entire emitted line must match, so a key that is
+// silently added to the "logged verbatim" set fails loudly.
+func TestSlogRedactsSensitiveKeys(t *testing.T) {
+	var b bytes.Buffer
+	h := slog.NewTextHandler(&b, &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+		return redactAttr(nil, a)
+	}})
+	l := slog.New(h)
+	l.Info("evt",
+		"id_token", "IDTOKC7f3a",
+		"IDToken", "CAMELC7f3a",
+		"password", "PASSWC7f3a",
+		"passwd", "PASSWDC7f3a",
+		"secret", "SECRETC7f3a",
+		"code_verifier", "VERIFC7f3a",
+		"access_token", "ACCESC7f3a",
+		"next", "visible",
+	)
+	want := "level=INFO msg=evt id_token=REDACTED IDToken=REDACTED password=REDACTED " +
+		"passwd=REDACTED secret=REDACTED code_verifier=REDACTED access_token=REDACTED next=visible\n"
+	if got := b.String(); got != want {
+		t.Fatalf("slog line leaked a credential field:\n got: %q\nwant: %q", got, want)
+	}
+}

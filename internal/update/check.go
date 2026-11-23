@@ -48,6 +48,13 @@ type Config struct {
 	Enabled        bool
 	HTTPClient     *http.Client
 	Logger         *slog.Logger
+
+	// RequireSCT controls whether a Fulcio Signed Certificate Timestamp must
+	// be present and cryptographically verified in every Sigstore bundle.
+	// nil (the production default) REQUIRES an SCT. Set it to a non-nil false
+	// ONLY for tests whose test CA cannot embed SCTs; even then, a bundle that
+	// does carry an SCT is still verified. Never disable this in production.
+	RequireSCT *bool
 }
 
 func (c Config) logger() *slog.Logger {
@@ -105,23 +112,15 @@ func Check(ctx context.Context, cfg Config) (*Release, bool, error) {
 		return nil, true, fmt.Errorf("parse release response: %w", err)
 	}
 
-	var asset, checksumAsset, signatureAsset, sbomAsset *githubAsset
+	var asset, checksumAsset *githubAsset
 	for i := range gr.Assets {
 		a := &gr.Assets[i]
 		switch {
-		case isSBOMAsset(a.Name):
-			if sbomAsset == nil {
-				sbomAsset = a
-			}
 		case isChecksumAsset(a.Name):
 			if checksumAsset == nil {
 				checksumAsset = a
 			}
-		case isSignatureAsset(a.Name):
-			if signatureAsset == nil {
-				signatureAsset = a
-			}
-		case pattern.MatchString(a.Name):
+		case pattern.MatchString(a.Name) && !isBundleAsset(a.Name):
 			if asset == nil {
 				asset = a
 			}
@@ -133,11 +132,18 @@ func Check(ctx context.Context, cfg Config) (*Release, bool, error) {
 	if checksumAsset == nil {
 		return nil, true, fmt.Errorf("%w: no checksum asset in release %s", ErrMissingChecksum, gr.TagName)
 	}
+	// GoReleaser publishes one signature and one SBOM bundle per archive. They
+	// must be selected by the exact stem of the archive we are about to
+	// download: taking the first bundle globally can bind verification to a
+	// different platform's digest.
+	signatureAsset, sbomAsset := selectPlatformBundles(gr.Assets, asset.Name)
 	if signatureAsset == nil {
-		return nil, true, fmt.Errorf("%w: no cosign bundle in release %s", ErrMissingSignature, gr.TagName)
+		return nil, true, fmt.Errorf("%w: no cosign bundle for %s in release %s",
+			ErrMissingSignature, asset.Name, gr.TagName)
 	}
 	if sbomAsset == nil {
-		return nil, true, fmt.Errorf("%w: no signed SBOM attestation in release %s", ErrMissingSBOM, gr.TagName)
+		return nil, true, fmt.Errorf("%w: no signed SBOM attestation for %s in release %s",
+			ErrMissingSBOM, asset.Name, gr.TagName)
 	}
 
 	checksum, err := fetchChecksum(ctx, cfg, checksumAsset.BrowserDownloadURL, asset.Name)
@@ -202,6 +208,61 @@ func isSignatureAsset(name string) bool {
 	return strings.Contains(lower, "sigstore") ||
 		strings.Contains(lower, "cosign") ||
 		strings.HasSuffix(lower, ".bundle")
+}
+
+// isBundleAsset recognises any Sigstore/cosign verification material so a
+// loose asset pattern cannot mistake a bundle for the platform archive.
+func isBundleAsset(name string) bool { return isSignatureAsset(name) || isSBOMAsset(name) }
+
+// archiveStem strips the archive extension so a bundle can be matched to the
+// exact platform archive it signs. GoReleaser emits .tar.gz for every target.
+func archiveStem(name string) string {
+	lower := strings.ToLower(name)
+	for _, ext := range []string{".tar.gz", ".tgz", ".tar.xz", ".zip"} {
+		if strings.HasSuffix(lower, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	return name
+}
+
+// selectPlatformBundles returns the cosign signature and signed SBOM whose
+// names are derived from the chosen archive. Both naming forms produced by
+// our release pipeline are accepted:
+//
+//	<archive>.sigstore.json          (cosign sign-blob)
+//	<archive>.sbom.sigstore.json     (cosign attest-blob)
+//	<stem>.sbom.sigstore.json        (short stem form)
+//
+// There is deliberately no "first bundle in the release" fallback: selecting
+// another platform's bundle can bind verification to a different digest.
+func selectPlatformBundles(assets []githubAsset, archive string) (sig, sbom *githubAsset) {
+	stem := archiveStem(archive)
+	sigNames := [2]string{archive + ".sigstore.json", stem + ".sigstore.json"}
+	sbomNames := [2]string{archive + ".sbom.sigstore.json", stem + ".sbom.sigstore.json"}
+	for i := range assets {
+		a := &assets[i]
+		if sig == nil {
+			for _, n := range sigNames {
+				if a.Name == n {
+					sig = a
+					break
+				}
+			}
+		}
+		if sbom == nil {
+			for _, n := range sbomNames {
+				if a.Name == n {
+					sbom = a
+					break
+				}
+			}
+		}
+		if sig != nil && sbom != nil {
+			break
+		}
+	}
+	return sig, sbom
 }
 
 // isSBOMAsset recognises a signed CycloneDX/SPDX SBOM attestation bundle. Such

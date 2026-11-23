@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussions
+    url: https://github.com/20Youssef10/golab/discussions
+    about: Ask questions, share ideas, or talk with the community.
+  - name: Security vulnerability
+    url: https://github.com/20Youssef10/golab/security/advisories/new
+    about: Report security issues privately via a GitHub Security Advisory. Do not open a public issue, and never paste tokens or credentials.
