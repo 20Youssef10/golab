@@ -10,6 +10,19 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-23
+
+### Fixed
+
+- Windows CI: skip POSIX directory-mode assertions, avoid blocking on `CONIN$`
+  when stdin is not a TTY (Drive consent fixture), and disable `-race` on
+  windows/arm64 where the Go race detector is unavailable.
+- Release workflow: pass `GITHUB_TOKEN` to GoReleaser so publishing can proceed.
+
+### Verification
+
+Local `go test`, Windows test-binary compile, YAML parse, `goreleaser check`.
+
 ## [0.1.1] - 2026-11-23
 
 ### Fixed
@@ -93,7 +106,8 @@ remote-path scans. **Live Colab e2e is still human-gated** per AGENTS.md.
 
 - Audit baseline: initial Go port, audit reports AUDIT-00…04, canonical module path.
 
-[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/20Youssef10/golab/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/20Youssef10/golab/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/20Youssef10/golab/compare/v0.1.0-alpha.1...v0.1.0
 [0.1.0-alpha.1]: https://github.com/20Youssef10/golab/releases/tag/v0.1.0-alpha.1

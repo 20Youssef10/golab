@@ -21,6 +21,7 @@ import (
 	"github.com/20Youssef10/golab/internal/contents"
 	"github.com/20Youssef10/golab/internal/history"
 	"github.com/20Youssef10/golab/internal/logx"
+	"github.com/20Youssef10/golab/internal/platform"
 	"github.com/20Youssef10/golab/internal/runtime"
 )
 
@@ -231,12 +232,17 @@ func waitForEnter(ctx context.Context, d *app.Deps) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if f, err := os.Open(ttyName()); err == nil {
-			if _, readErr := bufio.NewReader(f).ReadString('\n'); readErr == nil {
-				_ = f.Close()
-				return
+		// Only touch the controlling terminal when stdin really is a TTY.
+		// On Windows CONIN$ can open successfully in a headless runner and
+		// then block forever, so the injected stdin must be used instead.
+		if platform.IsStdinTTY() {
+			if f, err := os.Open(ttyName()); err == nil {
+				if _, readErr := bufio.NewReader(f).ReadString('\n'); readErr == nil {
+					_ = f.Close()
+					return
+				}
+				_ = f.Close() // e.g. EIO when there is no controlling terminal
 			}
-			_ = f.Close() // e.g. EIO when there is no controlling terminal
 		}
 		_, _ = bufio.NewReader(d.Stdin).ReadString('\n')
 	}()

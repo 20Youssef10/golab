@@ -82,7 +82,7 @@ func TestFileStoreIsPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := dinfo.Mode().Perm(); got != 0o700 {
+	if got := dinfo.Mode().Perm(); goruntime.GOOS != "windows" && got != 0o700 {
 		t.Fatalf("dir mode = %o, want 700", got)
 	}
 	b, err := fs.Load()

@@ -69,6 +69,8 @@ jobs:
           version: '~> v2'
           args: release --clean
         env:
+          # GoReleaser v2 requires GITHUB_TOKEN for GitHub publishing.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # --- Signed artifacts + signed CycloneDX SBOM -------------------------
