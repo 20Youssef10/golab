@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -93,8 +94,11 @@ func TestConcurrentWritesFromSeparateStores(t *testing.T) {
 	if len(all) != 80 {
 		t.Fatalf("got %d sessions, want 80", len(all))
 	}
-	if _, err := os.Stat(p + ".bak"); err != nil {
-		t.Errorf("no .bak created: %v", err)
+	// .bak uses hard links and is intentionally skipped on Windows.
+	if goruntime.GOOS != "windows" {
+		if _, err := os.Stat(p + ".bak"); err != nil {
+			t.Errorf("no .bak created: %v", err)
+		}
 	}
 }
 

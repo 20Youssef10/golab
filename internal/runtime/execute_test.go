@@ -227,20 +227,34 @@ func TestExecuteStdinAndStreamingTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer k.Close()
+	// Keep the execution alive long enough for the independent stdin reader
+	// to consume the prompt and write its reply; under -cover the goroutine
+	// scheduling otherwise lets Execute return (and clear active state) first.
+	req := fakekernel.InputRequest("name? ")
+	req.Delay = 100 * time.Millisecond
+	idle := fakekernel.Status("idle")
+	idle.Delay = 500 * time.Millisecond
+	reply := fakekernel.Reply("ok", nil)
+	reply.Delay = 700 * time.Millisecond
 	srv.Script(
 		fakekernel.Stream("stdout", "before\n"),
-		fakekernel.InputRequest("name? "),
+		req,
 		fakekernel.Stream("stdout", "after\n"),
-		fakekernel.Status("idle"),
-		fakekernel.Reply("ok", nil),
+		idle,
+		reply,
 	)
 	var streams []string
-	prompts := make(chan string, 1)
+	// Buffer generously and never block the hook: a duplicate prompt under
+	// coverage instrumentation must not deadlock the test.
+	prompts := make(chan string, 8)
 	res, err := runExec(t, k, "input()", ExecOptions{
 		AllowStdin: true,
 		OnOutput:   func(o Output) { streams = append(streams, o.Text) },
 		StdinHook: func(prompt string) (string, error) {
-			prompts <- prompt
+			select {
+			case prompts <- prompt:
+			default:
+			}
 			return "alice", nil
 		},
 	})
@@ -250,8 +264,13 @@ func TestExecuteStdinAndStreamingTogether(t *testing.T) {
 	if len(res.Outputs) != 2 || strings.Join(streams, "") != "before\nafter\n" {
 		t.Fatalf("outputs/streams: %+v / %v", res.Outputs, streams)
 	}
-	if p := <-prompts; p != "name? " {
-		t.Fatalf("prompt %q", p)
+	select {
+	case p := <-prompts:
+		if p != "name? " {
+			t.Fatalf("prompt %q", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stdin hook was never called")
 	}
 	inputs := waitInputs(t, srv, 1)
 	var value string

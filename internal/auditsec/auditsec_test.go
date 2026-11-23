@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -40,7 +41,7 @@ func fixture(t *testing.T) (Config, string) {
 		OAuthTokenPath:  filepath.Join(sub, "oauth_token.json"),
 		HistoryDir:      filepath.Join(sub, "history"),
 		AuthProvider:    "oauth2",
-		Owner:           "golab-cli",
+		Owner:           "20Youssef10",
 		Repo:            "golab",
 	}, dir
 }
@@ -67,13 +68,20 @@ func TestAuditDetectsSeededDefects(t *testing.T) {
 	for _, f := range rep.Findings {
 		ids[f.ID] = true
 	}
-	for _, want := range []string{
-		"config.dir.mode", "state.sessions.mode", "state.settings.mode",
+	want := []string{
 		"state.session-name", "state.token-present", "state.sensitive-key",
-		"auth.legacy-token", "auth.token-file.mode",
-	} {
-		if !ids[want] {
-			t.Errorf("missing finding %q (got %v)", want, ids)
+		"auth.legacy-token",
+	}
+	// chmod 0600 is a no-op on Windows, so the audit intentionally does not
+	// report POSIX mode findings there.
+	if goruntime.GOOS != "windows" {
+		want = append(want,
+			"config.dir.mode", "state.sessions.mode", "state.settings.mode",
+			"auth.token-file.mode")
+	}
+	for _, id := range want {
+		if !ids[id] {
+			t.Errorf("missing finding %q (got %v)", id, ids)
 		}
 	}
 	b, err := json.Marshal(rep)

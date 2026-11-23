@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -153,7 +154,8 @@ func TestBundleWriteUsesPrivateMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows reports 0666 for newly created files; ACLs are the real control.
+	if goruntime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %04o, want 0600", info.Mode().Perm())
 	}
 	got, err := os.ReadFile(path)

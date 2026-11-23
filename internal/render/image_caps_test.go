@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -153,6 +154,12 @@ func TestImageNonTTYOutputIsByteExact(t *testing.T) {
 // TestImageSanitisesPath prevents a remote-controlled filename from injecting
 // a new OSC sequence into our own fallback message.
 func TestImageSanitisesPath(t *testing.T) {
+	// Windows forbids control characters in filenames, so the malicious path
+	// cannot be created there; the sanitisation itself is platform-independent
+	// and is covered by the Sanitize tests.
+	if goruntime.GOOS == "windows" {
+		t.Skip("Windows rejects control characters in filenames")
+	}
 	var out, errOut bytes.Buffer
 	evil := filepath.Join(t.TempDir(), "plot\x1b]52;c;c2VjcmV0\x07.png")
 	cfg := ImageConfig{

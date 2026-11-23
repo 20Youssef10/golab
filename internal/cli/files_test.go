@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -75,6 +76,11 @@ func TestFileMutations(t *testing.T) {
 // Ports upstream tests/test_cli.py::test_cli_edit_no_changes and
 // test_cli_edit_with_changes.
 func TestEdit(t *testing.T) {
+	// The fixture launches a POSIX shell script via $EDITOR, which Windows
+	// cannot execute; the editor integration itself is platform-specific.
+	if goruntime.GOOS == "windows" {
+		t.Skip("editor fixture requires a POSIX shell")
+	}
 	t.Run("no changes", func(t *testing.T) {
 		t.Setenv("EDITOR", writeEditorScript(t, ""))
 		h := newHarness(t)

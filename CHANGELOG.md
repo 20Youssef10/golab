@@ -10,6 +10,24 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-23
+
+### Fixed
+
+- Release workflow's annotated-tag check: explicitly fetch tag refs before
+  inspecting them (checkout leaves a detached HEAD).
+- CI on Windows: tests no longer assert POSIX `0600` file modes where Windows
+  reports `0666` (ACLs are the real control), skip SIGHUP and POSIX-shell
+  editor fixtures, and avoid `.bak` hard-link assertions.
+- Two stdin-feedback test fixtures that could drop an `input_reply` when the
+  CLI closed the kernel under coverage instrumentation; bounded the runtime
+  stdin prompt wait with a timeout.
+
+### Verification
+
+Local `go test -race ./...`, `-covermode=atomic ./...`, Windows test-binary
+cross-compilation and `golangci-lint` all pass.
+
 ## [0.1.0] - 2026-11-23
 
 First feature-complete release of the Go port against live upstream HEAD
@@ -75,6 +93,7 @@ remote-path scans. **Live Colab e2e is still human-gated** per AGENTS.md.
 
 - Audit baseline: initial Go port, audit reports AUDIT-00…04, canonical module path.
 
-[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/20Youssef10/golab/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/20Youssef10/golab/compare/v0.1.0-alpha.1...v0.1.0
 [0.1.0-alpha.1]: https://github.com/20Youssef10/golab/releases/tag/v0.1.0-alpha.1

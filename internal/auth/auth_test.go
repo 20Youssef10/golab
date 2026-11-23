@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -599,7 +600,9 @@ func TestOAuth2KeyringInaccessibleFallsBackToFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// chmod 0600 is a no-op on Windows; profile ACLs provide the restriction
+	// there, and os.Stat reports 0666 for a newly created file.
+	if goruntime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("token file mode = %o, want 600", info.Mode().Perm())
 	}
 }

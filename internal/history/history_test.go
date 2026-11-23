@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -220,8 +221,11 @@ func TestConcurrentAppendAtomic(t *testing.T) {
 		}
 		seen[key] = true
 	}
-	if _, err := os.Stat(l.Path() + ".bak"); err != nil {
-		t.Errorf("no .bak of last good file: %v", err)
+	// .bak uses hard links and is intentionally skipped on Windows.
+	if goruntime.GOOS != "windows" {
+		if _, err := os.Stat(l.Path() + ".bak"); err != nil {
+			t.Errorf("no .bak of last good file: %v", err)
+		}
 	}
 }
 

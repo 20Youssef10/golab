@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	goruntime "runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -197,6 +198,10 @@ func TestSSHRMTeardownRemovesState(t *testing.T) {
 // and tests/test_windows_ssh.py::test_rm_handlers_without_sighup: SIGHUP (how
 // OpenSSH ends a ProxyCommand) must still run --rm teardown.
 func TestSSHRMTeardownOnSIGHUP(t *testing.T) {
+	// Windows has no SIGHUP; its console-close handler is covered separately.
+	if goruntime.GOOS == "windows" {
+		t.Skip("SIGHUP is Unix-only")
+	}
 	if os.Getenv("COLAB_TEST_NO_SIGNALS") == "1" {
 		t.Skip("signals not supported in this environment")
 	}

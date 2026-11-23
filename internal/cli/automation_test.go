@@ -176,10 +176,14 @@ func TestDriveMountColabReplyRoundTrip(t *testing.T) {
 	h.ctrl.SetPropagationAuthorizeURL("https://consent.example/auth")
 	// Give the hook goroutine time to complete the control-plane round-trip and
 	// send colab_reply before the scripted kernel declares itself idle.
+	// Keep the socket open a little longer than the hook needs so the
+	// colab_reply is recorded before the CLI closes the kernel.
+	reply := replyOK()
+	reply.Delay = 700 * time.Millisecond
 	h.kernel.Script(
 		colabRequest("dfs_ephemeral", "cm-42"),
 		statusIdleAfter(500*time.Millisecond),
-		replyOK(),
+		reply,
 	)
 	code := h.run(t, "\n", "drivemount", "-s", "s1", "/foo/bar")
 	if code != 0 {

@@ -37,7 +37,10 @@ jobs:
       # release rule). Fail loudly if a lightweight tag was pushed by mistake.
       - name: Require annotated tag
         run: |
-          test "$(git cat-file -t "${GITHUB_REF_NAME}")" = "tag" || {
+          # actions/checkout checks out a detached commit; the tag object may
+          # not be present locally even with fetch-depth 0. Fetch it explicitly.
+          git fetch origin --tags --force
+          test "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = "tag" || {
             echo "release requires an annotated tag (git tag -a)" >&2; exit 1;
           }
 
