@@ -80,10 +80,9 @@ jobs:
           path: .
           format: cyclonedx-json
           output-file: dist/sbom.cdx.json
-          # We only need the file on disk for the cosign attestation below;
-          # the action's default artifact name contains a dot and is rejected
-          # by the artifact service.
-          upload-artifact: false
+          # v0.9.0 always uploads an artifact; its default name is derived from
+          # the output file and contains a dot, which GitHub rejects.
+          artifact-name: golab-sbom
 
       - name: Sign archives and attest the SBOM
         env:
