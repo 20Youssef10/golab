@@ -97,7 +97,7 @@ func TestFileStoreIsPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, _ = os.Stat(path)
-	if got := info.Mode().Perm(); got != 0o600 {
+	if got := info.Mode().Perm(); goruntime.GOOS != "windows" && got != 0o600 {
 		t.Fatalf("mode after re-save = %o, want 600", got)
 	}
 	if err := fs.Delete(); err != nil {
