@@ -1,0 +1,14 @@
+golab — an unofficial Go implementation of the Google Colab CLI
+Copyright 2026 golab contributors
+
+This product includes software developed by Google LLC as
+google-colab-cli (https://github.com/googlecolab/google-colab-cli),
+licensed under the Apache License, Version 2.0. Portions of the protocol
+behaviour described in docs/01–08 were derived by reading that source.
+
+The Jupyter kernel-client behaviour was learned from the Colab fork of
+jupyter-kernel-client (https://github.com/googlecolab/jupyter-kernel-client),
+BSD-3-Clause.
+
+"Google" and "Colab" are trademarks of Google LLC. This project is
+unofficial and is not endorsed by Google.

@@ -1,0 +1,37 @@
+version: "2"
+run:
+  timeout: 5m
+  tests: true
+linters:
+  enable:
+    - errcheck
+    - errorlint
+    - gosec
+    - noctx
+    - bodyclose
+    - staticcheck
+    - govet
+    - ineffassign
+    - unused
+  settings:
+    gosec:
+      # G101 flags key *names* (e.g. "oauth_token"), not credentials;
+      # G115 is bounded by validated frame lengths; G304 is reading paths the
+      # user explicitly supplied (script, requirements, state, resolv.conf);
+      # G118/G204 are deliberate long-lived loops / user-selected editor;
+      # G7xx are experimental taint rules flagging the injected fakes.
+      excludes: [G101, G115, G118, G204, G304, G703, G704, G705]
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [errcheck, errorlint, gosec, noctx, bodyclose, staticcheck]
+      - path: internal/testutil/
+        linters: [errcheck, errorlint, gosec, noctx, bodyclose, staticcheck]
+      - text: "Error return value of .*(fmt\\.Fprint|.*\\.Close)"
+        linters: [errcheck]
+      # User-facing error strings intentionally mirror upstream's capitalisation
+      # and punctuation; ConnectionLost is a published sentinel name.
+      - text: "ST1005|ST1012|QF1002"
+        linters: [staticcheck]
+formatters:
+  enable: [gofmt, goimports]

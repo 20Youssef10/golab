@@ -1,0 +1,388 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/spf13/cobra"
+
+	"github.com/20Youssef10/golab/internal/app"
+	"github.com/20Youssef10/golab/internal/colabapi"
+	"github.com/20Youssef10/golab/internal/state"
+)
+
+var gpuAccelerators = []string{"t4", "l4", "g4", "h100", "a100"}
+var tpuAccelerators = []string{"v5e1", "v6e1"}
+
+type runtimeOptions struct {
+	variant     colabapi.Variant
+	accelerator colabapi.Accelerator
+	shape       colabapi.Shape
+}
+
+// resolveRuntimeOptions validates GPU/TPU flags *before* any network call.
+// --tpu silently wins when both flags are present (upstream behaviour).
+func resolveRuntimeOptions(gpu, tpu string, highMem bool) (runtimeOptions, error) {
+	var out runtimeOptions
+	switch {
+	case tpu != "":
+		out.variant = colabapi.VariantTPU
+		v, err := parseAccelerator(tpu, tpuAccelerators, "--tpu")
+		if err != nil {
+			return out, err
+		}
+		out.accelerator = v
+	case gpu != "":
+		out.variant = colabapi.VariantGPU
+		v, err := parseAccelerator(gpu, gpuAccelerators, "--gpu")
+		if err != nil {
+			return out, err
+		}
+		out.accelerator = v
+	default:
+		out.variant = colabapi.VariantDefault
+		out.accelerator = colabapi.AccelNone
+	}
+	out.shape = colabapi.ShapeStandard
+	if highMem {
+		if p := colabapi.ResolveAssignShape(out.accelerator, true); p != nil {
+			out.shape = *p
+		}
+	}
+	return out, nil
+}
+
+func parseAccelerator(value string, allowed []string, flag string) (colabapi.Accelerator, error) {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	for _, name := range allowed {
+		if lower == name {
+			return colabapi.Accelerator(strings.ToUpper(name)), nil
+		}
+	}
+	names := make([]string, 0, len(allowed))
+	for _, name := range allowed {
+		names = append(names, strings.ToUpper(name))
+	}
+	return "", usagef("[colab] Invalid value for %s: unsupported value '%s'. Supported: %s.",
+		flag, value, strings.Join(names, ", "))
+}
+
+func highMemOnly(acc colabapi.Accelerator) bool {
+	switch acc {
+	case colabapi.AccelL4, colabapi.AccelV5E1, colabapi.AccelV6E1:
+		return true
+	default:
+		return false
+	}
+}
+
+func randomName(prefix string) string {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return prefix + "000000"
+	}
+	hex := strings.ReplaceAll(id.String(), "-", "")
+	return prefix + hex[:6]
+}
+
+// createSession allocates and persists a session. Callers translate the two
+// friendly allocation failures into their command-specific messages.
+func createSession(ctx context.Context, d *app.Deps, name string, opts runtimeOptions) (state.Session, error) {
+	client, err := d.ColabClient(ctx)
+	if err != nil {
+		return state.Session{}, err
+	}
+	nbh, err := colabapi.RandomNotebookHash()
+	if err != nil {
+		return state.Session{}, err
+	}
+	res, err := client.Assign(ctx, colabapi.AssignRequest{
+		NotebookHash: nbh,
+		Variant:      opts.variant,
+		Accelerator:  opts.accelerator,
+		Shape:        opts.shape,
+	})
+	if err != nil {
+		return state.Session{}, err
+	}
+	expiry := res.RuntimeProxyInfo.ExpiresAt(nowUTC())
+	s := state.Session{
+		Name: name, Endpoint: res.Endpoint, URL: res.RuntimeProxyInfo.URL,
+		Token: res.RuntimeProxyInfo.Token, TokenExpiresAt: &expiry,
+		Variant: string(opts.variant), Accelerator: string(opts.accelerator),
+		MachineShape: opts.shape.String(),
+	}
+	if err := d.Store.Put(s); err != nil {
+		return state.Session{}, err
+	}
+	writeEvent(d, name, "session_created", map[string]any{
+		"endpoint": s.Endpoint, "variant": s.Variant,
+		"accelerator": s.Accelerator, "machine_shape": s.MachineShape,
+	})
+	return s, nil
+}
+
+func mapAssignFailure(err error, opts runtimeOptions) error {
+	switch {
+	case errors.Is(err, colabapi.ErrTooManyAssignments):
+		return exitf(1, "[colab] Allocation refused (precondition failed). This can mean "+
+			"too many active sessions, or a temporary usage or capacity limit for "+
+			"the requested runtime. Run `colab stop` to free up a session, wait "+
+			"and retry, or try a different accelerator.")
+	case errors.Is(err, colabapi.ErrNoQuota):
+		return exitf(1, "[colab] Backend rejected accelerator '%s'. You may not have "+
+			"quota or entitlement for this accelerator on your account. Try a "+
+			"different one (e.g. --gpu T4) or omit --gpu/--tpu for a CPU runtime.",
+			opts.accelerator)
+	default:
+		return err
+	}
+}
+
+func newSessionCommand() *cobra.Command {
+	var name, gpu, tpu string
+	var highMem bool
+	cmd := &cobra.Command{
+		Use:   "new",
+		Short: "Create a new session",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d := depsOf(cmd)
+			if err := validateSessionName(name); err != nil {
+				return err
+			}
+			opts, err := resolveRuntimeOptions(gpu, tpu, highMem)
+			if err != nil {
+				return err
+			}
+			if name == "" {
+				name = randomName("")
+			}
+			if highMem && highMemOnly(opts.accelerator) {
+				fmt.Fprintln(d.Stderr, "[colab] --high-mem ignored: this accelerator only offers one machine shape.")
+			}
+			fmt.Fprintf(d.Stderr, "[colab] Creating session '%s'...\n", name)
+			if _, err := createSession(cmd.Context(), d, name, opts); err != nil {
+				return mapAssignFailure(err, opts)
+			}
+			fmt.Fprintln(d.Stderr, "[colab] Session READY.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
+	cmd.Flags().StringVar(&gpu, "gpu", "", "GPU accelerator variant (T4, L4, G4, H100, A100)")
+	cmd.Flags().StringVar(&tpu, "tpu", "", "TPU accelerator variant (V5E1, V6E1)")
+	cmd.Flags().BoolVar(&highMem, "high-mem", false, "Request a high-RAM machine shape")
+	return cmd
+}
+
+func sessionsCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sessions",
+		Short: "List all active sessions",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d := depsOf(cmd)
+			local, assignments, err := d.SyncSessions(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if len(assignments) == 0 {
+				fmt.Fprintln(d.Stderr, "[colab] No active sessions found on server.")
+				return nil
+			}
+			names := make(map[string]string, len(local))
+			for name, s := range local {
+				names[s.Endpoint] = name
+			}
+			for _, a := range assignments {
+				name, ok := names[a.Endpoint]
+				if !ok {
+					name = "?"
+				}
+				fmt.Fprintln(d.Stdout, formatSessionLine(name, a.Endpoint,
+					string(a.Accelerator), a.Variant.String(), nil, a.MachineShape.String()))
+			}
+			return nil
+		},
+	}
+}
+
+func statusCommand() *cobra.Command {
+	var name string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show session status",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d := depsOf(cmd)
+			if err := validateSessionName(name); err != nil {
+				return err
+			}
+			local, _, err := d.SyncSessions(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if name != "" {
+				s, err := d.Store.Get(name)
+				if err != nil {
+					if errors.Is(err, state.ErrNotFound) {
+						fmt.Fprintf(d.Stderr, "[colab] Session '%s' not found.\n", name)
+						return nil
+					}
+					return err
+				}
+				printStatus(d, *s)
+				return nil
+			}
+			if len(local) == 0 {
+				fmt.Fprintln(d.Stderr, "[colab] No active sessions.")
+				return nil
+			}
+			for _, s := range local {
+				printStatus(d, s)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
+	return cmd
+}
+
+func printStatus(d *app.Deps, s state.Session) {
+	status := "IDLE"
+	if s.Running != nil {
+		status = "BUSY (" + *s.Running + ")"
+	}
+	fmt.Fprintln(d.Stdout, formatSessionLine(s.Name, s.Endpoint, s.Accelerator,
+		s.Variant, &status, s.MachineShape))
+	if le := s.LastExecution; le != nil {
+		cell := ""
+		if le.Value != nil && *le.Value != "" {
+			cell = " | Cell: " + *le.Value
+		}
+		fmt.Fprintf(d.Stdout, "  Last Execution: %s%s at %s\n", le.Kind, cell, le.At)
+	}
+}
+
+// stopOne terminates one session: kernel (best effort), backend, local state.
+func stopOne(ctx context.Context, d *app.Deps, name string, s state.Session, quiet bool) error {
+	if !quiet {
+		fmt.Fprintf(d.Stderr, "[colab] Stopping session '%s'...\n", name)
+	}
+	if s.KernelID != "" {
+		if kernel, err := d.RuntimeFor(ctx, &s); err == nil {
+			_ = kernel.Shutdown(ctx)
+			_ = kernel.Close()
+		}
+	}
+	client, err := d.ColabClient(ctx)
+	if err == nil {
+		err = client.Unassign(ctx, s.Endpoint)
+	}
+	// Local state is always removed, even when the backend is already gone.
+	_ = d.Store.Delete(name)
+	writeEvent(d, name, "session_terminated", map[string]any{"reason": "user_requested"})
+	return err
+}
+
+func stopCommand() *cobra.Command {
+	var name string
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "stop",
+		Short: "Stop a session, or all sessions with --all",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d := depsOf(cmd)
+			if err := validateSessionName(name); err != nil {
+				return err
+			}
+			if all {
+				local, _, err := d.SyncSessions(cmd.Context())
+				if err != nil {
+					return err
+				}
+				if len(local) == 0 {
+					fmt.Fprintln(d.Stderr, "[colab] No active sessions.")
+					return nil
+				}
+				names := make([]string, 0, len(local))
+				for n := range local {
+					names = append(names, n)
+				}
+				sort.Strings(names)
+				for _, n := range names {
+					_ = stopOne(cmd.Context(), d, n, local[n], false)
+				}
+				fmt.Fprintf(d.Stderr, "[colab] Stopped %d session(s).\n", len(local))
+				return nil
+			}
+			if name == "" {
+				s, err := d.ResolveSession(cmd.Context(), "")
+				if err != nil {
+					return err
+				}
+				name = s.Name
+			}
+			s, err := d.Store.Get(name)
+			if err != nil {
+				if errors.Is(err, state.ErrNotFound) {
+					fmt.Fprintf(d.Stderr, "[colab] Session '%s' not found.\n", name)
+					return nil
+				}
+				return err
+			}
+			if err := stopOne(cmd.Context(), d, name, *s, false); err != nil {
+				return err
+			}
+			fmt.Fprintln(d.Stderr, "[colab] Session terminated.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
+	cmd.Flags().BoolVar(&all, "all", false, "Stop all active sessions")
+	return cmd
+}
+
+func restartKernelCommand() *cobra.Command {
+	var name string
+	cmd := &cobra.Command{
+		Use:   "restart-kernel",
+		Short: "Restart a session's kernel",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d := depsOf(cmd)
+			if err := validateSessionName(name); err != nil {
+				return err
+			}
+			s, err := d.ResolveSession(cmd.Context(), name)
+			if err != nil {
+				return sessionErr(name, err)
+			}
+			kernel, err := d.RuntimeFor(cmd.Context(), s)
+			if err != nil {
+				return pruneLost(d, s.Name, err)
+			}
+			defer func() { _ = kernel.Close() }()
+			if err := kernel.Restart(cmd.Context()); err != nil {
+				return pruneLost(d, s.Name, err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
+	return cmd
+}
+
+func registerSessionCommands(root *cobra.Command) {
+	root.AddCommand(newSessionCommand())
+	root.AddCommand(sessionsCommand())
+	root.AddCommand(restartKernelCommand())
+	root.AddCommand(statusCommand())
+	root.AddCommand(stopCommand())
+}
