@@ -74,15 +74,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # --- Signed artifacts + signed CycloneDX SBOM -------------------------
+      # The pinned sbom-action version has no output-file input and its artifact
+      # upload is unreliable; install syft and write the file ourselves.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@f6c3d0fe42c3cf876e3462574e4c9416b5e0f07a # v0.9.0
+        id: syft
+
       - name: Generate CycloneDX SBOM
-        uses: anchore/sbom-action@f6c3d0fe42c3cf876e3462574e4c9416b5e0f07a # v0.9.0
-        with:
-          path: .
-          format: cyclonedx-json
-          output-file: dist/sbom.cdx.json
-          # v0.9.0 always uploads an artifact; its default name is derived from
-          # the output file and contains a dot, which GitHub rejects.
-          artifact-name: golab-sbom
+        run: ${{ steps.syft.outputs.cmd }} scan . -o cyclonedx-json=dist/sbom.cdx.json
 
       - name: Sign archives and attest the SBOM
         env:
