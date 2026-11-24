@@ -193,6 +193,10 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — v0.1.8 prepared: CLI version bumped to match the changelog
+  (guarded by `TestNumberMatchesLatestChangelogRelease`) alongside the exact
+  CycloneDX predicate URI fix. A signed tag and a real `colab update --install`
+  proof are pending; both prior live defects are recorded below.
 - 2026-11-24 — **CONFIRMED DEFECT in v0.1.7, producer fixed in this change.**
   v0.1.7 was signed (release run `45414858634` green) with the correct v0.3
   bundles (`.mediaType` `application/vnd.dev.sigstore.bundle.v0.3+json` plus an

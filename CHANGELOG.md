@@ -10,6 +10,8 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-24
+
 ### Fixed
 
 - Release workflow: `cosign attest-blob` now uses the exact predicate URI
