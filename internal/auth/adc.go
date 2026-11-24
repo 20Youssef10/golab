@@ -37,6 +37,7 @@ type adcProvider struct {
 	logger      *slog.Logger
 	timeout     time.Duration
 	httpTimeout time.Duration
+	scopeMode   ScopeMode
 	// defaults is replaced by in-process fakes in tests; production uses
 	// google.DefaultTokenSource (the standard ADC discovery chain).
 	defaults func(context.Context, ...string) (oauth2.TokenSource, error)
@@ -47,7 +48,9 @@ type adcProvider struct {
 // runs in a helper goroutine and the caller returns after p.timeout at most.
 func (p *adcProvider) HTTPClient(ctx context.Context, scopes []string) (*http.Client, error) {
 	if len(scopes) == 0 {
-		scopes = Scopes
+		// --scopes drives the default set; an explicit caller argument still
+		// wins (as in TestADCUsesCallerScopes).
+		scopes = p.scopeMode.Scopes()
 	}
 	type result struct {
 		ts  oauth2.TokenSource

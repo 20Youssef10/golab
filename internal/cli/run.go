@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -11,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/20Youssef10/golab/internal/app"
@@ -106,6 +110,80 @@ func exitCodeFromOutputs(outs []runtime.Output) int {
 		return 1
 	}
 	return code
+}
+
+// isTransportError reports errors that may leave a kernel execution still
+// running without a live socket. teardown must be skipped for these so the
+// session and its Pending handle survive for `colab resume`.
+func isTransportError(err error) bool {
+	return errors.Is(err, runtime.ErrOutputGap) ||
+		errors.Is(err, runtime.ConnectionLost) ||
+		errors.Is(err, runtime.ErrTimeout)
+}
+
+// writePending records a recovery handle before code is submitted. The code's
+// hash is kept for identification only; no source is reconstructed on resume.
+func writePending(d *app.Deps, s *state.Session, k runtime.Kernel, msgID, code string) {
+	sum := sha256.Sum256([]byte(code))
+	s.Pending = &state.PendingExecution{
+		MsgID:      msgID,
+		SessionID:  k.SessionID(),
+		StartedAt:  time.Now().UTC(),
+		CodeSHA256: hex.EncodeToString(sum[:]),
+	}
+	_ = d.Store.Put(*s)
+}
+
+func bumpPending(d *app.Deps, s *state.Session, delivered int) {
+	if s.Pending == nil {
+		return
+	}
+	s.Pending.Delivered = delivered
+	_ = d.Store.Put(*s)
+}
+
+func clearPending(d *app.Deps, s *state.Session) {
+	if s.Pending == nil {
+		return
+	}
+	s.Pending = nil
+	_ = d.Store.Put(*s)
+}
+
+// executeTracked wraps Execute with Pending bookkeeping: a handle is written
+// before submission, cleared on terminal success, and kept (with the recovered
+// count) on any failure.
+func executeTracked(ctx context.Context, d *app.Deps, s *state.Session, k runtime.Kernel, code string, opts runtime.ExecOptions) (*runtime.Result, error) {
+	msgID := uuid.NewString()
+	opts.MsgID = msgID
+	writePending(d, s, k, msgID, code)
+	res, err := k.Execute(ctx, code, opts)
+	if err != nil {
+		var gap *runtime.OutputGapError
+		if errors.As(err, &gap) {
+			if s.Pending != nil && gap.MsgID != "" {
+				s.Pending.MsgID = gap.MsgID
+			}
+			bumpPending(d, s, len(gap.Recovered))
+		}
+		return nil, err
+	}
+	clearPending(d, s)
+	return res, nil
+}
+
+// runErrorReason classifies a failed Execute. A transport interruption keeps
+// the session (no prune) and prints the recovery hint; only ErrSessionLost is
+// pruned, as before.
+func runErrorReason(d *app.Deps, name string, err error) (string, error) {
+	if errors.Is(err, runtime.ErrSessionLost) {
+		return "run_failed", pruneLost(d, name, err)
+	}
+	if isTransportError(err) {
+		fmt.Fprintf(d.Stderr, "[colab] Work may still be running. Recover with: colab resume -s %s\n", name)
+		return "transport_interrupted", err
+	}
+	return "run_failed", err
 }
 
 func teardown(ctx context.Context, d *app.Deps, name string, s state.Session, reason string) {
@@ -234,17 +312,21 @@ func runCommand() *cobra.Command {
 						_ = os.WriteFile(out, data, 0o600)
 					}
 				}
+				// A transport interruption may leave the kernel still working.
+				// Keep the session and Pending for `colab resume`; only Close
+				// the local socket (above), never Shutdown/Unassign/Delete.
+				if reason == "transport_interrupted" {
+					return
+				}
 				if !keep {
 					teardown(context.Background(), d, name, s, reason)
 				}
 			}()
 
-			if _, err := kernel.Execute(ctx, contentPrelude, runtime.ExecOptions{IdleTimeout: 30 * time.Second}); err != nil {
-				reason = "run_failed"
-				if e := pruneLost(d, name, err); e != nil {
-					return e
-				}
-				return err
+			if _, err := executeTracked(ctx, d, &s, kernel, contentPrelude, runtime.ExecOptions{IdleTimeout: 30 * time.Second}); err != nil {
+				var e error
+				reason, e = runErrorReason(d, name, err)
+				return e
 			}
 
 			if isNB {
@@ -269,7 +351,7 @@ func runCommand() *cobra.Command {
 					setRunning(d, &s, running("run("+filepath.Base(script)+")"))
 					setLastExecution(d, &s, script, cellID)
 					var renderErr error
-					res, err := kernel.Execute(ctx, code, runtime.ExecOptions{
+					res, err := executeTracked(ctx, d, &s, kernel, code, runtime.ExecOptions{
 						IdleTimeout: timeoutOption(timeout),
 						OnOutput: func(o runtime.Output) {
 							if o.OutputType == "error" && o.EName == "SystemExit" {
@@ -282,8 +364,9 @@ func runCommand() *cobra.Command {
 					})
 					switch {
 					case err != nil:
-						reason = "run_failed"
-						return pruneLost(d, name, err)
+						var e error
+						reason, e = runErrorReason(d, name, err)
+						return e
 					case renderErr != nil:
 						reason = "run_failed"
 						return renderErr
@@ -304,7 +387,7 @@ func runCommand() *cobra.Command {
 				setRunning(d, &s, running("run("+filepath.Base(script)+")"))
 				setLastExecution(d, &s, script, nil)
 				var renderErr error
-				res, err := kernel.Execute(ctx, payload, runtime.ExecOptions{
+				res, err := executeTracked(ctx, d, &s, kernel, payload, runtime.ExecOptions{
 					IdleTimeout: timeoutOption(timeout),
 					OnOutput: func(o runtime.Output) {
 						if o.OutputType == "error" && o.EName == "SystemExit" {
@@ -317,8 +400,9 @@ func runCommand() *cobra.Command {
 				})
 				switch {
 				case err != nil:
-					reason = "run_failed"
-					return pruneLost(d, name, err)
+					var e error
+					reason, e = runErrorReason(d, name, err)
+					return e
 				case renderErr != nil:
 					reason = "run_failed"
 					return renderErr

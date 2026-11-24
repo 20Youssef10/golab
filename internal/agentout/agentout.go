@@ -97,6 +97,172 @@ func IsWrapped(w io.Writer) bool {
 	return false
 }
 
+// DataItem is one non-image MIME bundle entry of a cell record. The map is
+// kept open-ended because the upstream contract forwards arbitrary MIME types
+// (text/plain, text/html, application/json, …) alongside "output_type".
+type DataItem map[string]any
+
+// CellError is the sanitized error detail of a failed cell.
+type CellError struct {
+	EName     string `json:"ename"`
+	EValue    string `json:"evalue"`
+	Traceback string `json:"traceback"`
+}
+
+// CellResult is one per-cell record of `golab exec --json`. Field order is
+// part of the contract and mirrors upstream PR #237.
+type CellResult struct {
+	CellIndex int        `json:"cell_index"`
+	CellID    *string    `json:"cell_id"`
+	Status    string     `json:"status"`
+	Stdout    string     `json:"stdout"`
+	Stderr    string     `json:"stderr"`
+	Data      []DataItem `json:"data"`
+	Images    []string   `json:"images"`
+	Error     *CellError `json:"error"`
+}
+
+// CellWriter emits CellResult records with the same NDJSON/JSON framing as
+// the typed event writers. With format "ndjson" (the default, and what
+// `exec --json` uses) each record is one line; with "json" all records form a
+// single document finalised by Close. If w is already an agentout writer the
+// root --output flag owns framing, so records are forwarded as typed output
+// events instead of being wrapped a second time.
+type CellWriter struct {
+	mu        sync.Mutex
+	w         io.Writer
+	document  bool
+	viaEvents bool
+	started   bool
+	closed    bool
+}
+
+// NewCellWriter wraps w for per-cell records.
+func NewCellWriter(w io.Writer, format string) (*CellWriter, error) {
+	if w == nil {
+		return nil, ErrNilWriter
+	}
+	if IsWrapped(w) {
+		return &CellWriter{w: w, viaEvents: true}, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "ndjson":
+		return &CellWriter{w: w}, nil
+	case "json":
+		return &CellWriter{w: w, document: true}, nil
+	default:
+		return nil, fmt.Errorf("%w: %q", ErrUnsupportedFormat, format)
+	}
+}
+
+// Emit writes one cell record after a defensive redaction pass.
+func (c *CellWriter) Emit(rec CellResult) error {
+	if c == nil {
+		return ErrNilWriter
+	}
+	b, err := encodeJSON(redactCellResult(rec))
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errors.New("agentout: cell write after close")
+	}
+	if c.viaEvents {
+		return Emit(c.w, "output", string(b))
+	}
+	if c.document {
+		if !c.started {
+			if _, err := io.WriteString(c.w, `{"schema":"`+Schema+`","cells":[`); err != nil {
+				return err
+			}
+			c.started = true
+		} else if _, err := io.WriteString(c.w, ","); err != nil {
+			return err
+		}
+		_, err = c.w.Write(b)
+		return err
+	}
+	b = append(b, '\n')
+	_, err = c.w.Write(b)
+	return err
+}
+
+// Close finalises a cell document. It is a no-op for NDJSON and for a wrapped
+// writer (whose owner finalises the enclosing document).
+func (c *CellWriter) Close() error {
+	if c == nil || c.viaEvents || !c.document {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	if !c.started {
+		_, err := io.WriteString(c.w, `{"schema":"`+Schema+`","cells":[]}`+"\n")
+		return err
+	}
+	_, err := io.WriteString(c.w, "]}\n")
+	return err
+}
+
+func redactCellResult(r CellResult) CellResult {
+	if r.Data == nil {
+		r.Data = []DataItem{}
+	}
+	if r.Images == nil {
+		r.Images = []string{}
+	}
+	r.Stdout = logx.Redact(r.Stdout)
+	r.Stderr = logx.Redact(r.Stderr)
+	if r.CellID != nil {
+		id := logx.Redact(*r.CellID)
+		r.CellID = &id
+	}
+	for i := range r.Images {
+		r.Images[i] = logx.Redact(r.Images[i])
+	}
+	data := make([]DataItem, len(r.Data))
+	for i, item := range r.Data {
+		clean := DataItem{}
+		for k, v := range item {
+			clean[logx.Redact(k)] = redactCellValue(v)
+		}
+		data[i] = clean
+	}
+	r.Data = data
+	if r.Error != nil {
+		e := *r.Error
+		e.EName = logx.Redact(e.EName)
+		e.EValue = logx.Redact(e.EValue)
+		e.Traceback = logx.Redact(e.Traceback)
+		r.Error = &e
+	}
+	return r
+}
+
+func redactCellValue(v any) any {
+	switch x := v.(type) {
+	case string:
+		return logx.Redact(x)
+	case []any:
+		for i := range x {
+			x[i] = redactCellValue(x[i])
+		}
+		return x
+	case map[string]any:
+		for k, value := range x {
+			x[k] = redactCellValue(value)
+		}
+		return x
+	default:
+		return v
+	}
+}
+
 // Close finalises a json document. It is a no-op for text and ndjson writers
 // and safe to call more than once.
 func Close(w io.Writer) error {
@@ -181,11 +347,15 @@ func (d *documentWriter) closeDocument() error {
 	return err
 }
 
-func encodeEvent(e Event) ([]byte, error) {
+func encodeEvent(e Event) ([]byte, error) { return encodeJSON(e) }
+
+// encodeJSON shares the compact, HTML-safe encoding used by both event and
+// cell-record writers so framing bytes are identical across the two schemas.
+func encodeJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(e); err != nil {
+	if err := enc.Encode(v); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil

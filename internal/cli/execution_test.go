@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -458,5 +460,286 @@ func TestRunFlow(t *testing.T) {
 				t.Fatalf("session not torn down: %v", sessions)
 			}
 		})
+	}
+}
+
+// jsonRecords decodes one NDJSON cell record per stdout line. Port of upstream
+// tests/test_exec_json.py::_records.
+func jsonRecords(t *testing.T, raw string) []map[string]any {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	out := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("stdout line is not JSON: %v (%q)", err, line)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// Ports upstream tests/test_exec_json.py::test_exec_json_success_emits_one_record.
+// Go keeps its own CPython exit-code mapping; only the output shape is ported.
+func TestExecJSONSuccess(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	h.kernel.Script(
+		fakekernel.Stream("stdout", "hello\n"),
+		fakekernel.Stream("stderr", "warn\n"),
+		fakekernel.ExecuteResult(map[string]any{"text/plain": "42"}, 1),
+		fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+	)
+	if code := h.run(t, "print(1)\n", "exec", "-s", "s1", "--json"); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	records := jsonRecords(t, h.stdout.String())
+	if len(records) != 1 {
+		t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+	}
+	r := records[0]
+	for key, want := range map[string]any{
+		"cell_index": float64(0), "status": "ok",
+		"stdout": "hello\n", "stderr": "warn\n",
+	} {
+		if r[key] != want {
+			t.Errorf("%s = %v, want %v (record %v)", key, r[key], want, r)
+		}
+	}
+	if r["cell_id"] != nil || r["error"] != nil {
+		t.Fatalf("cell_id/error must be null: %v", r)
+	}
+	data, ok := r["data"].([]any)
+	if !ok || len(data) != 1 {
+		t.Fatalf("data = %v", r["data"])
+	}
+	item, ok := data[0].(map[string]any)
+	if !ok || item["output_type"] != "execute_result" || item["text/plain"] != "42" {
+		t.Fatalf("data item = %v", data[0])
+	}
+	if images, ok := r["images"].([]any); !ok || len(images) != 0 {
+		t.Fatalf("images = %v", r["images"])
+	}
+	// The kernel's stderr is captured in the record, never replayed.
+	if strings.Contains(h.stderr.String(), "warn") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+// Ports upstream tests/test_exec_json.py::test_exec_json_saves_images_and_reports_paths.
+func TestExecJSONImages(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	png := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
+	h.kernel.Script(
+		fakekernel.Stream("stdout", "plotting\n"),
+		fakekernel.DisplayData(map[string]any{"image/png": png, "text/plain": "<Figure>"}, nil, ""),
+		fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+	)
+	target := filepath.Join(t.TempDir(), "plot.png")
+	if code := h.run(t, "plot()\n", "exec", "-s", "s1", "--json", "--output-image", target); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	records := jsonRecords(t, h.stdout.String())
+	if len(records) != 1 {
+		t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+	}
+	r := records[0]
+	if r["stdout"] != "plotting\n" {
+		t.Fatalf("stdout field = %v", r["stdout"])
+	}
+	images, ok := r["images"].([]any)
+	if !ok || len(images) != 1 || images[0] != target {
+		t.Fatalf("images = %v (want [%s])", r["images"], target)
+	}
+	data, ok := r["data"].([]any)
+	if !ok || len(data) != 1 {
+		t.Fatalf("data = %v", r["data"])
+	}
+	item := data[0].(map[string]any)
+	if item["output_type"] != "display_data" || item["text/plain"] != "<Figure>" {
+		t.Fatalf("data item = %v", item)
+	}
+	if strings.Contains(h.stdout.String(), png) || strings.Contains(h.stdout.String(), "png-bytes") {
+		t.Fatalf("base64 image inlined in stdout: %q", h.stdout.String())
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "png-bytes" {
+		t.Fatalf("saved image = %q, err=%v", b, err)
+	}
+}
+
+// Ports upstream tests/test_exec_json.py::test_exec_json_error_strips_ansi_and_exits_nonzero.
+func TestExecJSONErrorSanitized(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	h.kernel.Script(
+		fakekernel.Stream("stdout", "before\n"),
+		fakekernel.Error("ValueError", "bad", []string{
+			"\x1b[0;31mValueError\x1b[0m Traceback",
+			"\x1b[1;32m----> 1\x1b[0m boom()",
+		}),
+		fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+	)
+	if code := h.run(t, "boom()\n", "exec", "-s", "s1", "--json"); code != 1 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	records := jsonRecords(t, h.stdout.String())
+	if len(records) != 1 {
+		t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+	}
+	r := records[0]
+	if r["status"] != "error" || r["stdout"] != "before\n" {
+		t.Fatalf("record = %v", r)
+	}
+	errObj, ok := r["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error = %v", r["error"])
+	}
+	if errObj["ename"] != "ValueError" || errObj["evalue"] != "bad" {
+		t.Fatalf("error = %v", errObj)
+	}
+	if got := errObj["traceback"]; got != "ValueError Traceback\n----> 1 boom()" {
+		t.Fatalf("traceback = %q", got)
+	}
+	if strings.Contains(h.stdout.String(), "\x1b") || strings.Contains(h.stderr.String(), "\x1b") {
+		t.Fatalf("ANSI leaked: stdout=%q stderr=%q", h.stdout.String(), h.stderr.String())
+	}
+	// Kernel errors are not replayed on stderr in --json mode.
+	if strings.Contains(h.stderr.String(), "ValueError") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+// Ports upstream tests/test_exec_json.py::test_exec_json_notebook_emits_record_per_cell.
+// This fork deliberately keeps the newly-landed CPython stop-at-first-failing-
+// cell behaviour, so only the cells actually executed produce records.
+func TestExecJSONNotebook(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	h.kernel.Script(fakekernel.Stream("stdout", "first\n"), fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+	h.kernel.Script(
+		fakekernel.Error("NameError", "fail", []string{"NameError: fail\n"}),
+		fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+	)
+	n := nb.NewNotebook()
+	c1 := nb.NewCodeCell("ok()")
+	c1.ID = "cell-a"
+	c2 := nb.NewCodeCell("fail()")
+	c2.ID = "cell-b"
+	c3 := nb.NewCodeCell("after()")
+	c3.ID = "cell-c"
+	n.Cells = []nb.Cell{c1, c2, c3}
+	raw, err := nb.Marshal(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "nb.ipynb")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.run(t, "", "exec", "-s", "s1", "--json", "-f", path); code != 1 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	records := jsonRecords(t, h.stdout.String())
+	if len(records) != 2 {
+		t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+	}
+	for i, want := range []struct {
+		index  int
+		id     string
+		status string
+	}{{0, "cell-a", "ok"}, {1, "cell-b", "error"}} {
+		r := records[i]
+		if r["cell_index"] != float64(want.index) || r["cell_id"] != want.id || r["status"] != want.status {
+			t.Fatalf("record %d = %v", i, r)
+		}
+	}
+	if execs := h.kernel.Executions(); len(execs) != 3 { // prelude + 2 cells
+		t.Fatalf("executions = %d", len(execs))
+	}
+	// Progress stays on stderr so stdout remains only records.
+	if !strings.Contains(h.stderr.String(), "[colab] Executing cell 1/3") ||
+		!strings.Contains(h.stderr.String(), "_output.ipynb") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+}
+
+// Exit codes are a CPython contract owned by run.go's exitCodeFromOutputs.
+// --json must not perturb them for any error shape (PR #237 compatibility).
+func TestExecJSONExitCodesMatchTextMode(t *testing.T) {
+	systemExit := func(evalue string) fakekernel.Step {
+		return fakekernel.Error("SystemExit", evalue, []string{"SystemExit: " + evalue + "\n"})
+	}
+	for _, tc := range []struct {
+		name string
+		step fakekernel.Step
+		want int
+	}{
+		{name: "success", step: fakekernel.Stream("stdout", "ok\n"), want: 0},
+		{name: "error", step: fakekernel.Error("ValueError", "boom", []string{"ValueError: boom\n"}), want: 1},
+		{name: "systemexit zero", step: systemExit("0"), want: 0},
+		{name: "systemexit seven", step: systemExit("7"), want: 7},
+		{name: "systemexit message", step: systemExit("fatal config error"), want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codes := make([]int, 0, 2)
+			for _, jsonMode := range []bool{false, true} {
+				h := newHarness(t)
+				h.putSession(t, "s1")
+				h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+				h.kernel.Script(tc.step, fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+				args := []string{"exec", "-s", "s1"}
+				if jsonMode {
+					args = append(args, "--json")
+				}
+				codes = append(codes, h.run(t, "code()\n", args...))
+			}
+			if codes[0] != tc.want || codes[1] != tc.want {
+				t.Fatalf("exit codes text/json = %v, want both %d", codes, tc.want)
+			}
+		})
+	}
+}
+
+// Ports upstream tests/test_exec_json.py::test_exec_json_reports_client_side_failure.
+func TestExecJSONTimeoutRecord(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	h.kernel.Script(fakekernel.Step{Delay: 500 * time.Millisecond, MsgType: "status", Content: map[string]any{"execution_state": "idle"}})
+	if code := h.run(t, "slow()\n", "exec", "-s", "s1", "--json", "--timeout", "0.01"); code != 1 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	records := jsonRecords(t, h.stdout.String())
+	if len(records) != 1 {
+		t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+	}
+	r := records[0]
+	if r["status"] != "error" {
+		t.Fatalf("record = %v", r)
+	}
+	errObj, ok := r["error"].(map[string]any)
+	if !ok || errObj["ename"] == "" || errObj["evalue"] == "" {
+		t.Fatalf("error = %v", r["error"])
+	}
+}
+
+// Ports upstream tests/test_exec_json.py::test_exec_json_lost_session_keeps_stdout_clean.
+func TestExecJSONLostSessionCleanStdout(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.SetUnauthorized(true)
+	if code := h.run(t, "print(1)\n", "exec", "-s", "s1", "--json"); code != 1 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	if h.stdout.String() != "" {
+		t.Fatalf("stdout = %q", h.stdout.String())
+	}
+	if !strings.Contains(h.stderr.String(), "appears to be lost") {
+		t.Fatalf("stderr = %q", h.stderr.String())
 	}
 }

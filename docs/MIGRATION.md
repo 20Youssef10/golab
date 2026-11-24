@@ -97,7 +97,10 @@ If a session was already gone on the server, `golab` prunes the local record and
 | HTTP requests | unbounded in upstream | explicit per-request timeouts and bounded retries |
 | State on parse error | silently wiped | aborts loudly; `.bak` retained |
 | File transfer | full-file base64 | streamed chunks; `-r` for directories; atomic downloads |
-| Structured output | none | `--output text\|json\|ndjson` with the `golab/1` schema, `--explain`, `--yes` |
+| Structured output | none | `--output text\|json\|ndjson` with the `golab/1` schema, `--explain`, `--yes`; `exec --json` for per-cell NDJSON |
+| Secrets | no CLI bridge | local-only `exec --secret` / `--env-file`; Colab Web secrets are never read |
+| Narrow scopes | single broad grant | `--scopes full\|minimal` forces re-consent on change; minimal cannot mount Drive |
+| Interrupted executions | no recovery | transport errors keep the session; `colab resume -s NAME` waits for late output without resubmitting |
 | Platforms | Linux/macOS only upstream | Linux, macOS, Windows, Termux |
 
 ## `--public-api` vs `--no-public-api`

@@ -12,7 +12,7 @@ Upstream HEAD `0abf82d` — the `v0.8.0` tag plus five commits — analysed on 2
 
 ## What OAuth scopes does `golab` request?
 
-The default OAuth2 provider requests the same six scopes as upstream: `openid`, `userinfo.profile`, `userinfo.email`, `cloud-platform`, **`colaboratory`** and `drive.file`. The `colaboratory` scope is mandatory — without it `/tun/m/*` returns 401/403.
+The default (`--scopes full`, also `COLAB_SCOPES=full`) requests the same six scopes as upstream: `openid`, `userinfo.profile`, `userinfo.email`, `cloud-platform`, **`colaboratory`** and `drive.file`. The `colaboratory` scope is mandatory — without it `/tun/m/*` returns 401/403. `--scopes minimal` requests only `openid`, `email` and `colaboratory`; it cannot mount Drive. Changing mode forces a fresh browser consent — a legacy/full token is never silently reused with a narrower grant. MCP-style per-notebook approval is not implemented.
 
 With `--auth adc` (Application Default Credentials), `gcloud auth application-default login` may ignore requested scopes, so supply them at login time:
 
@@ -63,6 +63,7 @@ Install the `linux_arm64` (or matching `linux_arm`) release archive, or install 
 - **OAuth2:** in the OS keyring (service `google-colab-cli`, user `oauth_token`), probed with a 5-second timeout. If no keyring is available, a `0600` file in the config directory is used. A Python `token.json` is imported once.
 - **ADC:** credentials are managed by `gcloud`, not by `golab`.
 - Only the **refresh token** is persisted; access tokens are minted on demand. `golab whoami` never prints a token, and tokens are redacted from logs and errors.
+- `exec --secret NAME` / `--env-file PATH` inject local values into the kernel but never persist them or echo them into stdout, stderr, history or JSON; Colab Web UI secrets are not read.
 
 Config directory: `~/.config/colab-cli/` on Linux/macOS/Termux, `%APPDATA%\colab-cli\` on Windows; override with `COLAB_CONFIG_DIR`. Run `golab audit` for a local report on file modes and token-store tier.
 
@@ -85,7 +86,7 @@ Yes. Set `COLAB_OUTPUT=json` or `--output ndjson` to wrap stdout in the stable `
 {"schema":"golab/1","type":"error","text":"..."}
 ```
 
-Diagnostics stay on stderr. `--explain` prints a redacted plan for billable commands before any network call, and `--yes` (or `COLAB_ASSUME_YES=1`) handles non-destructive confirmations without bypassing budget enforcement. `golab agentout` lets you test your consumer without a VM. See [USAGE.md §7](USAGE.md#7-structured-output-plans-and-confirmations).
+`golab exec --json` adds one NDJSON record per executed cell (`cell_index`, `cell_id`, `status`, outputs, data, error) with the same exit codes as text mode. Diagnostics stay on stderr. `--explain` prints a redacted plan for billable commands before any network call, and `--yes` (or `COLAB_ASSUME_YES=1`) handles non-destructive confirmations without bypassing budget enforcement. `golab agentout` lets you test your consumer without a VM. See [USAGE.md §7](USAGE.md#7-structured-output-plans-and-confirmations).
 
 ## Why is the chatter on stderr?
 

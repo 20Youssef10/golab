@@ -8,6 +8,7 @@ func registerCommands(root *cobra.Command) {
 	registerSessionCommands(root)
 	registerExecutionCommands(root)
 	registerRunCommands(root)
+	registerResumeCommands(root)
 	registerFileCommands(root)
 	registerUsageCommands(root)
 	registerUtilityCommands(root)

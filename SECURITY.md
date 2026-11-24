@@ -63,11 +63,17 @@ Security issues we want to hear about include:
   sequences (e.g. OSC-52 clipboard writes) past the `render` sanitiser.
 - Authentication/authorization bypasses, privilege issues, and supply-chain
   weaknesses in the release pipeline.
+- Secret-bridge regressions: `--secret`/`--env-file` values reaching stdout,
+  stderr, history, JSON events or disk; reading Colab Web/browser secrets.
+- Scope-mode regressions: a `full` token being silently reused after switching
+  to `--scopes minimal`, or a narrow-mode command bypassing its requested set.
 
 ## Out of scope
 
 - Colab **service outages, incidents or account/quota limits** — report those to
   Google, not here.
+- Colab **Web UI secrets** and browser state: this CLI never reads them. Use the local-only `exec --secret` / `--env-file` bridge.
+- Unsigned maintainer **notice feeds** (upstream PR #276): not ported; the signed release banner is the supported update-notification channel.
 - **Upstream API changes** that break compatibility without a security impact
   (track those as normal issues; see the upstream-sync policy in `docs/06 §5`).
 - The already-documented **third-party OAuth client risk** (risk R-02 in

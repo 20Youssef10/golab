@@ -13,6 +13,11 @@ import (
 	"github.com/20Youssef10/golab/internal/state"
 )
 
+// ErrNoPendingExecution means `resume` was invoked for a session that has no
+// interrupted execution recorded. It is a typed prerequisite failure so callers
+// never string-match the diagnostic.
+var ErrNoPendingExecution = errors.New("no pending execution")
+
 // exitError is the typed carrier for a command's exit status. A message may be
 // empty when the status alone carries the meaning (e.g. `run` mirroring a
 // script's sys.exit(N)).
@@ -90,6 +95,13 @@ func mapError(err error) error {
 			colabapi.ReasonOf(err))
 	case errors.Is(err, runtime.ErrSessionLost):
 		return exitf(1, "[colab] Session appears to be lost (404/401). Run `colab sessions` to check its state.")
+	case errors.Is(err, ErrNoPendingExecution):
+		return exitf(1, "[colab] No pending execution to resume for this session. "+
+			"Run `colab run -s NAME SCRIPT` first; recovery is only possible after a transport interruption.")
+	case errors.Is(err, runtime.ErrOutputGap):
+		// OutputGapError's own message carries the resume hint; keep ordering
+		// ahead of ErrTimeout because its unwrapped cause may be a TimeoutError.
+		return exitf(1, "[colab] %s", logx.Redact(err.Error()))
 	case errors.Is(err, runtime.ErrTimeout):
 		return exitf(1, "[colab] %s", logx.Redact(err.Error()))
 	case errors.Is(err, auth.ErrADCUnavailable), errors.Is(err, auth.ErrADCMissingScope),

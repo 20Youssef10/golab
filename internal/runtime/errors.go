@@ -23,6 +23,11 @@ var (
 	ErrTimeout = errors.New("idle timeout")
 	// ConnectionLost means the WebSocket reader ended unexpectedly.
 	ConnectionLost = errors.New("connection was lost")
+	// ErrOutputGap means a socket drop may have swallowed output that was
+	// published while no socket was attached. This port cannot replay those
+	// messages (iopub has no ack/resend and REST has no output endpoint), so the
+	// error is deliberately honest about what was and was not recovered.
+	ErrOutputGap = errors.New("output gap")
 )
 
 // SessionLostError carries the HTTP status that proved the session is gone.
@@ -76,6 +81,36 @@ func (e *ConnectionLostError) Unwrap() error {
 		return e.Cause
 	}
 	return ConnectionLost
+}
+
+// OutputGapError is returned when an execution ends without a terminal
+// idle+reply after its channels socket dropped. Recovered holds exactly the
+// outputs this process observed (deduplicated); anything the kernel emitted
+// during the dead window is unrecoverable and is NOT invented here. Cause is
+// the underlying transport error (e.g. a *ConnectionLostError) when there is
+// one, kept typed for errors.Is/errors.As callers.
+type OutputGapError struct {
+	MsgID     string
+	Recovered []Output
+	Cause     error
+}
+
+func (e *OutputGapError) Error() string {
+	msg := fmt.Sprintf("output may have been emitted while the kernel connection was down "+
+		"(execution %s): recovered %d output(s); output published during the drop cannot "+
+		"be replayed by this client. Work may still be running. Recover with: colab resume -s NAME",
+		e.MsgID, len(e.Recovered))
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
+}
+func (e *OutputGapError) Is(target error) bool { return target == ErrOutputGap }
+func (e *OutputGapError) Unwrap() error {
+	if e.Cause != nil {
+		return e.Cause
+	}
+	return ErrOutputGap
 }
 
 // TimeoutError reports which phase of the execute loop went quiet.

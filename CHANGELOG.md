@@ -14,6 +14,21 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ### Added
 
+- Second upstream batch: `colab exec --json` emits NDJSON per-cell results with
+  the same CPython exit codes (PR #237); `--secret NAME` and `--env-file PATH`
+  provide a local-only secrets bridge with mandatory redaction (issue #157;
+  Colab Web/browser secrets are deliberately not read); `--scopes full|minimal`
+  (or `COLAB_SCOPES`) narrows requested OAuth scopes and forces re-consent on a
+  mode change (issue #71); `drivemount --wait-for-consent` polls for browser
+  approval instead of requiring Enter (issue #258; the approval itself remains
+  human-only).
+- `colab resume -s NAME [--timeout S]` reattaches to a transport-interrupted
+  execution and waits for late output/result without resubmitting. A bounded
+  msg-id journal deduplicates replayed frames; messages emitted strictly while
+  the socket was down cannot be fabricated and surface as a typed
+  `ErrOutputGap` with a resume hint. `run` no longer tears down a session on a
+  transport error (issue #220 / PR #221, scoped implementation).
+
 - `colab run <notebook>.ipynb` executes code cells in order with shared kernel
   state, skips markdown, writes `<base>_output.ipynb` with mode 0600, parses
   before any VM allocation and warns (without injecting) on extra script args

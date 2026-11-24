@@ -253,6 +253,42 @@ func waitForEnter(ctx context.Context, d *app.Deps) {
 	fmt.Fprintln(d.Stderr)
 }
 
+// Consent in a browser is inherently interactive, so a fully click-free
+// drivemount is impossible. The most we can automate is the *wait*: poll the
+// control plane until it observes that propagation succeeded, instead of
+// asking the user to press Enter. Bound the wait so a headless host cannot
+// hang forever (matches interactiveAutomationTimeout's rationale).
+const (
+	consentPollInterval = 2 * time.Second
+	consentPollTimeout  = 5 * time.Minute
+)
+
+// pollForConsent calls probe until it reports Success or the derived deadline
+// expires. It intentionally has no stdin or terminal dependency: the only
+// signal it waits for is the server reflecting a completed browser consent.
+// Each probe receives the bounded context, so a stalled HTTP call cannot
+// outlive the overall timeout.
+func pollForConsent(ctx context.Context, timeout, interval time.Duration, probe func(context.Context) (*colabapi.CredProp, error)) (*colabapi.CredProp, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		cp, err := probe(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if cp != nil && cp.Success {
+			return cp, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 // cleanDetail strips ANSI/CSI/OSC escapes and control characters from an
 // untrusted server string, collapses whitespace and caps the result. Only the
 // returned text may reach the terminal or the history log.
@@ -389,6 +425,7 @@ func reportDriveFailure(d *app.Deps, name string, err error) {
 
 func driveCommand() *cobra.Command {
 	var name string
+	var waitForConsent bool
 	cmd := &cobra.Command{
 		Use:   "drivemount [PATH]",
 		Short: "Mount Google Drive at PATH (default /content/drive)",
@@ -445,7 +482,24 @@ func driveCommand() *cobra.Command {
 						}
 						showDriveAuthURL(d, cp.UnauthorizedRedirectURI)
 						writeEvent(d, s.Name, history.EventDriveAuthNeeded, map[string]any{"uri": cp.UnauthorizedRedirectURI})
-						waitForEnter(ctx, d)
+						// The browser consent itself stays human-only. --wait-for-consent
+						// replaces the Enter prompt with a bounded poll of the control
+						// plane; --yes skips the prompt too (and goes straight to Confirm).
+						switch {
+						case waitForConsent:
+							cp, err = pollForConsent(ctx, consentPollTimeout, consentPollInterval,
+								func(c context.Context) (*colabapi.CredProp, error) {
+									return client.CredentialsPropagation(c, s.Endpoint)
+								})
+							if err != nil {
+								reportDriveFailure(d, s.Name, err)
+								return
+							}
+						case assumeYes(cmd):
+							// Non-interactive confirmation already granted.
+						default:
+							waitForEnter(ctx, d)
+						}
 					}
 					final, err := cp.Confirm(ctx)
 					if err != nil {
@@ -469,6 +523,8 @@ func driveCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
+	cmd.Flags().BoolVar(&waitForConsent, "wait-for-consent", false,
+		"Poll for Drive consent instead of waiting for Enter (browser consent is still human-only)")
 	return cmd
 }
 

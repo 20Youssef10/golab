@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +17,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/20Youssef10/golab/internal/agentout"
 	"github.com/20Youssef10/golab/internal/app"
+	"github.com/20Youssef10/golab/internal/logx"
 	"github.com/20Youssef10/golab/internal/nb"
 	"github.com/20Youssef10/golab/internal/platform"
 	"github.com/20Youssef10/golab/internal/render"
@@ -118,10 +124,144 @@ func execOutputHook(d *app.Deps, outputImage string) func(runtime.Output) error 
 	}
 }
 
+// ansiEscapeRE matches the CSI sequences IPython uses to colour tracebacks.
+// --json promises plain text, so they are removed before the record is built.
+var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+// plainTraceback joins a traceback into a single control-character-free line
+// block. render.Sanitize additionally removes OSC/DCS and stray C0 controls.
+func plainTraceback(lines []string) string {
+	return render.Sanitize(ansiEscapeRE.ReplaceAllString(strings.Join(lines, "\n"), ""))
+}
+
+// saveCellImage decodes a kernel image payload and saves it through the shared
+// render path (0600 file, --output-image honoured). Nothing is written to the
+// record's stdout: only the sanitized path is returned.
+func saveCellImage(value any, mime, target string) (string, error) {
+	var data []byte
+	switch x := value.(type) {
+	case []byte:
+		data = x
+	case string:
+		if b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(x)); err == nil {
+			data = b
+		} else {
+			data = []byte(x)
+		}
+	default:
+		return "", fmt.Errorf("exec: unsupported %s payload %T", mime, value)
+	}
+	var buf bytes.Buffer
+	err := render.ImageWithConfig(&buf, data, mime, render.ImageConfig{
+		TargetPath: target,
+		Protocol:   "none", // never emit Kitty/iTerm2 escapes into a JSON record
+		Stderr:     io.Discard,
+	})
+	if err != nil {
+		return "", err
+	}
+	const prefix = "[Image saved to: "
+	s := buf.String()
+	i := strings.Index(s, prefix)
+	if i < 0 {
+		return "", errors.New("exec: image save did not report a path")
+	}
+	rest := s[i+len(prefix):]
+	j := strings.IndexByte(rest, ']')
+	if j < 0 {
+		return "", errors.New("exec: image save reported a malformed path")
+	}
+	return rest[:j], nil
+}
+
+// buildCellRecord summarises one cell's kernel outputs as the upstream PR #237
+// record. Inputs are already redacted by execRedactor before reaching here.
+func buildCellRecord(outs []runtime.Output, index int, cellID *string, outputImage string, red *execRedactor) (agentout.CellResult, error) {
+	rec := agentout.CellResult{
+		CellIndex: index,
+		CellID:    cellID,
+		Status:    "ok",
+		Data:      []agentout.DataItem{},
+		Images:    []string{},
+	}
+	for _, o := range outs {
+		switch {
+		case o.OutputType == "stream":
+			text := red.Redact(o.Text)
+			if o.Name == "stderr" {
+				rec.Stderr += text
+			} else {
+				rec.Stdout += text
+			}
+		case o.OutputType == "error":
+			rec.Status = "error"
+			rec.Error = &agentout.CellError{
+				EName:     red.Redact(o.EName),
+				EValue:    red.Redact(o.EValue),
+				Traceback: red.Redact(plainTraceback(o.Traceback)),
+			}
+		case o.Data != nil:
+			for _, mime := range []string{"image/png", "image/jpeg"} {
+				value, ok := o.Data[mime]
+				if !ok {
+					continue
+				}
+				path, err := saveCellImage(value, mime, outputImage)
+				if err != nil {
+					return rec, err
+				}
+				rec.Images = append(rec.Images, red.Redact(path))
+				break
+			}
+			kind := o.OutputType
+			if kind != "display_data" && kind != "execute_result" {
+				kind = "display_data"
+			}
+			item := agentout.DataItem{"output_type": kind}
+			for mime, value := range o.Data {
+				if strings.HasPrefix(strings.ToLower(mime), "image/") {
+					continue // images are reported by path, never inlined
+				}
+				item[mime] = red.Any(value)
+			}
+			rec.Data = append(rec.Data, item)
+		}
+	}
+	return rec, nil
+}
+
+// clientErrorEname names a client-side failure like upstream's
+// type(e).__name__ (TimeoutError, SessionLostError, …) without echoing its
+// message, which may contain user data.
+func clientErrorEname(err error) string {
+	name := fmt.Sprintf("%T", err)
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimPrefix(name, "*")
+	if name == "" || name == "errorString" || name == "exitError" {
+		return "RuntimeError"
+	}
+	return name
+}
+
+// redactedExecError keeps the mapped exit code but removes any injected secret
+// from an error message before it reaches stderr.
+func redactedExecError(err error, red *execRedactor) error {
+	mapped := mapError(err)
+	var ee *exitError
+	if errors.As(mapped, &ee) {
+		return exitf(ee.code, "%s", red.Redact(ee.msg))
+	}
+	return exitf(1, "%s", red.Redact(mapped.Error()))
+}
+
 func execCommand() *cobra.Command {
 	var name, file, outputImage string
 	var timeout float64
 	var env []string
+	var secretNames, envFiles []string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "exec",
 		Short: "Execute code in a session",
@@ -135,6 +275,29 @@ func execCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Resolve every injected value before session resolution or any
+			// allocation: a bad key/mode must exit 2 with zero network calls.
+			var cliSecrets []injectedSecret
+			var sensitive []logx.Secret
+			for _, secretName := range secretNames {
+				value, err := resolveSecretValue(cmd.Context(), secretName)
+				if err != nil {
+					return err
+				}
+				cliSecrets = append(cliSecrets, injectedSecret{name: secretName, value: value})
+				sensitive = append(sensitive, value)
+			}
+			for _, envFile := range envFiles {
+				vars, secrets, err := parseEnvFile(envFile)
+				if err != nil {
+					return err
+				}
+				envVars = append(envVars, vars...)
+				for _, s := range secrets {
+					sensitive = append(sensitive, s.value)
+				}
+			}
+			red := newExecRedactor(sensitive...)
 			blocks, notebook, err := readCodeBlocks(d, file)
 			if err != nil {
 				return err
@@ -153,7 +316,22 @@ func execCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			prelude := envPrelude(envVars)
+			// --json keeps stdout for records only; every [colab] progress line
+			// already goes to stderr. Default to NDJSON (one record per cell)
+			// and let the root --output json flag upgrade to a single document.
+			var cells *agentout.CellWriter
+			if jsonOutput {
+				format := "ndjson"
+				if agentout.IsWrapped(d.Stdout) {
+					format = "json"
+				}
+				cells, err = agentout.NewCellWriter(d.Stdout, format)
+				if err != nil {
+					return mapAgentOutError(err)
+				}
+				defer func() { _ = cells.Close() }()
+			}
+			prelude := injectedPrelude(envVars, cliSecrets)
 			isNB := strings.HasSuffix(strings.ToLower(file), ".ipynb")
 			defer func() {
 				setRunning(d, s, nil)
@@ -172,7 +350,10 @@ func execCommand() *cobra.Command {
 				code := prelude + block.code
 				var cellID *string
 				if isNB {
-					id := nb.Title(code)
+					// Read the title from the user's cell only: the prelude may
+					// contain injected secrets and must never become an ID that
+					// is persisted in session state or history.
+					id := nb.Title(block.code)
 					if id == "" {
 						id = block.id
 					}
@@ -190,7 +371,10 @@ func execCommand() *cobra.Command {
 				res, err := kernel.Execute(cmd.Context(), code, runtime.ExecOptions{
 					IdleTimeout: timeoutOption(timeout),
 					OnOutput: func(o runtime.Output) {
-						if e := outputHook(o); e != nil && renderErr == nil {
+						if jsonOutput {
+							return // records are built from the returned outputs
+						}
+						if e := outputHook(red.Output(o)); e != nil && renderErr == nil {
 							renderErr = e
 						}
 					},
@@ -199,17 +383,50 @@ func execCommand() *cobra.Command {
 					err = renderErr
 				}
 				if err != nil {
+					if jsonOutput {
+						// A client-side failure never reaches the kernel's
+						// outputs; report it in the same record shape before
+						// failing with the original exit status.
+						rec := agentout.CellResult{
+							CellIndex: i, CellID: cellID, Status: "error",
+							Data: []agentout.DataItem{}, Images: []string{},
+							Error: &agentout.CellError{
+								EName:     clientErrorEname(err),
+								EValue:    red.Redact(err.Error()),
+								Traceback: "",
+							},
+						}
+						if e := cells.Emit(rec); e != nil {
+							return e
+						}
+						if e := pruneLost(d, s.Name, err); e != nil {
+							return e
+						}
+						return redactedExecError(err, red)
+					}
 					return pruneLost(d, s.Name, err)
 				}
+				if jsonOutput {
+					rec, buildErr := buildCellRecord(res.Outputs, i, cellID, outputImage, red)
+					if buildErr != nil {
+						return buildErr
+					}
+					if e := cells.Emit(rec); e != nil {
+						return e
+					}
+				}
+				// Redact before anything is persisted or echoed: history, the
+				// saved notebook and every output hook share these copies.
+				safeOutputs := red.Outputs(res.Outputs)
 				if notebook != nil {
-					notebook.Cells[block.cellIdx].Outputs = notebookOutputs(res.Outputs)
+					notebook.Cells[block.cellIdx].Outputs = notebookOutputs(safeOutputs)
 				}
 				extra := map[string]any{}
 				if isNB {
 					extra["cell_index"] = i
 					extra["cell_id"] = block.id
 				}
-				logExecution(d, s.Name, code, res.Outputs, extra)
+				logExecution(d, s.Name, red.Redact(code), safeOutputs, extra)
 				// A persistent IPython kernel keeps running after sys.exit, so
 				// the kernel's error outputs are the only signal of a failed
 				// cell. Mirror run's CPython mapping and stop at the first
@@ -226,6 +443,9 @@ func execCommand() *cobra.Command {
 	cmd.Flags().StringVar(&outputImage, "output-image", "", "Path to save a displayed image")
 	cmd.Flags().Float64Var(&timeout, "timeout", 30, "Seconds without output before failing (0 for no limit)")
 	cmd.Flags().StringArrayVar(&env, "env", nil, "Set KEY=VALUE in the remote kernel (repeatable)")
+	cmd.Flags().StringArrayVar(&secretNames, "secret", nil, "Inject NAME from the process environment or OS keyring into the kernel (repeatable)")
+	cmd.Flags().StringArrayVar(&envFiles, "env-file", nil, "Load KEY=VALUE from a mode-0600 file into the kernel (repeatable)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print one JSON record per executed cell on stdout (exit 1 if any cell failed)")
 	return cmd
 }
 

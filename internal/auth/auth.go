@@ -95,6 +95,10 @@ type TokenStore interface {
 type Config struct {
 	Provider AuthProvider // empty means AuthOAuth2
 
+	// ScopeMode selects the requested OAuth scope set (--scopes). Empty means
+	// ScopeModeFull. See scopes.go: minimal cannot mount Drive (drive.file).
+	ScopeMode ScopeMode
+
 	// ClientOAuthConfigPath is the -c/--client-oauth-config path. Empty means
 	// ~/.colab-cli-oauth-config.json, falling back to the bundled config.
 	ClientOAuthConfigPath string
@@ -199,6 +203,12 @@ func New(cfg Config) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.ScopeMode == "" {
+		cfg.ScopeMode = DefaultScopeMode
+	}
+	if _, err := ParseScopeMode(string(cfg.ScopeMode)); err != nil {
+		return nil, err
+	}
 
 	if cfg.ConfigDir == "" {
 		cfg.ConfigDir, err = platform.ConfigDir()
@@ -230,6 +240,7 @@ func New(cfg Config) (Provider, error) {
 			logger:      cfg.Logger,
 			timeout:     cfg.ADCTimeout,
 			httpTimeout: cfg.HTTPTimeout,
+			scopeMode:   cfg.ScopeMode,
 			defaults:    defaultTokenSource,
 		}, nil
 	case AuthOAuth2:
@@ -258,6 +269,7 @@ func New(cfg Config) (Provider, error) {
 			stdin:       bufio.NewReader(cfg.Stdin),
 			tokenHTTP:   &http.Client{Transport: newBaseTransport(), Timeout: cfg.TokenTimeout},
 			httpTimeout: cfg.HTTPTimeout,
+			scopeMode:   cfg.ScopeMode,
 		}, nil
 	default:
 		// Unreachable: ParseAuthProvider validated it above.

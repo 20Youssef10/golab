@@ -229,6 +229,20 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — Second upstream batch implemented: `exec --json` (PR #237),
+  local-only `--secret`/`--env-file` bridge (issue #157), `--scopes full|minimal`
+  with forced re-consent (issue #71), `drivemount --wait-for-consent` (issue #258),
+  and a scoped #220 implementation (bounded msg-id journal, typed `ErrOutputGap`,
+  no teardown on transport errors, and `colab resume`). All are test-first with
+  fakes; `go vet`, full `go test -count=1 ./...`, golangci-lint and both safety
+  scripts pass locally. Human-only: OAuth re-consent, Drive browser approval,
+  and a live billable VM drop/recovery proof. **PR #276 (maintainer notices) is
+  deferred/rejected:** upstream's unsigned, user-redirectable `notices_url` feed
+  would create an unauthenticated push channel into every command's stderr,
+  contradicting the fork's pinned signed-update trust model; the signed release
+  banner already covers security-fix delivery. Reopen only with a signed feed
+  under the pinned release-workflow identity and a demonstrated need. The next
+  release remains MINOR (0.2.0); no tag was cut.
 - 2026-11-24 — Upstream triage (`googlecolab/google-colab-cli`: 18 open issues,
   19 open PRs) completed and first fork batch implemented. Ported bug fixes:
   body-less POST chunked encoding (#270), final assign reconciliation (#263),

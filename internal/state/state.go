@@ -36,6 +36,19 @@ type LastExecution struct {
 	At    string  `json:"at"`
 }
 
+// PendingExecution records an execution that may still be running after a
+// transport interruption. It is written before Execute and cleared on a
+// terminal success, using the same atomic session store as every other field.
+// Recovery is necessarily partial: output emitted while the socket was down
+// cannot be replayed by this client.
+type PendingExecution struct {
+	MsgID      string    `json:"msg_id"`
+	SessionID  string    `json:"session_id"`
+	Delivered  int       `json:"delivered"`
+	StartedAt  time.Time `json:"started_at"`
+	CodeSHA256 string    `json:"code_sha256"`
+}
+
 // Session is the JSON schema of one entry in sessions.json.
 type Session struct {
 	Name     string      `json:"name"`
@@ -45,15 +58,16 @@ type Session struct {
 	// RuntimeName is the Public API resource name ("runtimes/r-…"). It is
 	// optional so legacy sessions.json files (which only have Endpoint) still
 	// deserialize, and is omitted from the file when empty.
-	RuntimeName    string         `json:"runtime_name,omitempty"`
-	TokenExpiresAt *time.Time     `json:"token_expires_at,omitempty"`
-	Variant        string         `json:"variant,omitempty"`
-	Accelerator    string         `json:"accelerator,omitempty"`
-	MachineShape   string         `json:"machine_shape,omitempty"`
-	KernelID       string         `json:"kernel_id,omitempty"`
-	SessionID      string         `json:"session_id,omitempty"`
-	LastExecution  *LastExecution `json:"last_execution,omitempty"`
-	Running        *string        `json:"running,omitempty"`
+	RuntimeName    string            `json:"runtime_name,omitempty"`
+	TokenExpiresAt *time.Time        `json:"token_expires_at,omitempty"`
+	Variant        string            `json:"variant,omitempty"`
+	Accelerator    string            `json:"accelerator,omitempty"`
+	MachineShape   string            `json:"machine_shape,omitempty"`
+	KernelID       string            `json:"kernel_id,omitempty"`
+	SessionID      string            `json:"session_id,omitempty"`
+	LastExecution  *LastExecution    `json:"last_execution,omitempty"`
+	Running        *string           `json:"running,omitempty"`
+	Pending        *PendingExecution `json:"pending,omitempty"`
 }
 
 // Settings is the JSON schema of settings.json.

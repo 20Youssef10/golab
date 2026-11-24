@@ -18,6 +18,9 @@ type Target struct {
 	Token    logx.Secret
 	Endpoint string
 	KernelID string
+	// SessionID is the optional Jupyter session id to reuse when reattaching
+	// to an interrupted execution. Empty means mint a fresh id (the default).
+	SessionID string
 }
 
 // Config configures a Runtime. Zero values are usable; HTTPClient is primarily
@@ -60,6 +63,9 @@ type ExecOptions struct {
 	// reader goroutine and must return true to mark the request intercepted.
 	// To answer it, call Kernel.SendColabReply from the hook.
 	ColabRequestHook func(Request) bool
+	// MsgID optionally overrides the generated execution request id so callers
+	// can persist a recovery handle before the code is submitted.
+	MsgID string
 }
 
 // Result is the outcome of one execution.
@@ -158,6 +164,10 @@ type Kernel interface {
 	ID() string
 	SessionID() string
 	Execute(ctx context.Context, code string, opts ExecOptions) (*Result, error)
+	// Resume waits for a previously submitted execution whose socket died,
+	// without resubmitting the code. msgID is the id returned via the
+	// OutputGapError or the caller-supplied ExecOptions.MsgID.
+	Resume(ctx context.Context, msgID string, opts ExecOptions) (*Result, error)
 	Restart(ctx context.Context) error
 	Interrupt(ctx context.Context) error
 	Shutdown(ctx context.Context) error

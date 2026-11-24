@@ -58,28 +58,100 @@ type kernel struct {
 	logger    *slog.Logger
 	graceful  time.Duration
 	closeOnce sync.Once
+
+	// journals is the bounded in-memory recovery layer keyed by execution
+	// msg_id. It is retained after a failed Execute so a later Resume can
+	// dedup replays and avoid re-emitting already delivered output.
+	journalMu    sync.Mutex
+	journals     map[string]*journal
+	journalOrder []string
+}
+
+// lostNow reports whether the current channels socket generation has died.
+// Resume uses it to redial before waiting when its kernel was reused from an
+// interrupted Execute (a fresh Attach already has a live socket).
+func (c *conn) lostNow() bool {
+	c.stateMu.Lock()
+	lost := c.lost
+	c.stateMu.Unlock()
+	select {
+	case <-lost:
+		return true
+	default:
+		return false
+	}
 }
 
 func (k *kernel) ID() string        { return k.id }
 func (k *kernel) SessionID() string { return k.sessionID }
 
+// Execute sends a fresh execute_request and waits for its terminal status.
+// opts.MsgID, when set, is used as the request id so callers can persist a
+// recovery handle before the code is submitted.
 func (k *kernel) Execute(ctx context.Context, code string, opts ExecOptions) (*Result, error) {
-	msgID := newMsgID()
-	acc := NewAccumulator(opts.OnOutput)
+	msgID := opts.MsgID
+	if msgID == "" {
+		msgID = newMsgID()
+	}
+	j := newJournal(msgID)
+	k.addJournal(j)
+	return k.execute(ctx, &code, j, opts)
+}
+
+// Resume waits for a previously submitted execution whose socket died, WITHOUT
+// resubmitting the code. It reuses the in-memory journal to dedup replayed
+// messages and to avoid re-emitting output already delivered to the caller.
+func (k *kernel) Resume(ctx context.Context, msgID string, opts ExecOptions) (*Result, error) {
+	if msgID == "" {
+		return nil, errors.New("resume: empty execution id")
+	}
+	j := k.lookupJournal(msgID)
+	if j == nil {
+		// A fresh process has no in-memory journal. Start from an empty one and
+		// wait for the late terminal frames; anything the kernel published
+		// while no socket was attached remains unrecoverable.
+		j = newJournal(msgID)
+		k.addJournal(j)
+	}
+	if k.conn.lostNow() {
+		if err := k.conn.reconnect(ctx, k.rest, k.id, k.sessionID); err != nil {
+			return nil, gapError(j, err)
+		}
+	}
+	return k.execute(ctx, nil, j, opts)
+}
+
+// execute is the shared wait loop. A non-nil code submits a new execution;
+// nil means this is a resume and only the already-running work is awaited.
+func (k *kernel) execute(ctx context.Context, code *string, j *journal, opts ExecOptions) (*Result, error) {
+	msgID := j.msgID
+	acc := NewAccumulator(func(o Output) {
+		j.delivered++
+		if opts.OnOutput != nil {
+			opts.OnOutput(o)
+		}
+	})
+	if code == nil {
+		// Seed with already-delivered output so it is never emitted twice;
+		// only genuinely new outputs beyond the seed reach OnOutput.
+		acc.outputs = j.seed()
+	}
 	k.conn.setColabHook(opts.ColabRequestHook)
 	defer k.conn.setColabHook(nil)
 	k.conn.setActive(activeExec{msgID: msgID, opts: opts, session: k.sessionID})
 	defer k.conn.clearActive()
 
-	request := newMessage("execute_request", "shell", k.sessionID, MessageHeader{}, map[string]any{
-		"code": code, "silent": false, "store_history": true,
-		"user_expressions": map[string]any{}, "allow_stdin": opts.AllowStdin,
-		"stop_on_error": true,
-	})
-	// Use our own id as the request id so iopub parent matching is exact.
-	request.Header.MsgID = msgID
-	if err := k.conn.send(ctx, request); err != nil {
-		return nil, fmt.Errorf("send execute_request: %w", err)
+	if code != nil {
+		request := newMessage("execute_request", "shell", k.sessionID, MessageHeader{}, map[string]any{
+			"code": *code, "silent": false, "store_history": true,
+			"user_expressions": map[string]any{}, "allow_stdin": opts.AllowStdin,
+			"stop_on_error": true,
+		})
+		// Use our own id as the request id so iopub parent matching is exact.
+		request.Header.MsgID = msgID
+		if err := k.conn.send(ctx, request); err != nil {
+			return nil, fmt.Errorf("send execute_request: %w", err)
+		}
 	}
 
 	var idle idleTracker
@@ -120,7 +192,7 @@ executeLoop:
 				k.conn.close()
 				return nil, ctx.Err()
 			}
-			return nil, &TimeoutError{WaitingFor: phase, Idle: opts.IdleTimeout}
+			return nil, gapError(j, &TimeoutError{WaitingFor: phase, Idle: opts.IdleTimeout})
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -139,6 +211,10 @@ executeLoop:
 				interrupt()
 				continue
 			}
+			// Mark the gap BEFORE redialing: if this execution later ends
+			// without a terminal idle+reply, the caller must be told that
+			// output emitted during the dead window could not be replayed.
+			j.dropped = true
 			// A dropped channels socket is retried in place with the same
 			// kernel/session id. The idle deadline is paused for the duration
 			// so reconnection time is not mistaken for kernel silence.
@@ -148,7 +224,7 @@ executeLoop:
 					interrupt()
 					continue
 				}
-				return nil, fmt.Errorf("execute: %w", err)
+				return nil, gapError(j, fmt.Errorf("execute: %w", err))
 			}
 			idle.shift(time.Since(pausedAt))
 			continue
@@ -162,19 +238,25 @@ executeLoop:
 			timer.Stop()
 			accepted, err := acceptMessage(msg, msgID)
 			if err != nil {
-				return nil, err
+				return nil, gapError(j, err)
 			}
 			if !accepted {
 				// Stale messages are dropped without resetting the idle limit
 				// (upstream test_output_from_other_requests_does_not_reset_the_timeout).
 				continue
 			}
+			// Dedup BEFORE feeding the accumulator: clear_output and
+			// update_display_data are not idempotent under replay.
+			if !j.observe(msg) {
+				continue
+			}
 			if !interrupted {
 				idle.reset(opts.IdleTimeout)
 			}
 			if err := acc.Feed(msg); err != nil {
-				return nil, fmt.Errorf("accumulate output: %w", err)
+				return nil, gapError(j, fmt.Errorf("accumulate output: %w", err))
 			}
+			j.setOutputs(acc.Outputs())
 			if msg.Header.MsgType == "status" {
 				if state, _ := msg.contentMap()["execution_state"].(string); state == "idle" {
 					gotIdle = true
@@ -189,9 +271,12 @@ executeLoop:
 			timer.Stop()
 			accepted, err := acceptMessage(msg, msgID)
 			if err != nil {
-				return nil, err
+				return nil, gapError(j, err)
 			}
 			if !accepted || msg.Header.MsgType != "execute_reply" {
+				continue
+			}
+			if !j.observe(msg) {
 				continue
 			}
 			// The reply can be queued before the idle status; a single select
@@ -211,6 +296,10 @@ executeLoop:
 	if interrupted {
 		return nil, ctx.Err()
 	}
+
+	// Terminal idle + reply arrived: recovery is no longer possible or needed.
+	j.terminal = true
+	k.deleteJournal(msgID)
 
 	content := reply.contentMap()
 	result := &Result{Outputs: acc.Outputs(), Status: str(content["status"])}
@@ -236,6 +325,20 @@ executeLoop:
 		})
 	}
 	return result, nil
+}
+
+// gapError converts a non-terminal loop exit after a socket drop into an
+// honest OutputGapError. Session loss and cancellation keep their own typed
+// contracts; every other cause is preserved via Unwrap so errors.Is/errors.As
+// (notably ConnectionLost and ErrTimeout) keep working for existing callers.
+func gapError(j *journal, err error) error {
+	if j == nil || err == nil || !j.dropped {
+		return err
+	}
+	if errors.Is(err, ErrSessionLost) || errors.Is(err, context.Canceled) {
+		return err
+	}
+	return &OutputGapError{MsgID: j.msgID, Recovered: j.snapshot(), Cause: err}
 }
 
 // acceptMessage runs the terminal-status check BEFORE the parent filter, then

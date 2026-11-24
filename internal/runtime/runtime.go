@@ -50,7 +50,12 @@ func (r *runtimeImpl) Attach(ctx context.Context, target Target, opts AttachOpti
 	if err != nil {
 		return nil, err
 	}
-	sessionID := newSessionID()
+	// A saved session id is honored so a resumed execution reattaches to the
+	// same Jupyter session; a fresh execution still mints a new one.
+	sessionID := target.SessionID
+	if sessionID == "" {
+		sessionID = newSessionID()
+	}
 	var wsConn *conn
 	if err := r.retry(ctx, func() error {
 		ws, err := rest.dialWS(ctx, kernelID, sessionID)
@@ -73,6 +78,7 @@ func (r *runtimeImpl) Attach(ctx context.Context, target Target, opts AttachOpti
 	k := &kernel{
 		id: kernelID, sessionID: sessionID, rest: rest, conn: wsConn,
 		logger: r.cfg.Logger, graceful: r.cfg.GracefulCancelTimeout,
+		journals: map[string]*journal{},
 	}
 	go k.stdinLoop()
 	return k, nil

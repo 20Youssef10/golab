@@ -62,6 +62,15 @@ golab stop -s train --verify          # confirm no assignment remains on the ser
 
 `--all` asks for confirmation on stderr (`Stop N session(s)? [y/N]`) **only when stdin is a TTY**; in a pipeline it proceeds without prompting. Pass `--yes` (or `COLAB_ASSUME_YES=1`) to skip the prompt. It finishes with `Stopped N session(s).` on stderr. Removing local state always happens, even when the backend is already gone. `--verify` re-reads `/tun/m/assignments` after unassigning and exits non-zero if a stopped runtime is still assigned (works with `--all` too); this is an extra GET and is opt-in.
 
+### `golab resume`
+
+```bash
+golab resume -s train
+golab resume -s train --timeout 0
+```
+
+Reattach to an execution interrupted by a transport error and wait for its remaining output and final result **without resubmitting the code**. A bounded in-memory journal deduplicates frames replayed after a reconnect. If the kernel emitted output strictly while the socket was down, that output cannot be reconstructed — the original error is a typed `ErrOutputGap` and `resume` only recovers what the new socket actually delivers. With no pending execution it exits 1 with a usage hint. `--timeout SECONDS` uses the same idle semantics as `exec` (`0` = unlimited). Successful resume clears the pending record; it never auto-shuts down the session.
+
 ### `golab restart-kernel`
 
 ```bash
@@ -82,6 +91,8 @@ golab exec -s train -f solve.py --env DATASET=/content/data.csv --env EPOCHS=3
 echo 'print(2 + 2)' | golab exec -s train
 cat analysis.py | golab exec            # unique-session rule applies
 golab exec -s train -f notebook.ipynb
+golab exec -s train -f solve.py --json          # NDJSON records on stdout
+golab exec -s train -f solve.py --secret API_KEY --env-file .env
 ```
 
 | Flag | Default | Meaning |
@@ -91,12 +102,17 @@ golab exec -s train -f notebook.ipynb
 | `--env KEY=VALUE` | none | Set a variable in the remote kernel before the code runs; repeatable. Keys must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
 | `--timeout SECONDS` | `30` | Seconds without output before failing; `0` disables the idle timeout. |
 | `--output-image PATH` | none | Save a displayed image to this path (otherwise images render inline on a TTY). |
+| `--json` | off | Emit one NDJSON record per cell on stdout (`cell_index`, `cell_id`, `status`, `stdout`, `stderr`, `data`, `images`, `error`); progress stays on stderr and exit codes are unchanged. |
+| `--secret NAME` | none | Resolve a local secret from the process environment or OS keyring and inject it into the kernel. Never persisted, logged or printed. Repeatable. |
+| `--env-file PATH` | none | Load `KEY=VALUE` pairs from an owner-only (0600 on Unix) file; malformed keys exit 2. Repeatable. |
 
 Details worth knowing:
 
 - Every execution first runs `os.makedirs('/content', exist_ok=True); os.chdir('/content')`, so relative paths are relative to `/content` on the VM.
 - With no `-f` and a TTY on stdin, `golab exec` refuses to wait: you get `Error: No input provided. Pipe code or provide a file.` and exit 1. Empty input exits 0 without allocating a kernel.
 - Values passed via `--env` are emitted as quoted Python literals, never spliced as raw source.
+- `--secret` and `--env-file` are a **local-only** bridge: values are injected with the same safe quoting, but are removed from stdout, stderr, history and JSON records. Colab Web UI secrets are deliberately not read (no browser/cookie access).
+- With `--json`, each cell produces one machine-readable record on stdout; the event writer redacts secret values the same way as text mode.
 - For a `.ipynb` input, code cells run in order. Progress is printed to stderr as `Executing cell i/N - <label>...`, where the label is a cell's `# @title …` line or its cell ID. Outputs are written back into the cells and saved next to the input as `<name>_output.ipynb` with owner-only permissions.
 - Exit codes follow CPython semantics: `sys.exit(N)` → `N`, `sys.exit("msg")` → stderr + exit 1, uncaught errors → exit 1, clean cells → exit 0. A notebook stops at the first failing cell but still writes the output file.
 - Output streaming is sanitised: unsafe terminal control sequences are stripped, SGR colour is kept.
@@ -139,6 +155,7 @@ Script semantics:
 - A `.ipynb` input is parsed **before** any VM allocation: code cells run in order on one kernel with shared state, markdown is skipped, and outputs are written next to the input as `<name>_output.ipynb` with mode 0600. Extra script arguments are warned about and never become `sys.argv` for notebooks. A failing cell stops the run with the cell's exit code.
 - Exit codes follow CPython: `sys.exit()` / `sys.exit(0)` → 0, `sys.exit(N)` → N, `sys.exit("message")` → 1 with the message on stderr, an uncaught exception → 1 with a traceback.
 - SIGINT, SIGTERM and SIGHUP tear the runtime down; an interrupt while piped exits 130. `--keep` disables teardown.
+- A transport interruption (connection lost or timeout) does **not** tear the runtime down: the command reports a typed output-gap error with a `colab resume -s NAME` hint and keeps the session for recovery. See `golab resume` below.
 
 ## 3. Files
 
@@ -205,6 +222,7 @@ golab drivemount -s train /content/mydrive
 - `install` prefers `uv pip install --system` and falls back to `python -m pip`. Package names are embedded as a JSON list decoded remotely, never spliced into generated Python. `-r FILE` uploads a local requirements file to `content/` first.
 - `auth` (hidden) runs `google.colab.auth.authenticate_user()` with `USE_AUTH_EPHEM=0`. It is interactive and bounded to a 10-minute idle timeout.
 - `drivemount` runs `drive.mount(PATH)` and intercepts Colab's `dfs_ephemeral` request. It prints and tries to open the consent URL, then waits for you to press Enter before confirming propagation. Failures are reported as a short status plus a sanitised detail string — raw HTML from the server is never echoed. Approving Drive access with a **different** Google account than the one `golab whoami` reports is a common cause of propagation failure.
+- `--wait-for-consent` replaces the Enter prompt with bounded polling of the propagation endpoint (2 s interval, 5 min limit); global `--yes` also skips the prompt. The browser approval itself is still human-only — this only automates the wait.
 
 Both `auth` and `drivemount` are interactive flows that still need a human live verification; see [REMEDIATION.md](REMEDIATION.md).
 
@@ -297,6 +315,7 @@ TTY behaviour matters in exactly three places: `exec` with no input errors when 
 | Variable | Default | Purpose |
 |---|---|---|
 | `COLAB_AUTH` | `oauth2` | Auth provider: `oauth2` or `adc`. |
+| `COLAB_SCOPES` | `full` | Default for `--scopes`: `full` or `minimal`. |
 | `COLAB_DEBUG` | unset | `1`/`true` enables debug logging on stderr. |
 | `COLAB_CLI_PUBLIC_API` | `0` | Use the Public API control plane; `--public-api` / `--no-public-api` override it. |
 | `COLAB_OUTPUT` | `text` | Default for `--output`. |
@@ -311,6 +330,8 @@ TTY behaviour matters in exactly three places: `exec` with no input errors when 
 | `LIVE_E2E_ENABLED` | unset | `false` is a kill switch for live probes. |
 | `NO_COLOR` | unset | Disable coloured terminal output. |
 | `VISUAL`, `EDITOR` | platform default | Editor used by `golab edit`. |
+
+`--scopes minimal` requests only `openid`, `email` and `colaboratory`; it cannot mount Drive (no `drive.file`). Switching modes forces a fresh browser consent on the next command, and existing full-mode tokens are never silently downgraded. MCP-style per-notebook approval is not implemented.
 | `TMPDIR`, Termux `PREFIX` | OS temp dir | Location for temporary files. |
 | `XDG_CACHE_HOME` | `~/.cache` | Base for the cache directory. |
 | `SSH_AUTH_SOCK` | — | Agent socket consulted for SSH keys. |

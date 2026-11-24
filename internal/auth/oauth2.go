@@ -66,9 +66,14 @@ type storedToken struct {
 	TokenType    string      `json:"token_type,omitempty"`
 	Expiry       time.Time   `json:"expiry,omitempty"`
 	Scopes       []string    `json:"scopes,omitempty"`
-	ClientID     string      `json:"client_id,omitempty"`
-	ClientSecret logx.Secret `json:"-"`
-	TokenURI     string      `json:"token_uri,omitempty"`
+	// RequestedScopes records what --scopes asked for at sign-in, separately
+	// from the granted set above. A change here forces fresh consent; the
+	// granted set stays authoritative for refresh so partial consent survives.
+	// Tokens saved before --scopes existed leave it empty (= the full set).
+	RequestedScopes []string    `json:"requested_scopes,omitempty"`
+	ClientID        string      `json:"client_id,omitempty"`
+	ClientSecret    logx.Secret `json:"-"`
+	TokenURI        string      `json:"token_uri,omitempty"`
 }
 
 // decodeStored also accepts Python google.oauth2.credentials' "token" field
@@ -118,6 +123,7 @@ type oauth2Provider struct {
 	stdin       *bufio.Reader
 	tokenHTTP   *http.Client
 	httpTimeout time.Duration
+	scopeMode   ScopeMode
 }
 
 // loadClientConfig reads -c, then ~/.colab-cli-oauth-config.json, then the
@@ -193,7 +199,8 @@ func allowedTokenURI(raw string) bool {
 // running the remote consent flow), and returns a bearer-authenticated client.
 func (p *oauth2Provider) HTTPClient(ctx context.Context, scopes []string) (*http.Client, error) {
 	if len(scopes) == 0 {
-		scopes = Scopes
+		// --scopes (carried in Config.ScopeMode) drives the default request.
+		scopes = p.scopeMode.Scopes()
 	}
 	cc, err := p.loadClientConfig()
 	if err != nil {
@@ -237,7 +244,24 @@ func (p *oauth2Provider) HTTPClient(ctx context.Context, scopes []string) (*http
 
 	var tok *oauth2.Token
 	var granted []string
+	// Issue #71: a token minted under a different --scopes mode must never be
+	// reused or refreshed — that would silently keep a broader grant (full→
+	// minimal) or hand back a grant missing the newly requested scopes
+	// (minimal→full). Force the remote consent flow instead. Pre-flag tokens
+	// carry no requested set and are treated as full for compatibility.
+	modeChanged := false
 	if loadErr == nil {
+		storedRequested := s.RequestedScopes
+		if len(storedRequested) == 0 {
+			storedRequested = Scopes
+		}
+		if !sameScopeSet(storedRequested, scopes) {
+			modeChanged = true
+			p.notice("OAuth scope set changed to " + scopeModeLabel(scopes) +
+				"; fresh consent is required.")
+		}
+	}
+	if loadErr == nil && !modeChanged {
 		tok = tokenFromStored(s)
 		granted = append([]string(nil), s.Scopes...)
 		if len(granted) == 0 {
@@ -253,7 +277,7 @@ func (p *oauth2Provider) HTTPClient(ctx context.Context, scopes []string) (*http
 					tok = nil
 				} else {
 					tok, granted = refreshed, refreshedScopes
-					p.save(s, tok, granted, cc)
+					p.save(s, tok, granted, scopes, cc)
 				}
 			}
 		}
@@ -263,7 +287,7 @@ func (p *oauth2Provider) HTTPClient(ctx context.Context, scopes []string) (*http
 		if err != nil {
 			return nil, err
 		}
-		p.save(s, tok, granted, cc)
+		p.save(s, tok, granted, scopes, cc)
 	}
 
 	conf.Scopes = granted
@@ -393,7 +417,39 @@ func grantedScopes(scope string, fallback []string) []string {
 	return append([]string(nil), fallback...)
 }
 
-func (p *oauth2Provider) save(old storedToken, tok *oauth2.Token, granted []string, cc clientConfig) {
+// sameScopeSet compares two scope sets order-insensitively. Both arguments
+// come from our own constants (or a token response we persisted), so treating
+// them as sets is enough and avoids false positives from ordering changes.
+func sameScopeSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		set[s] = struct{}{}
+	}
+	if len(set) != len(a) {
+		return false
+	}
+	for _, s := range b {
+		if _, ok := set[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// scopeModeLabel describes a scope set for the re-consent notice. It derives
+// from the set itself so the message is accurate even when a caller overrides
+// Config.ScopeMode by passing scopes explicitly.
+func scopeModeLabel(scopes []string) string {
+	if sameScopeSet(scopes, MinimalScopes) {
+		return string(ScopeModeMinimal)
+	}
+	return string(ScopeModeFull)
+}
+
+func (p *oauth2Provider) save(old storedToken, tok *oauth2.Token, granted, requested []string, cc clientConfig) {
 	refresh := tok.RefreshToken
 	if refresh == "" {
 		refresh = old.RefreshToken.Reveal()
@@ -401,12 +457,13 @@ func (p *oauth2Provider) save(old storedToken, tok *oauth2.Token, granted []stri
 	// S-4: persist refresh token + metadata only. The access token and client
 	// secret deliberately use json:"-" and never reach the token file/keyring.
 	out := storedToken{
-		RefreshToken: logx.NewSecret(refresh),
-		TokenType:    tok.TokenType,
-		Expiry:       tok.Expiry,
-		Scopes:       append([]string(nil), granted...),
-		ClientID:     cc.ClientID,
-		TokenURI:     cc.TokenURL,
+		RefreshToken:    logx.NewSecret(refresh),
+		TokenType:       tok.TokenType,
+		Expiry:          tok.Expiry,
+		Scopes:          append([]string(nil), granted...),
+		RequestedScopes: append([]string(nil), requested...),
+		ClientID:        cc.ClientID,
+		TokenURI:        cc.TokenURL,
 	}
 	data, err := json.Marshal(out)
 	if err != nil {

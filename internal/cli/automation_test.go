@@ -1,9 +1,15 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -353,5 +359,249 @@ func TestReportDriveFailureUsesParsedDetail(t *testing.T) {
 		if strings.Contains(out, forbidden) {
 			t.Fatalf("raw body leaked %q: %q", forbidden, out)
 		}
+	}
+}
+
+// --- issue #258: --wait-for-consent (polling, no stdin) ---------------------
+
+// PollForConsent takes only a probe function: it has no stdin reader and no
+// terminal handle, so a click-free caller cannot accidentally consume a line.
+// These tests port the headless-consent cases from upstream issue #258.
+
+// TestPollForConsentWaitsForSuccess: a fake control plane that first reports
+// Success:false and only later Success:true must keep polling until it flips.
+func TestPollForConsentWaitsForSuccess(t *testing.T) {
+	calls := 0
+	probe := func(context.Context) (*colabapi.CredProp, error) {
+		calls++
+		return &colabapi.CredProp{Success: calls >= 3}, nil
+	}
+	cp, err := pollForConsent(context.Background(), 2*time.Second, 5*time.Millisecond, probe)
+	if err != nil {
+		t.Fatalf("pollForConsent: %v", err)
+	}
+	if cp == nil || !cp.Success {
+		t.Fatalf("propagation never succeeded: %+v", cp)
+	}
+	if calls != 3 {
+		t.Fatalf("probe calls = %d; want 3 (false -> false -> true)", calls)
+	}
+}
+
+// TestPollForConsentTimeoutIsSanitized: an unapproved consent must end with a
+// bounded DeadlineExceeded, and the resulting driveFailureMessage must stay
+// actionable without echoing HTML or token material.
+func TestPollForConsentTimeoutIsSanitized(t *testing.T) {
+	probe := func(context.Context) (*colabapi.CredProp, error) {
+		return &colabapi.CredProp{Success: false}, nil
+	}
+	_, err := pollForConsent(context.Background(), 40*time.Millisecond, 5*time.Millisecond, probe)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v; want context.DeadlineExceeded", err)
+	}
+	h := newHarness(t)
+	setStreams(h)
+	h.putSession(t, "s1")
+	reportDriveFailure(h.deps, "s1", err)
+	out := h.stderr.String()
+	for _, want := range []string{"Drive credentials could not be propagated", "colab whoami", "different Google account"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("message missing %q: %q", want, out)
+		}
+	}
+	for _, forbidden := range []string{"<html", "SECRET-TOKEN", "\x1b[", "Press Enter after you have granted access"} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("message leaked %q: %q", forbidden, out)
+		}
+	}
+}
+
+// countingStdin counts Read calls but never yields a line. Any code path that
+// waits for Enter must show up as a non-zero count; code paths that do not
+// touch stdin stay at zero.
+type countingStdin struct {
+	mu    sync.Mutex
+	reads int
+}
+
+func (c *countingStdin) Read([]byte) (int, error) {
+	c.mu.Lock()
+	c.reads++
+	c.mu.Unlock()
+	return 0, io.EOF
+}
+
+func (c *countingStdin) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reads
+}
+
+// runWithStdin is h.run with an injectable reader so stdin access is observable.
+func runWithStdin(h *testHarness, in io.Reader, args ...string) int {
+	h.stdout.Reset()
+	h.stderr.Reset()
+	ctx := WithDeps(context.Background(), h.deps)
+	return execute(ctx, args, in, &h.stdout, &h.stderr)
+}
+
+type propResponse struct {
+	success bool
+	uri     string
+}
+
+// propagationScript scripts only the dry-run POST. The XSRF GET still goes to
+// the real fake control plane, so token handling stays exercised.
+type propagationScript struct {
+	mu        sync.Mutex
+	responses []propResponse
+	calls     int
+}
+
+func (s *propagationScript) next() propResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.calls
+	s.calls++
+	if i < len(s.responses) {
+		return s.responses[i]
+	}
+	return propResponse{success: true}
+}
+
+func (s *propagationScript) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+type scriptedPropagationTransport struct {
+	base   http.RoundTripper
+	script *propagationScript
+}
+
+func (t *scriptedPropagationTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodPost &&
+		strings.HasPrefix(req.URL.Path, "/tun/m/credentials-propagation/") &&
+		req.URL.Query().Get("dryrun") == "true" {
+		r := t.script.next()
+		body := `{"success":true}`
+		if !r.success {
+			body = fmt.Sprintf(`{"success":false,"unauthorized_redirect_uri":%q}`, r.uri)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	}
+	return t.base.RoundTrip(req)
+}
+
+func installScriptedPropagation(h *testHarness, s *propagationScript) {
+	h.deps.Auth = fakeAuth{client: &http.Client{
+		Transport: &scriptedPropagationTransport{base: h.ctrl.Client().Transport, script: s},
+	}}
+}
+
+func driveKernelScript(h *testHarness, id string) {
+	reply := replyOK()
+	reply.Delay = 700 * time.Millisecond
+	h.kernel.Script(
+		colabRequest("dfs_ephemeral", id),
+		statusIdleAfter(500*time.Millisecond),
+		reply,
+	)
+}
+
+// TestDriveMountWaitForConsentSkipsStdin is the end-to-end form of the issue
+// #258 headless case: the fake control plane reports Success:false on the
+// initial dry run and Success:true on the first poll. The mount must finish
+// with zero stdin reads and never print the interactive Enter prompt.
+func TestDriveMountWaitForConsentSkipsStdin(t *testing.T) {
+	t.Setenv("COLAB_ASSUME_YES", "")
+	t.Setenv("COLAB_TEST_STDIN_TTY", "0")
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	installScriptedPropagation(h, &propagationScript{responses: []propResponse{
+		{success: false, uri: "https://consent.example/auth"}, // initial dry run
+		{success: true}, // first poll flips it
+	}})
+	driveKernelScript(h, "cm-258")
+
+	stdin := &countingStdin{}
+	code := runWithStdin(h, stdin, "drivemount", "-s", "s1", "--wait-for-consent")
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%q", code, h.stderr.String())
+	}
+	combined := h.stdout.String() + h.stderr.String()
+	for _, want := range []string{"https://consent.example/auth", "Credentials propagated"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("missing %q in %q", want, combined)
+		}
+	}
+	if strings.Contains(combined, "Press Enter after you have granted access") {
+		t.Fatalf("interactive prompt leaked into polling mode: %q", combined)
+	}
+	if got := stdin.count(); got != 0 {
+		t.Fatalf("stdin reads = %d; want 0 (poll must not wait for Enter)", got)
+	}
+	if got := h.deps.Auth.(fakeAuth).client.Transport.(*scriptedPropagationTransport).script.count(); got < 2 {
+		t.Fatalf("propagation calls = %d; want >= 2 (initial + poll)", got)
+	}
+	inputs := waitInputs(t, h, 1)
+	if !strings.Contains(string(inputs[0].Value), `"type":"colab_reply"`) {
+		t.Fatalf("colab_reply not delivered: %s", inputs[0].Value)
+	}
+}
+
+// TestDriveMountYesSkipsStdin proves the global --yes also suppresses the
+// Enter prompt, without enabling polling (it goes straight to Confirm).
+func TestDriveMountYesSkipsStdin(t *testing.T) {
+	t.Setenv("COLAB_ASSUME_YES", "")
+	t.Setenv("COLAB_TEST_STDIN_TTY", "0")
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.ctrl.SetPropagationAuthorizeURL("https://consent.example/auth")
+	driveKernelScript(h, "cm-yes")
+
+	stdin := &countingStdin{}
+	code := runWithStdin(h, stdin, "drivemount", "--yes", "-s", "s1")
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%q", code, h.stderr.String())
+	}
+	combined := h.stdout.String() + h.stderr.String()
+	if !strings.Contains(combined, "Credentials propagated") {
+		t.Fatalf("no success message: %q", combined)
+	}
+	if strings.Contains(combined, "Press Enter after you have granted access") {
+		t.Fatalf("--yes leaked the interactive prompt: %q", combined)
+	}
+	if got := stdin.count(); got != 0 {
+		t.Fatalf("stdin reads = %d; want 0 with --yes", got)
+	}
+}
+
+// TestDriveMountDefaultStillPrompts guards byte-identical legacy behaviour:
+// with neither flag the original "Press Enter" wait and stdin read remain.
+func TestDriveMountDefaultStillPrompts(t *testing.T) {
+	t.Setenv("COLAB_ASSUME_YES", "")
+	t.Setenv("COLAB_TEST_STDIN_TTY", "0")
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.ctrl.SetPropagationAuthorizeURL("https://consent.example/auth")
+	driveKernelScript(h, "cm-default")
+
+	stdin := &countingStdin{}
+	code := runWithStdin(h, stdin, "drivemount", "-s", "s1")
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "Press Enter after you have granted access") {
+		t.Fatalf("default flow lost its prompt: %q", h.stderr.String())
+	}
+	if got := stdin.count(); got < 1 {
+		t.Fatalf("default flow read stdin %d times; want >= 1", got)
 	}
 }

@@ -40,6 +40,10 @@ type Config struct {
 	LogToStderr           bool
 	Debug                 bool
 	AuthProvider          auth.AuthProvider
+	// Scopes selects full (default, upstream-compatible, drivemount-capable)
+	// or minimal (no cloud-platform/drive.file, so Drive mount is impossible).
+	// The zero value means full.
+	Scopes auth.ScopeMode
 	// UsePublicAPI nil means "read from settings.json".
 	UsePublicAPI *bool
 	// ColabDomain/PublicAPI are normally empty (production defaults). They are
@@ -110,6 +114,7 @@ func New(ctx context.Context, cfg Config) (*Deps, error) {
 	}
 	authProvider, err := auth.New(auth.Config{
 		Provider:              cfg.AuthProvider,
+		ScopeMode:             cfg.Scopes,
 		ClientOAuthConfigPath: cfg.ClientOAuthConfigPath,
 		ConfigDir:             dirOf(store.Path()),
 		Stdin:                 os.Stdin,
@@ -172,7 +177,9 @@ func (d *Deps) ColabClient(ctx context.Context) (colabapi.Client, error) {
 	if d.colab != nil {
 		return d.colab, nil
 	}
-	httpClient, err := d.Auth.HTTPClient(ctx, auth.Scopes)
+	// The scope mode is resolved once here and handed to the provider; nil
+	// (zero-value Config.Scopes) resolves to auth.Scopes for compatibility.
+	httpClient, err := d.Auth.HTTPClient(ctx, d.Config.Scopes.Scopes())
 	if err != nil {
 		return nil, err
 	}

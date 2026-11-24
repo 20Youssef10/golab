@@ -22,6 +22,7 @@ upstream source.
 | `colab ssh -- CMD` handshake sends `colab-client-agent=ssh-mode-cmd` and is byte-exact when piped | Already in docs/02 §4; verify against HEAD tests. | **Implemented** in `internal/sshx` with byte-exact fake-server tests; `ssh --force` added too. |
 | Debug log and state files now created owner-only | Matches our atomic-write design. | **Implemented** in `internal/state` (atomic write, owner-only). |
 | `--auth` default is `oauth2`; ADC scopes must include `colaboratory` | Matches docs/02 §1. | **Implemented** in `internal/auth`. |
+| Open upstream issues/PRs (#74/#200 notebooks in `run`, #237 `exec --json`, #258 Drive consent polling, #71 narrow scopes, #220/#261 recovery, #157 local secrets) | Port the useful subset and record deviations; Web secrets and unsigned notice feeds remain out of scope. | **Implemented in `[Unreleased]`** (test-first, fakes; live proof human-only). |
 
 ## Implementation notes — reconciled 2026-11-23 (v0.1.0)
 

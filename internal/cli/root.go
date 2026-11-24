@@ -49,6 +49,7 @@ type rootOptions struct {
 	config            string
 	logToStderr       bool
 	authProvider      string
+	scopes            string
 	publicAPI         bool
 	noPublicAPI       bool
 	debug             bool
@@ -63,6 +64,7 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 	opts := &rootOptions{
 		clientOAuthConfig: defaultOAuthConfigPath(),
 		authProvider:      envOr("COLAB_AUTH", string(auth.DefaultAuthProvider)),
+		scopes:            envOr("COLAB_SCOPES", string(auth.DefaultScopeMode)),
 		publicAPI:         parseBoolEnv(os.Getenv("COLAB_CLI_PUBLIC_API")),
 		debug:             parseBoolEnv(os.Getenv("COLAB_DEBUG")),
 		outputFormat:      envOr("COLAB_OUTPUT", "text"),
@@ -75,6 +77,12 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Validate the scope mode even with injected deps so a bad --scopes
+			// value is always a flag error, never a silent fallback to full.
+			scopeMode, err := auth.ParseScopeMode(opts.scopes)
+			if err != nil {
+				return flagError(err)
+			}
 			d, injected := depsFromContext(cmd.Context())
 			if !injected {
 				provider, err := auth.ParseAuthProvider(opts.authProvider)
@@ -88,6 +96,7 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 					LogToStderr:           opts.logToStderr,
 					Debug:                 opts.debug,
 					AuthProvider:          provider,
+					Scopes:                scopeMode,
 					UsePublicAPI:          &usePublic,
 				}
 				d, err = app.New(cmd.Context(), cfg)
@@ -132,6 +141,8 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 	pf.BoolVar(&opts.logToStderr, "logtostderr", false, "Log all output to stderr")
 	pf.StringVar(&opts.authProvider, "auth", opts.authProvider,
 		"Authentication strategy: oauth2 or adc")
+	pf.StringVar(&opts.scopes, "scopes", opts.scopes,
+		"OAuth scope set: full (default) or minimal (minimal cannot mount Drive)")
 	pf.BoolVar(&opts.publicAPI, "public-api", opts.publicAPI,
 		"Use the Colab Public API instead of the legacy tunnel API")
 	pf.BoolVar(&opts.noPublicAPI, "no-public-api", !opts.publicAPI,
