@@ -10,6 +10,8 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-24
+
 ### Fixed
 
 - Release workflow: the post-release CycloneDX predicate guard now reads the

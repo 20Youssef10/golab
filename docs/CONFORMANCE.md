@@ -221,6 +221,11 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — v0.1.9 prepared: CLI version bumped to match the changelog
+  (guarded by `TestNumberMatchesLatestChangelogRelease`) with the self-update
+  archive-extraction and proof-guard fixes. A signed tag and a real
+  `colab update --install` proof are pending; earlier live defects are recorded
+  below.
 - 2026-11-24 — **v0.1.8's release workflow FAILED (run `45428451505`)** at the
   new post-release CycloneDX `predicateType` guard, with
   `jq: … Malformed BOM`, even though the published attestation was correct.
