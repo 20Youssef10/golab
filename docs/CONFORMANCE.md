@@ -146,6 +146,10 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — v0.1.6 release prepared: CLI version bumped to match the
+  changelog, with `TestNumberMatchesLatestChangelogRelease` guarding against a
+  future tag carrying a stale binary version. Live signed-tag verification
+  pending.
 - 2026-11-24 — Self-update could never offer a newer release: `app.UpdateConfig`
   embedded the running version in `AssetPattern`, so a v0.1.4 binary scanning a
   v0.1.5 tag looked for a `golab_0.1.4_…` asset that does not exist and failed
