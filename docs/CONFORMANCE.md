@@ -105,9 +105,11 @@ Tier-1 archive:
   `v0.3` and `.verificationMaterial.tlogEntries[0].inclusionProof` exists),
   because the cosign commands accept legacy bundles that the updater rejects.
   A `jq` guard decodes each SBOM bundle's v0.3 DSSE payload
-  (`.content.dsseEnvelope.payload | @base64d | fromjson`) and requires
-  `.predicateType` to equal the exact URI above, because cosign's verifier also
-  accepts the `cyclonedx` alias whose emitted predicate the updater rejects.
+  (`(.dsseEnvelope.payload // .content.dsseEnvelope.payload) | @base64d |
+  fromjson`) and requires `.predicateType` to equal the exact URI above,
+  because cosign's verifier also accepts the `cyclonedx` alias whose emitted
+  predicate the updater rejects. The two-path read is deliberate: cosign
+  v2.6.5 writes `dsseEnvelope` at the bundle root (see the v0.1.8 note below).
 - **Release job is gated by the `release` GitHub environment.** GitHub
   auto-creates it on first use, but repo admins must add required reviewers for
   it to actually gate publishing; until then it is bookkeeping only. Reducing
@@ -157,6 +159,26 @@ Tier-1 archive:
   install the next release. Published assets are immutable, so a **new tag** is
   required; no live install proof exists yet.
 
+- **v0.1.8 was published with correct artifacts but its workflow FAILED at the
+  post-release proof guard (2026-11-24).** Release run `45428451505` stopped at
+  the `jq` predicate check with
+  `jq: error (at dist/golab_0.1.8_darwin_amd64.tar.gz.sbom.sigstore.json:0):
+  Malformed BOM`. The guard read `.content.dsseEnvelope.payload`, but
+  `cosign attest-blob --new-bundle-format` (cosign v2.6.5) writes the DSSE
+  envelope at the **root** of a v0.3 bundle: top-level keys are `mediaType`,
+  `verificationMaterial`, `dsseEnvelope`. I downloaded the published
+  `golab_0.1.8_linux_amd64.tar.gz.sbom.sigstore.json` and confirmed the root
+  `.dsseEnvelope.payload` decodes (base64) to an in-toto statement whose
+  `predicateType` is exactly `https://cyclonedx.org/schema/bom-1.5`
+  (`payloadType` is `application/vnd.in-toto+json`): **the release artifacts
+  are correct; only the guard's path was wrong.** Fix: the guard now accepts
+  either layout via
+  `(.dsseEnvelope.payload // .content.dsseEnvelope.payload) | @base64d |
+  fromjson | .predicateType == $pt`, keeping `--arg pt`, the assertion and the
+  loud FAIL message unchanged. The run did not go green and published assets
+  are immutable, so a **new tag** is required; no green v0.1.8 release is
+  claimed.
+
 ## 5. WSL / Termux URL-launcher expectations (docs/04 §2)
 
 **Expected:** on WSL open with `wslview`, then `explorer.exe`, then print the
@@ -184,8 +206,14 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
    The producer fixes (`--new-bundle-format` + format guard, and the exact
    `--type https://cyclonedx.org/schema/bom-1.5` URI + predicate guard) are in
    place, but a **new tag** is required to prove them: both releases' assets are
-   immutable and cannot be repaired in place. This item is non-waivable for a
-   release that claims a working updater.
+   immutable and cannot be repaired in place. **v0.1.8 never reached this
+   check**: its workflow failed at the predicate guard (run `45428451505`), so
+   it is not a green release. A separate critical install-path defect (the
+   updater wrote the downloaded `.tar.gz` bytes as the executable) was found
+   alongside this guard bug and is being fixed by another agent; do not claim
+   a working self-update until that fix lands and a human completes this check
+   on a new tag. This item is non-waivable for a release that claims a working
+   updater.
 6. Wire goleak `TestMain` + dependency (another agent), then drop `ADVISORY=1`
    from `ci.yml` and raise `COVERAGE_MIN` to 80.
 7. Termux device matrix, Windows console/ACL/`.old` cleanup, macOS keychain
@@ -193,6 +221,19 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — **v0.1.8's release workflow FAILED (run `45428451505`)** at the
+  new post-release CycloneDX `predicateType` guard, with
+  `jq: … Malformed BOM`, even though the published attestation was correct.
+  Root cause: cosign v2.6.5 v0.3 bundles from `attest-blob` put `dsseEnvelope`
+  at the bundle root (`mediaType`, `verificationMaterial`, `dsseEnvelope`),
+  while the guard read `.content.dsseEnvelope.payload`. Verified against the
+  downloaded published `golab_0.1.8_linux_amd64.tar.gz.sbom.sigstore.json`:
+  root `dsseEnvelope.payload` decodes to an in-toto statement with
+  `predicateType = https://cyclonedx.org/schema/bom-1.5`. Fix: guard accepts
+  root or nested layout; the assertion is unchanged (§4). No green v0.1.8
+  release or working self-update is claimed — a separate install-path defect
+  is being fixed by another agent; a new tag and human install proof are still
+  required.
 - 2026-11-24 — v0.1.8 prepared: CLI version bumped to match the changelog
   (guarded by `TestNumberMatchesLatestChangelogRelease`) alongside the exact
   CycloneDX predicate URI fix. A signed tag and a real `colab update --install`

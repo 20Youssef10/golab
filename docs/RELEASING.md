@@ -76,7 +76,12 @@ part of the updater's pinned signing identity (§4). The job:
    a `jq` format guard asserting each bundle is a v0.3 sigstore bundle
    (`.mediaType` contains `v0.3`, tlog `inclusionProof` present), and a `jq`
    guard decoding each SBOM bundle's DSSE payload and requiring `.predicateType`
-   to equal that exact URI. Both guards are essential: cosign's verifiers accept
+   to equal that exact URI. The predicate guard reads `dsseEnvelope` at the
+   bundle root **or** under `.content`
+   (`(.dsseEnvelope.payload // .content.dsseEnvelope.payload)`) — cosign v2.6.5
+   writes it at the root, which is why v0.1.8's run `45428451505` failed with
+   `Malformed BOM` before this was fixed. Do not narrow it back to one path.
+   Both guards are essential: cosign's verifiers accept
    legacy bundles and both SBOM predicate forms, while `golab update --install`
    rejects the wrong ones.
 
@@ -149,7 +154,10 @@ signed under any other identity are rejected by `golab update --install`.
    legacy bundles made this test fail, and v0.1.7 passed too but its SBOM
    predicateType (`https://cyclonedx.org/bom`, from the `cyclonedx` alias) made
    it fail with "unsupported predicate type". Either failure blocks the release
-   and requires a **new tag** (assets are immutable).
+   and requires a **new tag** (assets are immutable). v0.1.8 never reached this
+   check — its workflow failed at the proof guard (run `45428451505`) — and a
+   separate install-path defect is being fixed by another agent, so a working
+   self-update is not claimed for any published release.
    Confirm it fetches the new release, validates the checksum, signature and
    signed SBOM, and installs the new binary. Then:
    - `golab version` reports the new number and the intended upstream target;

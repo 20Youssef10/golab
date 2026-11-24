@@ -231,6 +231,12 @@ jobs:
           # in-toto statement) and require the exact URI. `jq -e` fails on false
           # or null, so a missing field, wrong predicate or malformed payload
           # fails the release loudly instead of shipping an un-installable bundle.
+          # cosign v2.6.5's attest-blob puts dsseEnvelope at the ROOT of a v0.3
+          # bundle (top-level mediaType/verificationMaterial/dsseEnvelope); an
+          # older/nested bundle keeps it under .content. Accept both layouts so
+          # the guard checks the payload rather than one storage path - the
+          # v0.1.8 release failed at this guard (run 45428451505) with
+          # "Malformed BOM" while its published attestation was correct.
           sbom_bundles=(dist/golab_*.sbom.sigstore.json)
           if (( ${#sbom_bundles[@]} == 0 )); then
             echo "FAIL: no SBOM attestation bundles" >&2; exit 1
@@ -238,7 +244,7 @@ jobs:
           for bundle in "${sbom_bundles[@]}"; do
             artifact="${bundle%.sbom.sigstore.json}"
             if ! jq -e --arg pt "https://cyclonedx.org/schema/bom-1.5" \
-              '.content.dsseEnvelope.payload | @base64d | fromjson | .predicateType == $pt' \
+              '(.dsseEnvelope.payload // .content.dsseEnvelope.payload) | @base64d | fromjson | .predicateType == $pt' \
               "$bundle" >/dev/null; then
               echo "FAIL: $bundle DSSE predicateType is not https://cyclonedx.org/schema/bom-1.5 - v0.1.6/v0.1.7 updater would reject it" >&2
               exit 1

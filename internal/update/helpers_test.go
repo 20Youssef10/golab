@@ -10,6 +10,9 @@ package update
 // end-to-end without ever touching the network or the real GitHub/TUF APIs.
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -310,7 +313,87 @@ type releaseFixture struct {
 	assetRename string // override the artifact asset name
 }
 
-func (f releaseFixture) withDefaults() releaseFixture {
+// fakeExecutable is deliberately ELF-prefixed: if a test ever installs the
+// archive bytes instead of the extracted binary, the failure is unmistakable.
+var fakeExecutable = []byte("\x7fELF\x02\x01\x01\x00golab-fake-executable-payload")
+
+// archiveEntry describes one member of a test .tar.gz. A zero Typeflag means a
+// regular file; Linkname is only meaningful for symlink/hardlink entries.
+type archiveEntry struct {
+	name     string
+	data     []byte
+	mode     int64
+	typeflag byte
+	linkname string
+}
+
+// makeTarGz builds the flat GoReleaser archive layout shipped in real releases:
+// the executable plus documentation files, gzip-compressed.
+func makeTarGz(t *testing.T, entries ...archiveEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	for _, e := range entries {
+		mode := e.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		typeflag := e.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+		hdr := &tar.Header{
+			Name:     e.name,
+			Mode:     mode,
+			Size:     int64(len(e.data)),
+			Typeflag: typeflag,
+			Linkname: e.linkname,
+			ModTime:  time.Unix(0, 0),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("write tar header for %q: %v", e.name, err)
+		}
+		if typeflag == tar.TypeReg || typeflag == tar.TypeRegA {
+			if _, err := tw.Write(e.data); err != nil {
+				t.Fatalf("write tar member %q: %v", e.name, err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// fakeArtifact returns a production-shaped release asset: a GoReleaser-style
+// .tar.gz containing golab plus the documentation files listed in
+// .goreleaser.yaml. Fake releases must look like what production downloads.
+func fakeArtifact(t *testing.T) []byte {
+	t.Helper()
+	return makeTarGz(t,
+		archiveEntry{name: "golab", data: fakeExecutable, mode: 0o755},
+		archiveEntry{name: "CHANGELOG.md", data: []byte("# changelog\n")},
+		archiveEntry{name: "LICENSE", data: []byte("Apache-2.0\n")},
+		archiveEntry{name: "NOTICE", data: []byte("notice\n")},
+		archiveEntry{name: "README.md", data: []byte("# golab\n")},
+	)
+}
+
+// redirectExecutable points the self-update install target at path for the
+// duration of a test. os.Executable() is the running test binary, so calling
+// VerifyAndInstall without this would destroy the test process on disk.
+func redirectExecutable(t *testing.T, path string) {
+	t.Helper()
+	previous := executablePath
+	executablePath = func() (string, error) { return path, nil }
+	t.Cleanup(func() { executablePath = previous })
+}
+
+func (f releaseFixture) withDefaults(t *testing.T) releaseFixture {
 	if f.tag == "" {
 		f.tag = testTag
 	}
@@ -318,7 +401,7 @@ func (f releaseFixture) withDefaults() releaseFixture {
 		f.version = testVer
 	}
 	if f.artifact == nil {
-		f.artifact = []byte("fake binary contents")
+		f.artifact = fakeArtifact(t)
 	}
 	if f.assetRename == "" {
 		f.assetRename = assetName
@@ -331,7 +414,7 @@ func (f releaseFixture) withDefaults() releaseFixture {
 // assert that no network traffic happens when a check is not due.
 func newReleaseServer(t *testing.T, f releaseFixture) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
-	f = f.withDefaults()
+	f = f.withDefaults(t)
 	var downloads atomic.Int32
 
 	checksum := f.checksum

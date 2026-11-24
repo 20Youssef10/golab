@@ -8,6 +8,8 @@ package update
 // R-09 / docs/05 requirement.
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -18,13 +20,193 @@ import (
 	"time"
 )
 
+// Regression for the critical self-update bug: the release asset is a
+// GoReleaser .tar.gz, not a bare executable. A v0.1.7 binary installed the
+// archive bytes, printed a success message, and left a gzip file on disk that
+// failed with "Exec format error" on the next run. Verification must keep
+// binding to the ARCHIVE while the executable installed is the member inside.
+//
+// Port of upstream tests/test_update.py::test_install_installs_verified_asset
+// (extended to cover archive extraction, which upstream does not exercise).
+func TestVerifyAndInstallExtractsBinaryFromArchive(t *testing.T) {
+	archive := fakeArtifact(t)
+	if len(archive) <= len(fakeExecutable) || !bytes.HasPrefix(archive, []byte{0x1f, 0x8b}) {
+		t.Fatal("test fixture is not a gzip archive")
+	}
+	s, _ := newReleaseServer(t, releaseFixture{artifact: archive})
+	defer s.Close()
+	cfg := fakeConfig(s)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "golab")
+	if err := os.WriteFile(target, []byte("old executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	redirectExecutable(t, target)
+
+	if err := VerifyAndInstall(context.Background(), cfg, releaseFromFixture(t, archive, "")); err != nil {
+		t.Fatalf("VerifyAndInstall: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, fakeExecutable) {
+		t.Fatalf("installed %d bytes, want the %d-byte binary inside the archive; installed prefix = % x (archive prefix = % x)",
+			len(got), len(fakeExecutable), got[:min(len(got), 16)], archive[:min(len(archive), 16)])
+	}
+	// No other archive member may ever be written to disk.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "golab" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("unexpected files written by update: %v", names)
+	}
+}
+
+// A signed archive is still untrusted input at the extraction layer. Every
+// hostile member must be rejected, and the legitimate binary must be unique.
+func TestExtractBinaryRejectsHostileArchives(t *testing.T) {
+	good := archiveEntry{name: "golab", data: fakeExecutable, mode: 0o755}
+	doc := archiveEntry{name: "CHANGELOG.md", data: []byte("# changelog\n")}
+	for _, tc := range []struct {
+		name    string
+		archive func(*testing.T) []byte
+		limit   int64
+		want    error
+	}{
+		{"path traversal", func(t *testing.T) []byte {
+			return makeTarGz(t, archiveEntry{name: "../evil", data: []byte("pwned")}, good)
+		}, maxArtifact, ErrUnsafeArchivePath},
+		{"absolute path", func(t *testing.T) []byte {
+			return makeTarGz(t, archiveEntry{name: "/tmp/evil", data: []byte("pwned")}, good)
+		}, maxArtifact, ErrUnsafeArchivePath},
+		{"nested path", func(t *testing.T) []byte {
+			return makeTarGz(t, archiveEntry{name: "docs/evil", data: []byte("pwned")}, good)
+		}, maxArtifact, ErrUnsafeArchivePath},
+		{"symlink binary", func(t *testing.T) []byte {
+			return makeTarGz(t, archiveEntry{name: "golab", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"}, doc)
+		}, maxArtifact, ErrUnexpectedArchiveMember},
+		{"hardlink binary", func(t *testing.T) []byte {
+			return makeTarGz(t, archiveEntry{name: "golab", typeflag: tar.TypeLink, linkname: "CHANGELOG.md"}, doc)
+		}, maxArtifact, ErrUnexpectedArchiveMember},
+		{"fifo entry", func(t *testing.T) []byte {
+			return makeTarGz(t, good, archiveEntry{name: "pipe", typeflag: tar.TypeFifo})
+		}, maxArtifact, ErrUnexpectedArchiveMember},
+		{"missing binary", func(t *testing.T) []byte {
+			return makeTarGz(t, doc)
+		}, maxArtifact, ErrBinaryNotFound},
+		{"duplicate binary", func(t *testing.T) []byte {
+			return makeTarGz(t, good, good)
+		}, maxArtifact, ErrDuplicateBinary},
+		{"empty binary", func(t *testing.T) []byte {
+			return makeTarGz(t, archiveEntry{name: "golab", mode: 0o755}, doc)
+		}, maxArtifact, ErrEmptyBinary},
+		{"declared size over cap", func(t *testing.T) []byte {
+			return makeTarGz(t, good, doc)
+		}, int64(len(fakeExecutable)) - 1, ErrTooLarge},
+		{"decompressed stream over cap", func(t *testing.T) []byte {
+			return makeTarGz(t, good, doc)
+		}, 48, ErrTooLarge},
+		{"not a gzip archive", func(t *testing.T) []byte {
+			return []byte("this is not gzip")
+		}, maxArtifact, ErrInvalidArchive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := extractBinary(tc.archive(t), "linux", tc.limit)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("extractBinary error = %v, want errors.Is(_, %v)", err, tc.want)
+			}
+			if got != nil {
+				t.Fatalf("rejected archive returned %d bytes", len(got))
+			}
+		})
+	}
+}
+
+func TestExtractBinaryWindowsName(t *testing.T) {
+	archive := makeTarGz(t,
+		archiveEntry{name: "golab.exe", data: fakeExecutable, mode: 0o755},
+		archiveEntry{name: "README.md", data: []byte("# golab\n")},
+	)
+	got, err := extractBinary(archive, "windows", maxArtifact)
+	if err != nil {
+		t.Fatalf("extractBinary(windows): %v", err)
+	}
+	if !bytes.Equal(got, fakeExecutable) {
+		t.Fatalf("got %d bytes, want the 37-byte golab.exe payload", len(got))
+	}
+	if _, err := extractBinary(archive, "linux", maxArtifact); !errors.Is(err, ErrBinaryNotFound) {
+		t.Fatalf("linux extraction of a windows-only archive: %v", err)
+	}
+}
+
+// The signed digest must bind to the ARCHIVE bytes. If a bundle signs only
+// the inner executable while the checksum covers the archive, verification
+// must fail before the install target is touched.
+func TestVerifyAndInstallDigestBindsToArchiveBytes(t *testing.T) {
+	archive := fakeArtifact(t)
+	bundle := makeBundle(t, fakeExecutable, bundleOptions{goodSig: true})
+	s, _ := newReleaseServer(t, releaseFixture{artifact: archive, bundle: bundle})
+	defer s.Close()
+	cfg := fakeConfig(s)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "golab")
+	if err := os.WriteFile(target, []byte("old executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	redirectExecutable(t, target)
+
+	err := VerifyAndInstall(context.Background(), cfg, releaseFromFixture(t, archive, ""))
+	if !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("expected ErrInvalidSignature for a bundle over inner bytes, got %v", err)
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "old executable" {
+		t.Fatalf("failed update modified the installed binary: %q", got)
+	}
+}
+
+// Extraction failures happen after verification but before any file write.
+func TestVerifyAndInstallExtractionFailureDoesNotMutate(t *testing.T) {
+	archive := makeTarGz(t,
+		archiveEntry{name: "golab", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
+		archiveEntry{name: "CHANGELOG.md", data: []byte("# changelog\n")},
+	)
+	s, _ := newReleaseServer(t, releaseFixture{artifact: archive})
+	defer s.Close()
+	cfg := fakeConfig(s)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "golab")
+	if err := os.WriteFile(target, []byte("old executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	redirectExecutable(t, target)
+
+	err := VerifyAndInstall(context.Background(), cfg, releaseFromFixture(t, archive, ""))
+	if !errors.Is(err, ErrUnexpectedArchiveMember) {
+		t.Fatalf("expected ErrUnexpectedArchiveMember, got %v", err)
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "old executable" {
+		t.Fatalf("failed extraction modified the installed binary: %q", got)
+	}
+}
+
 func TestVerifyAndInstallRefusesDowngrade(t *testing.T) {
 	s, downloads := newReleaseServer(t, releaseFixture{})
 	defer s.Close()
 	cfg := fakeConfig(s)
 	cfg.CurrentVersion = "99.0.0"
 
-	rel := releaseFromFixture(t, []byte("fake binary contents"), "")
+	rel := releaseFromFixture(t, fakeArtifact(t), "")
 	err := VerifyAndInstall(context.Background(), cfg, rel)
 	if !errors.Is(err, ErrDowngrade) {
 		t.Fatalf("expected ErrDowngrade, got %v", err)

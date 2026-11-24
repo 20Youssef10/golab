@@ -10,6 +10,34 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Release workflow: the post-release CycloneDX predicate guard now reads the
+  DSSE envelope from either layout —
+  `(.dsseEnvelope.payload // .content.dsseEnvelope.payload) | @base64d |
+  fromjson | .predicateType == $pt` — instead of only
+  `.content.dsseEnvelope.payload`. cosign v2.6.5's `--new-bundle-format`
+  `attest-blob` writes `dsseEnvelope` at the **root** of a v0.3 bundle, so the
+  v0.1.8 release run `45428451505` failed at this guard with
+  `jq: … Malformed BOM` even though the published attestation was correct
+  (confirmed by decoding the downloaded
+  `golab_0.1.8_linux_amd64.tar.gz.sbom.sigstore.json`). `--arg pt`, the
+  assertion and the loud FAIL message are unchanged; no check was weakened.
+  v0.1.8 is **not** a green release: published assets are immutable, so a new
+  tag is required. A working self-update is not claimed — a separate critical
+  install-path defect is being fixed by another agent (see
+  [CONFORMANCE.md §4](docs/CONFORMANCE.md#4-release-pipeline-and-updater-identity)).
+
+### Verification
+
+- Real downloaded v0.1.8 SBOM bundle: the exact guard expression exits 0 and
+  prints `true`; a synthetic nested-layout bundle prints `true`; synthetic
+  root- and nested-layout bundles with the wrong predicate both exit 1 and
+  print `false`; the old guard reproduces `Malformed BOM` on the real bundle.
+  PyYAML parse and `bash -n` over all workflow `run:` blocks,
+  `bash scripts/check-redaction.sh` and `bash scripts/check-paths.sh` pass. No
+  live signed release or `golab update --install` proof.
+
 ## [0.1.8] - 2026-11-24
 
 ### Fixed
@@ -230,7 +258,8 @@ remote-path scans. **Live Colab e2e is still human-gated** per AGENTS.md.
 
 - Audit baseline: initial Go port, audit reports AUDIT-00…04, canonical module path.
 
-[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/20Youssef10/golab/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/20Youssef10/golab/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/20Youssef10/golab/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/20Youssef10/golab/compare/v0.1.4...v0.1.5

@@ -111,7 +111,7 @@ func TestVerifyAndInstallWrongChecksum(t *testing.T) {
 	defer s.Close()
 	cfg := fakeConfig(s)
 
-	err := VerifyAndInstall(context.Background(), cfg, releaseFromFixture(t, []byte("fake binary contents"), "0000000000000000000000000000000000000000000000000000000000000000"))
+	err := VerifyAndInstall(context.Background(), cfg, releaseFromFixture(t, fakeArtifact(t), "0000000000000000000000000000000000000000000000000000000000000000"))
 	if !errors.Is(err, ErrChecksumMismatch) {
 		t.Fatalf("expected ErrChecksumMismatch, got %v", err)
 	}
@@ -131,7 +131,7 @@ func TestVerifyAndInstallMissingSignature(t *testing.T) {
 	s, _ := newReleaseServer(t, releaseFixture{})
 	defer s.Close()
 	cfg := fakeConfig(s)
-	rel := releaseFromFixture(t, []byte("fake binary contents"), "")
+	rel := releaseFromFixture(t, fakeArtifact(t), "")
 	rel.SignatureURL = "" // deliberately missing
 
 	err := VerifyAndInstall(context.Background(), cfg, rel)
@@ -218,7 +218,7 @@ func TestVerifyAndInstallTruncatedDownload(t *testing.T) {
 	defer s.Close()
 	cfg := fakeConfig(s)
 
-	err := VerifyAndInstall(context.Background(), cfg, releaseFromFixture(t, []byte("fake binary contents"), ""))
+	err := VerifyAndInstall(context.Background(), cfg, releaseFromFixture(t, fakeArtifact(t), ""))
 	if !errors.Is(err, ErrTruncatedDownload) {
 		t.Fatalf("expected ErrTruncatedDownload, got %v", err)
 	}
