@@ -1,58 +1,57 @@
-# colab-go: Agent Guidelines
+# Agent Instructions — golab
 
-Unofficial Go implementation of the Google Colab CLI (`google-colab-cli` 0.8.x compatible).
-Read `docs/01`–`docs/08` before changing behaviour. **Where docs and code disagree, code wins and the doc must be fixed in the same change.**
+Unofficial Go port of `google-colab-cli`; one static binary (`CGO_ENABLED=0`). Full contributor rules: [CONTRIBUTING.md](CONTRIBUTING.md). Honest verification status: [docs/CONFORMANCE.md](docs/CONFORMANCE.md). Where docs and code disagree, **code wins** — fix the doc in the same change.
 
-## Architecture (one screen)
-- `cmd/colab` wires dependencies. `internal/cli` (cobra) may import anything; **nothing imports `cli`**.
-- Protocol packages (`colabapi`, `runtime`, `contents`, `sshx`) take plain values and never import `state` or `cli`.
-- Two planes, two credentials: control plane (`/tun/m/*`, user OAuth/ADC bearer) vs data plane (runtime proxy token). **Never confuse them.** `colab auth` is a third thing: it injects credentials *into the VM*.
-- Fire-and-forget: no daemons, no background services. A command authenticates, works, exits. (A keep-alive daemon was removed upstream.)
-- Colab extends Jupyter: `colab_request` on iopub; reply is `input_reply` on **stdin** wrapping `colab_reply`.
-- Control-plane JSON may carry an XSSI prefix; mutations use GET-then-POST XSRF.
+## Entrypoints & package boundaries
+- Entry: `cmd/golab/main.go` → `cli.Execute` (`internal/cli/root.go`); dependency wiring is the `internal/app` composition root. **Register every new command in `internal/cli/register.go`** (single registration point).
+- `internal/cli` may import anything, but **only `cmd/golab` imports `internal/cli`** (no other `internal/` package does).
+- Protocol packages (`colabapi`, `runtime`, `contents`, `sshx`) take plain values and **never import `state` or `cli`** (keeps them promotable to a public module).
+- Two planes, two credentials: control plane = user OAuth/ADC bearer; data plane = short-lived runtime-proxy token. `colab auth` is a third thing (injects credentials into the VM). Never conflate them.
+- Fire-and-forget: no daemons/background services; all I/O functions take `context.Context`; no package-level mutable state except the one `sync.Once` Termux net-fix.
 
-## Core mandates
-1. **Test first.** Write the failing test (name the upstream Python test it ports in a comment), see it fail, then implement.
-2. **Protocol fidelity.** New endpoints are validated against captured traces (`testdata/wire/`), not guesses.
-3. **No live proof, no "done".** Fake-server tests are necessary, not sufficient. Run the live e2e (below) before declaring a feature complete.
-4. **Piping matters.** Program output → stdout; `[colab] …` diagnostics → stderr. Detect TTY via the helpers in `internal/platform` so tests can mock them (never block on a real TTY in CI).
-5. **Explicit timeouts everywhere.** No HTTP call without connect/TLS/header/idle limits. No unbounded waits except the documented `--timeout 0`.
-6. **Typed errors.** Use `errors.As/Is`. Never match "404"/"401" in strings.
-7. **Atomic state.** All writes to `sessions.json`/`settings.json` go through `internal/state` (lock + temp + fsync + rename). A corrupt file aborts; it is never treated as empty.
-8. **Validate before spending money.** Check scripts, flags, accelerators and keys **before** any allocation request.
-9. **Never splice user strings into code that runs on the VM.** Send JSON/`repr`-quoted payloads.
-10. **Remote paths use `path`, local paths use `filepath`.** The VM is Linux even when you are on Windows.
+## Commands
+| Task | Command |
+|------|---------|
+| Build (`./golab`) | `make build` |
+| PR gate | `make check` = vet + `go test -race -count=1 ./...` + golangci-lint + `make redaction` + `make paths` |
+| Single test | `go test ./internal/<pkg> -run '^TestName$' -count=1` |
+| Focused package | `go test -race -count=1 ./internal/<pkg>` |
+| Cross matrix | `make cross` → `make cross-smoke` (artifacts in `./dist`) |
+| Coverage | `make coverage` → `bash scripts/coverage-gate.sh dist/coverage.out` |
+| Fuzz smoke | `make fuzz` (10 s, both seeds) |
 
-## Security rules (non-negotiable)
-- Tokens, OAuth codes/verifiers, client secrets, `Authorization`, `Cookie`, `X-Colab-Runtime-Proxy-Token`, `X-Goog-Colab-Token` **never** reach logs, argv, env dumps or error messages. Use the `Secret` type; run the redaction golden test.
-- No `InsecureSkipVerify`. No env var or flag that changes Colab hosts in release builds (host override exists only under `-tags testhooks`).
-- Session names: `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, no Windows reserved names.
-- Untrusted remote output is sanitised before it reaches the terminal (strip OSC/DCS/APC and query sequences; keep SGR).
-- New dependency ⇒ one-line justification in `docs/DEPENDENCIES.md`, `govulncheck` clean.
+- `make all` = `check` + `build`. Go **1.27.4** pinned in `go.mod`; golangci-lint **v2** (v2.15.0 in CI).
+- CI gotchas: `windows-11-arm` drops `-race`; the coverage gate is floored at **70** via `COVERAGE_MIN` (target 80); `goleak-check` runs ADVISORY. Check `docs/CONFORMANCE.md` before treating a gate or harness as real.
 
-## Platform rules
-- `CGO_ENABLED=0` always. No `GOOS=android` artefacts.
-- Termux: DNS/CA shim lives in `internal/platform/netfix`; do not add env-var workarounds elsewhere. Avoid `exec.LookPath` on Android hot paths. Use `$TMPDIR`/`$PREFIX/tmp`.
-- Windows: enable VT console modes and restore them on **every** exit path; teardown also on console-close events; never delete the running `.exe`.
-- Token store tiers: keyring (5 s probe, cached) → 0600 file. Store the refresh token only.
-- Run `GOOS=<each tier> go build ./...` (or `goreleaser build --snapshot`) before pushing platform-touching changes.
+## Tests & fixtures
+- **Test-first, non-negotiable:** write the failing test first, name the upstream Python test in a comment, watch it fail, then implement.
+- Fakes are the default (`internal/testutil/fakecolab`, `fakekernel`, `fakesshd`). **Fakes are not live proof** — no feature is "done" until a human runs the live e2e.
+- `testdata/wire/` and `testdata/golden/` contain only READMEs — **zero fixtures**. Redacted ground truth must be captured from the official Python CLI by a human (`scripts/live-capture.sh`, GET-only). Never fabricate a fixture.
+- Golden harness: `COLAB_BIN=./golab bash scripts/golden.sh --scenario <name> --update` (review diff; record divergences in `DELTAS.yaml`). `bash scripts/golden.sh --scenario wire` secret-scans wire fixtures.
 
-## Workflow
-1. **Draft:** new git branch per change; plan; list test cases.
-2. **Refine:** `go vet ./... && golangci-lint run && go test -race -count=1 ./...`
-3. **Finalize:** re-read the affected `docs/` page and update it; add a dated note to its frontmatter/changelog section; commit. Suggest the review command `git diff main..<branch>` (full cumulative diff), not `git show <sha>`.
-- Fetch before pushing; never force-push `main`; amend only commits you created in this session and have not pushed.
-- Reproduce a reported failure on `main` **before** assuming your change caused it.
-- A globally installed Python `colab` may shadow this binary on `PATH`: check `which colab` and `colab version` (it names the implementation).
+## Security invariants (every change)
+- Tokens, OAuth codes/verifiers, client secrets, `Authorization`/`Cookie`/proxy-token headers never reach logs, argv, env dumps or errors — use the `Secret` type; run `make redaction`.
+- No `InsecureSkipVerify`; no env var or flag that changes Colab hosts in release builds.
+- All `sessions.json`/`settings.json` writes go through `internal/state` (lock + temp + fsync + rename); a corrupt file aborts, never resets.
+- Remote paths use `path`, local paths use `filepath` (`make paths`). `CGO_ENABLED=0` always; no `GOOS=android`. Termux DNS/CA shim lives in `internal/platform/netfix`.
+- Validate scripts/flags/accelerators/keys **before any allocation** (spends money). Never splice user strings into code run on the VM — send JSON/`repr`-quoted payloads.
+- New dependency ⇒ one-line justification in root `DEPENDENCIES.md`; `govulncheck ./...` must stay clean.
 
-## Live tests: what agents can and cannot run
-- **Can:** unit/component tests, lint, fakes, `colab new/status/stop/ls/upload/download/install/usage`, `colab exec <file>`, piped `colab repl`, `colab ssh -- CMD </dev/null`, `colab run script.py`.
-- **Cannot (needs a human):** `colab auth`, `colab drivemount`, interactive TTY `repl`/`ssh`, the OAuth consent step. Build the logic, write fake-server tests, then ask the user to run the live check.
-- **Live probes allocate real, billable VMs.** Prefer GET-only probes. Record every endpoint you create; unassign before finishing; end with `colab sessions` showing nothing. Unassign orphans (`[?]` entries) explicitly.
-- Heed research caveats: a "the API might reject X" note is a TODO to probe, not a footnote. Verify claims from tools (including AI tools) against primary sources.
+## Command & protocol conventions
+- Program output → stdout; every `[colab] …` diagnostic → stderr. Detect TTY only via `internal/platform` helpers so CI never blocks on a real TTY.
+- `run`/`ssh` disable interspersed flags so unknown flags after the script path are forwarded verbatim. There is no `--debug` flag; debugging is `COLAB_DEBUG=1`.
+- Map errors to messages/exit codes in one table: `internal/cli/errors.go`. Use typed errors (`errors.As`/`errors.Is`), never string-match `"404"`/`"401"`.
+- Control-plane mutations: strip the XSSI prefix and do GET-then-POST XSRF; every HTTP call gets explicit connect/TLS/header/idle timeouts.
+- Kernel WS: `colab_request` arrives on iopub; `input_reply` on stdin wraps `colab_reply`.
 
-## Release rules
-Release **only when the user explicitly asks.** SemVer; breaking = CLI surface, flag semantics, on-disk schema, token format. Flow: changelog PR → merged → annotated tag `vX.Y.Z` on the merge commit → GoReleaser. Confirm the inferred version with the user before tagging.
+## Workflow & release
+- Branch off `main`, one change per PR. Re-read and update the affected `docs/` page + dated note, and add a `CHANGELOG.md` `[Unreleased]` entry for user-visible changes, **in the same commit**.
+- Fetch before push; never force-push `main`; amend only unpushed commits made this session. Suggest `git diff main..<branch>` for review, not `git show <sha>`.
+- A globally installed Python `colab` can shadow the binary — check `which colab` / `colab version` when reproducing reports.
+- **Never cut a release autonomously.** Confirm the version with the requester; require an annotated tag (`git tag -a`). `.github/workflows/release.yml` is pinned in the verifier's certificate identity — do not rename it. Validate with `goreleaser check && goreleaser release --snapshot --clean`.
 
-## Continuous improvement
-Whenever the user gives feedback or a correction, encode it **here** immediately so the mistake is never repeated.
+## Human-only (ask a maintainer)
+`colab auth` (OAuth consent), `colab drivemount`, interactive-TTY `repl`/`ssh`, live probes, signed-release verification. Live probes allocate billable VMs: prefer GET-only, log every endpoint, unassign before finishing, end with `golab sessions` empty. `scripts/live-sweeper.sh` is dry-run unless `APPLY=1`.
+
+- Always update docs and CHANGELOG
+- FOLLOW Semantic Versioning rules
