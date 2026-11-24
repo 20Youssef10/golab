@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -374,8 +375,12 @@ func makeTarGz(t *testing.T, entries ...archiveEntry) []byte {
 // .goreleaser.yaml. Fake releases must look like what production downloads.
 func fakeArtifact(t *testing.T) []byte {
 	t.Helper()
+	binaryName := "golab"
+	if runtime.GOOS == "windows" {
+		binaryName = "golab.exe"
+	}
 	return makeTarGz(t,
-		archiveEntry{name: "golab", data: fakeExecutable, mode: 0o755},
+		archiveEntry{name: binaryName, data: fakeExecutable, mode: 0o755},
 		archiveEntry{name: "CHANGELOG.md", data: []byte("# changelog\n")},
 		archiveEntry{name: "LICENSE", data: []byte("Apache-2.0\n")},
 		archiveEntry{name: "NOTICE", data: []byte("notice\n")},
