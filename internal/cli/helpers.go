@@ -210,6 +210,15 @@ func notebookOutputs(outs []runtime.Output) []nb.Output {
 	return result
 }
 
+// notebookCellResult copies one kernel result into a notebook code cell. The
+// cell-level execution_count comes from the kernel's execute_reply (captured in
+// runtime.Result.ExecutionCount); notebookOutputs still maps only output-level
+// counts. Unexecuted cells keep whatever count their source notebook had.
+func notebookCellResult(cell *nb.Cell, outs []runtime.Output, executionCount *int) {
+	cell.Outputs = notebookOutputs(outs)
+	cell.ExecutionCount = executionCount
+}
+
 func logExecution(d *app.Deps, name, code string, outs []runtime.Output, extra map[string]any) {
 	payload := map[string]any{"code": code, "outputs": runtimeOutputsAsMaps(outs)}
 	for k, v := range extra {

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	goruntime "runtime"
 	"strings"
 	"time"
@@ -63,9 +62,35 @@ func (osSecretKeyring) Get(service, user string) (string, error) {
 	}
 }
 
+// reservedSecretNames are identifiers the CLI uses for its own credentials.
+// resolveSecretValue reads from auth.KeyringService (the same keyring service
+// that holds the OAuth refresh token), so allowing these names as --secret
+// would let the data plane read the control-plane credential straight out of
+// the VM. The file names are included even though they cannot pass envKeyRE,
+// so the deny-list documents every internal credential identifier and stays
+// correct if key validation is ever relaxed.
+var reservedSecretNames = map[string]struct{}{
+	auth.KeyringUser:         {}, // keyring user holding the OAuth refresh token
+	auth.LegacyTokenFileName: {}, // legacy Python token store
+	auth.OAuthTokenFileName:  {}, // owner-only token file
+}
+
+// isReservedSecretName reports whether NAME identifies one of the CLI's own
+// credentials. Matching is case-insensitive: keyring backends differ in case
+// sensitivity across platforms, so "OAUTH_TOKEN" must be refused too.
+func isReservedSecretName(name string) bool {
+	_, ok := reservedSecretNames[strings.ToLower(name)]
+	return ok
+}
+
 // resolveSecretValue resolves NAME from the process environment first, then
 // from the existing keyring backend under the upstream service name.
 func resolveSecretValue(ctx context.Context, name string) (logx.Secret, error) {
+	// Refuse internal credential identifiers before ANY lookup (environment or
+	// keyring) and before any VM work. No value is ever read, so none can echo.
+	if isReservedSecretName(name) {
+		return logx.Secret{}, usagef("[colab] --secret %q is reserved for golab's own credentials and cannot be injected into a notebook.", name)
+	}
 	if !envKeyRE.MatchString(name) {
 		return logx.Secret{}, usagef("[colab] Invalid --secret name %q. Expected a valid environment variable name.", name)
 	}
@@ -82,8 +107,8 @@ func resolveSecretValue(ctx context.Context, name string) (logx.Secret, error) {
 	return logx.NewSecret(v), nil
 }
 
-// injectedSecret is a --secret entry (or a sensitive-looking env-file entry)
-// whose value is always held as a typed secret.
+// injectedSecret is a --secret entry (or an --env-file entry) whose value is
+// always held as a typed secret and registered with the exec redactor.
 type injectedSecret struct {
 	name  string
 	value logx.Secret
@@ -91,16 +116,16 @@ type injectedSecret struct {
 
 var errEnvFileMode = errors.New("--env-file must be mode 0600 (owner read/write only)")
 
-var sensitiveKeyNameRE = regexp.MustCompile(`(?i)(secret|token|password|passwd|credential|api[_-]?key|private[_-]?key)`)
-
-// isSensitiveEnvKey tags env-file values that must be redacted on every output
-// surface. It never matches generic keys containing "key" (e.g. MONKEY).
-func isSensitiveEnvKey(key string) bool {
-	return sensitiveKeyNameRE.MatchString(key)
-}
-
 // parseEnvFile reads a 0600 KEY=VALUE file. Comments and blank lines are
 // ignored, values may contain '=', and only the key appears in error messages.
+//
+// The file is an explicit, owner-only secrets bridge: EVERY value is returned
+// in the secrets slice so the caller registers it with execRedactor, regardless
+// of how innocuous the key looks (e.g. E2E_KEY). Historically a name-based
+// regex decided which values were protected; a plain-looking key leaked into
+// history JSONL and `golab log` exports. Note this is specific to --env-file:
+// `--env KEY=VALUE` remains documented as non-sensitive and is intentionally
+// NOT registered with the redactor.
 func parseEnvFile(path string) ([]envVar, []injectedSecret, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -138,9 +163,9 @@ func parseEnvFile(path string) ([]envVar, []injectedSecret, error) {
 			return nil, nil, usagef("[colab] Invalid --env-file key %q at line %d. Expected a valid environment variable name.", key, line)
 		}
 		vars = append(vars, envVar{key: key, value: value})
-		if isSensitiveEnvKey(key) {
-			secrets = append(secrets, injectedSecret{name: key, value: logx.NewSecret(value)})
-		}
+		// Every value is sensitive by construction here: the caller feeds this
+		// slice into newExecRedactor before any output is persisted or echoed.
+		secrets = append(secrets, injectedSecret{name: key, value: logx.NewSecret(value)})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, nil, exitf(2, "[colab] Cannot read --env-file %q: %s", path, logx.Redact(err.Error()))
@@ -151,7 +176,8 @@ func parseEnvFile(path string) ([]envVar, []injectedSecret, error) {
 // injectedPrelude builds Python source that sets every injected value with
 // pyRepr quoting. USER TEXT IS NEVER SPLICED: values are emitted as JSON-
 // compatible Python string literals. Entries already present in vars are not
-// emitted twice (sensitive env-file values appear in both slices).
+// emitted twice: --env-file values arrive via vars only, and --secret values
+// are emitted here.
 func injectedPrelude(vars []envVar, secrets []injectedSecret) string {
 	if len(vars) == 0 && len(secrets) == 0 {
 		return ""
@@ -172,10 +198,10 @@ func injectedPrelude(vars []envVar, secrets []injectedSecret) string {
 	return b.String()
 }
 
-// execRedactor scrubs values injected into the kernel (--secret, and
-// sensitive-looking --env-file entries) from every user-visible surface:
-// stdout records, stderr diagnostics, history events and notebook outputs.
-// It carries no package-level state: each exec builds its own instance.
+// execRedactor scrubs values injected into the kernel (--secret and EVERY
+// --env-file entry) from every user-visible surface: stdout records, stderr
+// diagnostics, history events, log exports and notebook outputs. It carries no
+// package-level state: each exec builds its own instance.
 type execRedactor struct {
 	values []logx.Secret
 }

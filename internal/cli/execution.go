@@ -102,19 +102,29 @@ func readCodeBlocks(d *app.Deps, file string) ([]codeBlock, *nb.Notebook, error)
 	return []codeBlock{{code: string(data)}}, nil, nil
 }
 
-// execOutputHook renders a cell's outputs. IPython keeps the kernel alive by
-// reporting sys.exit as an error output, so SystemExit is translated back to
-// CPython's UX: empty/None/integer exits are silent and only a non-integer
-// message reaches stderr (without the "%tb" banner). Every other output is
-// rendered exactly as before. Exit codes come from exitCodeFromOutputs.
+// systemExitMessage is the single CPython translation used by BOTH output
+// modes. IPython keeps the kernel alive by reporting sys.exit as an error
+// output: empty/None/integer codes are silent, and only a non-integer value
+// is the message CPython would print to stderr (without the "%tb" banner).
+func systemExitMessage(value string) (message string, quiet bool) {
+	v := strings.TrimSpace(value)
+	if v == "" || v == "None" {
+		return "", true
+	}
+	if _, err := strconv.Atoi(strings.Trim(v, `"'`)); err == nil {
+		return "", true
+	}
+	return v, false
+}
+
+// execOutputHook renders a cell's outputs. SystemExit is translated back to
+// CPython's UX; every other output is rendered exactly as before. Exit codes
+// come from exitCodeFromOutputs and are deliberately untouched.
 func execOutputHook(d *app.Deps, outputImage string) func(runtime.Output) error {
 	return func(o runtime.Output) error {
 		if o.OutputType == "error" && o.EName == "SystemExit" {
-			value := strings.TrimSpace(o.EValue)
-			if value == "" || value == "None" {
-				return nil
-			}
-			if _, err := strconv.Atoi(strings.Trim(value, `"'`)); err == nil {
+			value, quiet := systemExitMessage(o.EValue)
+			if quiet {
 				return nil
 			}
 			_, err := fmt.Fprintln(d.Stderr, render.Sanitize(value))
@@ -167,7 +177,10 @@ func saveCellImage(value any, mime, target string) (string, error) {
 		return "", errors.New("exec: image save did not report a path")
 	}
 	rest := s[i+len(prefix):]
-	j := strings.IndexByte(rest, ']')
+	// render appends the closing ']' itself after the (sanitized) path. A
+	// --output-image path may legitimately contain ']', so the delimiter is
+	// the *last* ']' in the report, not the first one.
+	j := strings.LastIndexByte(rest, ']')
 	if j < 0 {
 		return "", errors.New("exec: image save reported a malformed path")
 	}
@@ -176,7 +189,7 @@ func saveCellImage(value any, mime, target string) (string, error) {
 
 // buildCellRecord summarises one cell's kernel outputs as the upstream PR #237
 // record. Inputs are already redacted by execRedactor before reaching here.
-func buildCellRecord(outs []runtime.Output, index int, cellID *string, outputImage string, red *execRedactor) (agentout.CellResult, error) {
+func buildCellRecord(outs []runtime.Output, index int, cellID *string, outputImage string, red *execRedactor, stderr io.Writer) (agentout.CellResult, error) {
 	rec := agentout.CellResult{
 		CellIndex: index,
 		CellID:    cellID,
@@ -194,6 +207,33 @@ func buildCellRecord(outs []runtime.Output, index int, cellID *string, outputIma
 				rec.Stdout += text
 			}
 		case o.OutputType == "error":
+			if o.EName == "SystemExit" {
+				// --json must agree with text mode: a successful sys.exit is
+				// not a failed cell, and IPython's "%tb" banner belongs to no
+				// record. Only the CPython message is kept, if any.
+				message, quiet := systemExitMessage(o.EValue)
+				if quiet && systemExitCode(o.EValue) == 0 {
+					continue // sys.exit()/None/0: status stays "ok", error null
+				}
+				value := message
+				if quiet {
+					value = strings.Trim(strings.TrimSpace(o.EValue), `"'`)
+				}
+				value = red.Redact(plainTraceback([]string{value}))
+				rec.Status = "error"
+				rec.Error = &agentout.CellError{
+					EName: "SystemExit", EValue: value, Traceback: "",
+				}
+				if !quiet {
+					// Captured in the record for machines, and echoed on
+					// stderr exactly as text mode does for humans.
+					rec.Stderr += value + "\n"
+					if stderr != nil {
+						_, _ = fmt.Fprintln(stderr, value)
+					}
+				}
+				continue
+			}
 			rec.Status = "error"
 			rec.Error = &agentout.CellError{
 				EName:     red.Redact(o.EName),
@@ -407,7 +447,7 @@ func execCommand() *cobra.Command {
 					return pruneLost(d, s.Name, err)
 				}
 				if jsonOutput {
-					rec, buildErr := buildCellRecord(res.Outputs, i, cellID, outputImage, red)
+					rec, buildErr := buildCellRecord(res.Outputs, i, cellID, outputImage, red, d.Stderr)
 					if buildErr != nil {
 						return buildErr
 					}
@@ -419,7 +459,7 @@ func execCommand() *cobra.Command {
 				// saved notebook and every output hook share these copies.
 				safeOutputs := red.Outputs(res.Outputs)
 				if notebook != nil {
-					notebook.Cells[block.cellIdx].Outputs = notebookOutputs(safeOutputs)
+					notebookCellResult(&notebook.Cells[block.cellIdx], safeOutputs, res.ExecutionCount)
 				}
 				extra := map[string]any{}
 				if isNB {

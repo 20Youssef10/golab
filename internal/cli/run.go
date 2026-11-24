@@ -371,7 +371,7 @@ func runCommand() *cobra.Command {
 						reason = "run_failed"
 						return renderErr
 					default:
-						notebook.Cells[block.cellIdx].Outputs = notebookOutputs(res.Outputs)
+						notebookCellResult(&notebook.Cells[block.cellIdx], res.Outputs, res.ExecutionCount)
 						logExecution(d, name, code, res.Outputs, map[string]any{
 							"via": "run", "cell_index": i, "cell_id": block.id,
 						})

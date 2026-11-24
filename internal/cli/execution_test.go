@@ -198,6 +198,117 @@ func TestExecIPynb(t *testing.T) {
 	}
 }
 
+// Live v0.2.0 regression: the cell-level execution_count reported by the
+// kernel's execute_reply (runtime.Result.ExecutionCount) was never copied onto
+// nb.Cell, so every executed cell was saved with "execution_count": null.
+// Ports the notebook fidelity assertions of upstream
+// tests/test_ipynb_exec.py::test_exec_ipynb_output_format. Text and NDJSON
+// output surfaces must stay byte-identical while the notebook gains counts.
+func TestExecIPynbCellExecutionCount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		json bool
+	}{
+		{name: "text"},
+		{name: "ndjson", json: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.putSession(t, "s1")
+			h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", map[string]any{"execution_count": 1})) // /content prelude
+			h.kernel.Script(
+				fakekernel.Stream("stdout", "first\n"),
+				fakekernel.Status("idle"),
+				fakekernel.Reply("ok", map[string]any{"execution_count": 4}),
+			)
+			h.kernel.Script(
+				fakekernel.Stream("stdout", "second\n"),
+				fakekernel.Status("idle"),
+				fakekernel.Reply("ok", map[string]any{"execution_count": 5}),
+			)
+
+			n := nb.NewNotebook()
+			md := nb.NewMarkdownCell("notes")
+			c1 := nb.NewCodeCell("print('a')")
+			c1.ID = "cell-a"
+			c2 := nb.NewCodeCell("print('b')")
+			c2.ID = "cell-b"
+			n.Cells = []nb.Cell{md, c1, c2}
+			raw, err := nb.Marshal(n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "counts.ipynb")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"exec", "-s", "s1", "-f", path}
+			if tc.json {
+				args = append(args, "--json")
+			}
+			if code := h.run(t, "", args...); code != 0 {
+				t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+			}
+
+			// Output surfaces are unchanged by the notebook-fidelity fix.
+			if tc.json {
+				records := jsonRecords(t, h.stdout.String())
+				if len(records) != 2 {
+					t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+				}
+				for i, want := range []struct {
+					id, stdout string
+				}{{"cell-a", "first\n"}, {"cell-b", "second\n"}} {
+					r := records[i]
+					if r["cell_id"] != want.id || r["stdout"] != want.stdout || r["status"] != "ok" {
+						t.Fatalf("record %d = %v", i, r)
+					}
+				}
+			} else if !strings.Contains(h.stdout.String(), "first") || !strings.Contains(h.stdout.String(), "second") {
+				t.Fatalf("stdout = %q", h.stdout.String())
+			}
+
+			outPath := strings.TrimSuffix(path, ".ipynb") + "_output.ipynb"
+			b, err := os.ReadFile(outPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := nb.Parse(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(saved.Cells) != 3 {
+				t.Fatalf("saved cells = %d", len(saved.Cells))
+			}
+			if saved.Cells[0].ExecutionCount != nil {
+				t.Fatalf("markdown execution_count = %v, want nil", *saved.Cells[0].ExecutionCount)
+			}
+			for i, want := range []int{4, 5} {
+				got := saved.Cells[i+1].ExecutionCount
+				if got == nil {
+					t.Fatalf("cell %d execution_count is null; raw notebook = %s", i+1, b)
+				}
+				if *got != want {
+					t.Fatalf("cell %d execution_count = %d, want %d", i+1, *got, want)
+				}
+			}
+			if *saved.Cells[1].ExecutionCount >= *saved.Cells[2].ExecutionCount {
+				t.Fatalf("execution counts not increasing: %d, %d",
+					*saved.Cells[1].ExecutionCount, *saved.Cells[2].ExecutionCount)
+			}
+			for i, want := range []string{"first\n", "second\n"} {
+				if len(saved.Cells[i+1].Outputs) != 1 || string(saved.Cells[i+1].Outputs[0].Text) != want {
+					t.Fatalf("cell %d outputs = %+v", i+1, saved.Cells[i+1].Outputs)
+				}
+			}
+			if !strings.Contains(string(b), `"execution_count":4`) || !strings.Contains(string(b), `"execution_count":5`) {
+				t.Fatalf("saved notebook JSON lacks reply counts: %s", b)
+			}
+		})
+	}
+}
+
 // Ports upstream tests/test_exec.py::test_cli_exec_file_error_exits_nonzero,
 // test_cli_exec_systemexit_zero_exits_zero_silently,
 // test_cli_exec_systemexit_nonzero_propagates_code and
@@ -254,6 +365,91 @@ func TestExecExitSemantics(t *testing.T) {
 			for _, unwanted := range tc.noStderr {
 				if strings.Contains(h.stderr.String(), unwanted) {
 					t.Fatalf("stderr should not contain %q: %q", unwanted, h.stderr.String())
+				}
+			}
+		})
+	}
+}
+
+// Live v0.2.0 regression: IPython reports sys.exit as an error output even for
+// a successful exit. Text mode translates that back to CPython's UX, but the
+// --json record builder treated every error output as a failed cell and leaked
+// the IPython "%tb" banner. Both modes must now agree (PRs #278/#280).
+func TestExecJSONSystemExitMatchesTextMode(t *testing.T) {
+	systemExit := func(evalue string) fakekernel.Step {
+		return fakekernel.Error("SystemExit", evalue, []string{
+			"\x1b[0;31mAn exception has occurred, use %tb to see the full traceback.\x1b[0m\n",
+			"SystemExit: " + evalue + "\n",
+		})
+	}
+	const banner = "An exception has occurred, use %tb to see the full traceback."
+	for _, tc := range []struct {
+		name       string
+		eval       string
+		wantCode   int
+		wantStatus string
+		wantError  bool
+		wantEValue string
+		wantStderr string
+	}{
+		{name: "no value", eval: "", wantCode: 0, wantStatus: "ok"},
+		{name: "None", eval: "None", wantCode: 0, wantStatus: "ok"},
+		{name: "zero", eval: "0", wantCode: 0, wantStatus: "ok"},
+		{name: "seven", eval: "7", wantCode: 7, wantStatus: "error", wantError: true, wantEValue: "7"},
+		{
+			name: "message", eval: "fatal config error", wantCode: 1, wantStatus: "error",
+			wantError: true, wantEValue: "fatal config error", wantStderr: "fatal config error\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.putSession(t, "s1")
+			h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+			h.kernel.Script(
+				fakekernel.Stream("stdout", "exec-ok\n"),
+				systemExit(tc.eval),
+				fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+			)
+			if code := h.run(t, "print('exec-ok')\n", "exec", "-s", "s1", "--json"); code != tc.wantCode {
+				t.Fatalf("exit=%d want=%d stderr=%q stdout=%q", code, tc.wantCode, h.stderr.String(), h.stdout.String())
+			}
+			records := jsonRecords(t, h.stdout.String())
+			if len(records) != 1 {
+				t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+			}
+			r := records[0]
+			if r["status"] != tc.wantStatus {
+				t.Fatalf("status = %v, want %q (record %v)", r["status"], tc.wantStatus, r)
+			}
+			if r["stdout"] != "exec-ok\n" {
+				t.Fatalf("stdout field = %v, want %q", r["stdout"], "exec-ok\n")
+			}
+			if !tc.wantError {
+				if r["error"] != nil {
+					t.Fatalf("error must be null for a quiet SystemExit: %v", r["error"])
+				}
+			} else {
+				errObj, ok := r["error"].(map[string]any)
+				if !ok {
+					t.Fatalf("error = %v", r["error"])
+				}
+				if errObj["ename"] != "SystemExit" || errObj["evalue"] != tc.wantEValue {
+					t.Fatalf("error = %v, want ename=SystemExit evalue=%q", errObj, tc.wantEValue)
+				}
+				if errObj["traceback"] != "" {
+					t.Fatalf("traceback must be concise, got %q", errObj["traceback"])
+				}
+			}
+			if r["stderr"] != tc.wantStderr {
+				t.Fatalf("stderr field = %q, want %q", r["stderr"], tc.wantStderr)
+			}
+			if tc.wantStderr != "" && !strings.Contains(h.stderr.String(), tc.wantStderr) {
+				t.Fatalf("diagnostic stderr = %q, want %q", h.stderr.String(), tc.wantStderr)
+			}
+			// No IPython "%tb" banner or ANSI escapes on either surface.
+			for _, surface := range []string{h.stdout.String(), h.stderr.String()} {
+				if strings.Contains(surface, banner) || strings.Contains(surface, "use %tb") || strings.Contains(surface, "\x1b") {
+					t.Fatalf("IPython banner/ANSI leaked: %q", surface)
 				}
 			}
 		})
@@ -564,6 +760,69 @@ func TestExecJSONImages(t *testing.T) {
 	}
 	if strings.Contains(h.stdout.String(), png) || strings.Contains(h.stdout.String(), "png-bytes") {
 		t.Fatalf("base64 image inlined in stdout: %q", h.stdout.String())
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "png-bytes" {
+		t.Fatalf("saved image = %q, err=%v", b, err)
+	}
+}
+
+// Review defect: saveCellImage cut the reported path at the FIRST ']', so a
+// legitimate filename containing ']' was reported truncated. The record must
+// name the exact file that exists on disk.
+func TestExecJSONImagePathWithBracket(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	png := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
+	h.kernel.Script(
+		fakekernel.DisplayData(map[string]any{"image/png": png}, nil, ""),
+		fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+	)
+	target := filepath.Join(t.TempDir(), "a]b.png")
+	if code := h.run(t, "plot()\n", "exec", "-s", "s1", "--json", "--output-image", target); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	records := jsonRecords(t, h.stdout.String())
+	if len(records) != 1 {
+		t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+	}
+	images, ok := records[0]["images"].([]any)
+	if !ok || len(images) != 1 || images[0] != target {
+		t.Fatalf("images = %v, want exactly [%s]", records[0]["images"], target)
+	}
+	// The reported path must be the real file, not its truncated prefix.
+	if b, err := os.ReadFile(target); err != nil || string(b) != "png-bytes" {
+		t.Fatalf("reported image does not exist: %q, err=%v", target, err)
+	}
+	prefix := strings.SplitN(target, "]", 2)[0]
+	if strings.Contains(h.stdout.String(), `"`+prefix+`"`) {
+		t.Fatalf("truncated path reported in stdout: %q", h.stdout.String())
+	}
+}
+
+// Regression: a --output-image path containing ']' must be reported verbatim
+// in the NDJSON images field. The render layer appends its own ']' after the
+// path, so parsing with IndexByte used to truncate "/tmp/a]b.png" to "/tmp/a".
+func TestExecJSONImagesPathWithBracket(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	png := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
+	h.kernel.Script(
+		fakekernel.DisplayData(map[string]any{"image/png": png}, nil, ""),
+		fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+	)
+	target := filepath.Join(t.TempDir(), "a]b.png")
+	if code := h.run(t, "plot()\n", "exec", "-s", "s1", "--json", "--output-image", target); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	records := jsonRecords(t, h.stdout.String())
+	if len(records) != 1 {
+		t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+	}
+	images, ok := records[0]["images"].([]any)
+	if !ok || len(images) != 1 || images[0] != target {
+		t.Fatalf("images = %v (want [%s])", records[0]["images"], target)
 	}
 	if b, err := os.ReadFile(target); err != nil || string(b) != "png-bytes" {
 		t.Fatalf("saved image = %q, err=%v", b, err)

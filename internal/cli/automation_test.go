@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -487,7 +486,17 @@ func (t *scriptedPropagationTransport) RoundTrip(req *http.Request) (*http.Respo
 		r := t.script.next()
 		body := `{"success":true}`
 		if !r.success {
-			body = fmt.Sprintf(`{"success":false,"unauthorized_redirect_uri":%q}`, r.uri)
+			// json.Marshal (not %q) so control characters become valid \uXXXX
+			// JSON escapes: the decoded URI then carries the raw bytes a real
+			// control plane would send, exercising the terminal-sanitizer path.
+			encoded, err := json.Marshal(map[string]any{
+				"success":                   false,
+				"unauthorized_redirect_uri": r.uri,
+			})
+			if err != nil {
+				return nil, err
+			}
+			body = string(encoded)
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -603,5 +612,252 @@ func TestDriveMountDefaultStillPrompts(t *testing.T) {
 	}
 	if got := stdin.count(); got < 1 {
 		t.Fatalf("default flow read stdin %d times; want >= 1", got)
+	}
+}
+
+// --- defect 1 (MEDIUM): server-controlled authorization URL ---------------
+
+// The UnauthorizedRedirectURI is server-controlled. A URI carrying an OSC 52
+// clipboard-write payload and a CSI erase-screen sequence must be sanitized
+// before it reaches stderr *or* the history event, and non-HTTP(S) schemes must
+// never be displayed or launched.
+func TestDriveAuthURIIsSanitizedAndSchemeChecked(t *testing.T) {
+	const evilURI = "https://consent.example/auth?next=\x1b]52;c;c2VjcmV0\x1b\\\x1b[2J"
+	for _, tc := range []struct {
+		name, uri, wantURI string
+	}{
+		{"osc52-and-csi", evilURI, "https://consent.example/auth?next="},
+		{"javascript-scheme", "javascript:alert(1)", ""},
+		{"file-scheme", "file:///etc/passwd", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := launchBrowserFunc
+			var launched []string
+			launchBrowserFunc = func(target string) bool {
+				launched = append(launched, target)
+				return true
+			}
+			t.Cleanup(func() { launchBrowserFunc = orig })
+
+			h := newHarness(t)
+			setStreams(h)
+			h.putSession(t, "s1")
+			installScriptedPropagation(h, &propagationScript{responses: []propResponse{
+				{success: false, uri: tc.uri},
+				{success: true},
+			}})
+			driveKernelScript(h, "cm-authuri")
+
+			code := runWithStdin(h, &countingStdin{}, "drivemount", "-s", "s1", "--yes")
+			if code != 0 {
+				t.Fatalf("exit = %d; stderr=%q", code, h.stderr.String())
+			}
+			out := h.stderr.String()
+			for _, bad := range []string{"\x1b", "]52;", "[2J", "javascript:", "file:///etc/passwd"} {
+				if strings.Contains(out, bad) {
+					t.Fatalf("stderr leaked %q: %q", bad, out)
+				}
+			}
+			if tc.wantURI != "" {
+				if !strings.Contains(out, tc.wantURI) {
+					t.Fatalf("sanitized URI missing from stderr: %q", out)
+				}
+				if len(launched) != 1 || launched[0] != tc.wantURI {
+					t.Fatalf("launched = %q; want [%q]", launched, tc.wantURI)
+				}
+			} else if len(launched) != 0 {
+				t.Fatalf("invalid scheme was launched: %q", launched)
+			}
+
+			l, err := history.NewAt(h.dir, "s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			events, err := l.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, e := range events {
+				if e.EventType != history.EventDriveAuthNeeded {
+					continue
+				}
+				found = true
+				var payload map[string]any
+				if err := json.Unmarshal(e.Payload, &payload); err != nil {
+					t.Fatal(err)
+				}
+				uri, _ := payload["uri"].(string)
+				if uri != tc.wantURI {
+					t.Fatalf("history uri = %q; want %q", uri, tc.wantURI)
+				}
+				for _, bad := range []string{"\x1b", "]52;", "[2J"} {
+					if strings.Contains(uri, bad) {
+						t.Fatalf("history leaked %q: %q", bad, uri)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("no drive_auth_needed event: %+v", events)
+			}
+		})
+	}
+}
+
+// --- defect 2 (MEDIUM): one transient probe error aborted consent polling ---
+
+func TestPollForConsentRetriesTransientProbeErrors(t *testing.T) {
+	calls := 0
+	probe := func(context.Context) (*colabapi.CredProp, error) {
+		calls++
+		if calls == 1 {
+			return nil, &colabapi.StatusError{
+				Code: 503, Body: "<html>temporarily unavailable</html>",
+				Method: "POST", Path: "/tun/m/credentials-propagation/ep",
+			}
+		}
+		return &colabapi.CredProp{Success: true}, nil
+	}
+	cp, err := pollForConsent(context.Background(), 2*time.Second, 5*time.Millisecond, probe)
+	if err != nil {
+		t.Fatalf("pollForConsent: %v", err)
+	}
+	if cp == nil || !cp.Success {
+		t.Fatalf("propagation = %+v; want success", cp)
+	}
+	if calls != 2 {
+		t.Fatalf("probe calls = %d; want 2 (5xx then success)", calls)
+	}
+}
+
+func TestPollForConsentAllFailuresBoundedAndSanitized(t *testing.T) {
+	probe := func(context.Context) (*colabapi.CredProp, error) {
+		return nil, &colabapi.StatusError{
+			Code: 503, Method: "POST", Path: "/tun/m/credentials-propagation/ep",
+			Body: "\x1b]52;c;c2VjcmV0\x1b\\\x1b[2J<html>SECRET-TOKEN</html>",
+		}
+	}
+	start := time.Now()
+	cp, err := pollForConsent(context.Background(), 40*time.Millisecond, 5*time.Millisecond, probe)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("poll not bounded by the deadline: %v", elapsed)
+	}
+	if cp != nil {
+		t.Fatalf("propagation = %+v; want nil", cp)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v; want context.DeadlineExceeded", err)
+	}
+	for _, bad := range []string{"\x1b", "]52;", "[2J", "SECRET-TOKEN", "<html"} {
+		if strings.Contains(err.Error(), bad) {
+			t.Fatalf("error leaked %q: %q", bad, err.Error())
+		}
+	}
+	h := newHarness(t)
+	setStreams(h)
+	h.putSession(t, "s1")
+	reportDriveFailure(h.deps, "s1", err)
+	out := h.stderr.String()
+	for _, want := range []string{"Drive credentials could not be propagated", "colab whoami"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("message missing %q: %q", want, out)
+		}
+	}
+	for _, bad := range []string{"\x1b", "]52;", "[2J", "SECRET-TOKEN", "<html"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("reported failure leaked %q: %q", bad, out)
+		}
+	}
+}
+
+// --- defect 3 (LOW): waitForEnter stranded a reader goroutine on cancel ----
+
+// closableBlockingStdin blocks in Read until Close unblocks it, modelling an
+// embedded caller's stdin that can strand the waitForEnter reader goroutine.
+type closableBlockingStdin struct {
+	entered   chan struct{}
+	release   chan struct{}
+	readDone  chan struct{}
+	closeOnce sync.Once
+	doneOnce  sync.Once
+}
+
+func newClosableBlockingStdin() *closableBlockingStdin {
+	return &closableBlockingStdin{
+		entered:  make(chan struct{}, 1),
+		release:  make(chan struct{}),
+		readDone: make(chan struct{}),
+	}
+}
+
+func (r *closableBlockingStdin) Read([]byte) (int, error) {
+	select {
+	case r.entered <- struct{}{}:
+	default:
+	}
+	<-r.release
+	r.doneOnce.Do(func() { close(r.readDone) })
+	return 0, io.EOF
+}
+
+func (r *closableBlockingStdin) Close() error {
+	r.closeOnce.Do(func() { close(r.release) })
+	return nil
+}
+
+func TestWaitForEnterCancellationUnblocksReader(t *testing.T) {
+	t.Setenv("COLAB_TEST_STDIN_TTY", "0")
+	h := newHarness(t)
+	setStreams(h)
+	stdin := newClosableBlockingStdin()
+	h.deps.Stdin = stdin
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	returned := make(chan struct{})
+	go func() {
+		waitForEnter(ctx, h.deps)
+		close(returned)
+	}()
+	select {
+	case <-stdin.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader never started")
+	}
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForEnter did not return after cancellation")
+	}
+	select {
+	case <-stdin.readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader goroutine is still blocked on ReadString")
+	}
+	if !strings.Contains(h.stderr.String(), "Press Enter after you have granted access") {
+		t.Fatalf("prompt missing from stderr: %q", h.stderr.String())
+	}
+}
+
+func TestWaitForEnterNonTTYEOFPreservesPrompt(t *testing.T) {
+	t.Setenv("COLAB_TEST_STDIN_TTY", "0")
+	h := newHarness(t)
+	setStreams(h) // setStreams installs an EOF reader on stdin.
+	returned := make(chan struct{})
+	go func() {
+		waitForEnter(context.Background(), h.deps)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForEnter blocked on EOF stdin")
+	}
+	if !strings.Contains(h.stderr.String(), "Press Enter after you have granted access") {
+		t.Fatalf("prompt missing from stderr: %q", h.stderr.String())
+	}
+	if !strings.HasSuffix(h.stderr.String(), "\n") {
+		t.Fatalf("line break after prompt missing: %q", h.stderr.String())
 	}
 }

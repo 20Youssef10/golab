@@ -11,20 +11,25 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/20Youssef10/golab/internal/auth"
 	"github.com/20Youssef10/golab/internal/history"
 	"github.com/20Youssef10/golab/internal/logx"
+	"github.com/20Youssef10/golab/internal/nb"
 	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/testutil/fakekernel"
 )
 
 // fakeSecretKeyring implements the narrow keyring reader without touching the
-// OS keyring (no D-Bus, no `security` CLI).
+// OS keyring (no D-Bus, no `security` CLI). gets counts reads so a test can
+// assert that a reserved name is refused before the keyring is consulted.
 type fakeSecretKeyring struct {
 	values map[string]string
 	err    error
+	gets   int
 }
 
 func (f *fakeSecretKeyring) Get(service, user string) (string, error) {
+	f.gets++
 	if f.err != nil {
 		return "", f.err
 	}
@@ -85,6 +90,107 @@ func TestResolveSecretValueTiers(t *testing.T) {
 	})
 }
 
+// Local hardening (no upstream Python counterpart): the CLI's own control-plane
+// credential must never be injectable into a VM. AGENTS.md separates the two
+// planes: user OAuth/ADC bearer vs the short-lived data-plane token. Reading
+// (KeyringService, KeyringUser) as a --secret would cross that boundary.
+func TestResolveSecretValueRefusesReservedNames(t *testing.T) {
+	const tokenBlob = `{"refresh_token":"cli-control-plane-token-9999"}`
+	t.Run(auth.KeyringUser, func(t *testing.T) {
+		os.Unsetenv(auth.KeyringUser)
+		kr := &fakeSecretKeyring{values: map[string]string{
+			auth.KeyringService + "/" + auth.KeyringUser: tokenBlob,
+		}}
+		_, err := resolveSecretValue(secretKeyringContext(kr), auth.KeyringUser)
+		if err == nil {
+			t.Fatal("expected reserved credential name to be refused")
+		}
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.code != 2 {
+			t.Fatalf("error = %v (%T), want exit 2", err, err)
+		}
+		if kr.gets != 0 {
+			t.Fatalf("keyring read %d times, want 0", kr.gets)
+		}
+		if strings.Contains(err.Error(), tokenBlob) || strings.Contains(err.Error(), "refresh_token") {
+			t.Fatalf("error echoed a credential value: %q", err)
+		}
+		if !strings.Contains(err.Error(), auth.KeyringUser) {
+			t.Fatalf("error did not name the reserved key: %q", err)
+		}
+	})
+	t.Run("every internal identifier and case variants", func(t *testing.T) {
+		for _, name := range []string{
+			auth.KeyringUser,
+			strings.ToUpper(auth.KeyringUser),
+			auth.LegacyTokenFileName,
+			auth.OAuthTokenFileName,
+		} {
+			t.Run(name, func(t *testing.T) {
+				os.Unsetenv(name)
+				kr := &fakeSecretKeyring{values: map[string]string{
+					auth.KeyringService + "/" + auth.KeyringUser: tokenBlob,
+				}}
+				_, err := resolveSecretValue(secretKeyringContext(kr), name)
+				var ee *exitError
+				if !errors.As(err, &ee) || ee.code != 2 {
+					t.Fatalf("error = %v (%T), want exit 2", err, err)
+				}
+				if kr.gets != 0 {
+					t.Fatalf("keyring read %d times, want 0", kr.gets)
+				}
+				if strings.Contains(err.Error(), "cli-control-plane-token-9999") {
+					t.Fatalf("error echoed a credential value: %q", err)
+				}
+			})
+		}
+	})
+	t.Run("similar but legitimate name still works", func(t *testing.T) {
+		const name = "GOLAB_TEST_MY_OAUTH_TOKEN"
+		os.Unsetenv(name)
+		kr := &fakeSecretKeyring{values: map[string]string{
+			auth.KeyringService + "/" + name: "legitimate-value",
+		}}
+		got, err := resolveSecretValue(secretKeyringContext(kr), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Reveal() != "legitimate-value" {
+			t.Fatalf("secret = %q", got.Reveal())
+		}
+		if kr.gets != 1 {
+			t.Fatalf("keyring read %d times, want 1", kr.gets)
+		}
+	})
+}
+
+// exec resolves secrets before attachSession, so a reserved name must exit 2
+// with no control-plane request and no kernel execution (zero VM allocation).
+func TestExecRefusesReservedSecretBeforeAllocation(t *testing.T) {
+	const tokenBlob = `{"refresh_token":"cli-control-plane-token-9999"}`
+	h := newHarness(t)
+	// No putSession on purpose: any attach/allocation attempt would surface as
+	// a control-plane request and fail this test.
+	kr := &fakeSecretKeyring{values: map[string]string{
+		auth.KeyringService + "/" + auth.KeyringUser: tokenBlob,
+	}}
+	ctx := WithSecretKeyring(WithDeps(context.Background(), h.deps), kr)
+	code := execute(ctx, []string{"exec", "-s", "s1", "--secret", auth.KeyringUser},
+		strings.NewReader("print(1)\n"), &h.stdout, &h.stderr)
+	if code != 2 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	if kr.gets != 0 {
+		t.Fatalf("keyring read %d times, want 0", kr.gets)
+	}
+	if len(h.ctrl.Requests()) != 0 || len(h.kernel.Executions()) != 0 {
+		t.Fatal("reserved secret validated too late: control plane/kernel touched")
+	}
+	if strings.Contains(h.stderr.String(), tokenBlob) || strings.Contains(h.stderr.String(), "refresh_token") {
+		t.Fatalf("credential leaked to stderr: %q", h.stderr.String())
+	}
+}
+
 // env-file must be owner-only on Unix, like every other credential file.
 func TestParseEnvFileModeAndKeys(t *testing.T) {
 	t.Run("0600 parses comments and values with equals", func(t *testing.T) {
@@ -111,9 +217,16 @@ func TestParseEnvFileModeAndKeys(t *testing.T) {
 				t.Fatalf("vars[%d] = %+v, want %+v", i, vars[i], want)
 			}
 		}
-		if len(secrets) != 1 || secrets[0].name != "API_TOKEN" ||
-			secrets[0].value.Reveal() != "supersecret-value" {
-			t.Fatalf("secrets = %+v", secrets)
+		// Every value is protected now, even the plain-looking keys (PLAIN,
+		// EMPTY, CONNECTION). This used to assert only API_TOKEN, which encoded
+		// the name-based classification that let E2E_KEY leak into history.
+		if len(secrets) != len(wantVars) {
+			t.Fatalf("secrets = %+v, want one per env-file value", secrets)
+		}
+		for i, want := range wantVars {
+			if secrets[i].name != want.key || secrets[i].value.Reveal() != want.value {
+				t.Fatalf("secrets[%d] = %+v, want name=%q value=%q", i, secrets[i], want.key, want.value)
+			}
 		}
 	})
 	t.Run("0644 refused", func(t *testing.T) {
@@ -242,6 +355,107 @@ func TestExecSecretNeverLeaks(t *testing.T) {
 				if len(all) == 0 {
 					t.Fatal("no history event recorded")
 				}
+			}
+		})
+	}
+}
+
+// Live-e2e regression (HIGH): an owner-only --env-file is an explicit secrets
+// bridge, so EVERY value in it must be registered with execRedactor regardless
+// of key name. E2E_KEY does not match the legacy sensitive-name regex, so the
+// old code injected its value into the kernel but never redacted the prelude:
+// the value landed verbatim in history/<session>.jsonl (and in `golab log -o`)
+// and in the kernel-output surfaces.
+func TestExecEnvFilePlainKeyNeverLeaks(t *testing.T) {
+	const secret = "SUPERSECRETVALUE_9642"
+	const name = "E2E_KEY"
+	envPath := filepath.Join(t.TempDir(), "vars.env")
+	if err := os.WriteFile(envPath, []byte(name+"="+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		notebook bool
+		json     bool
+	}{
+		{name: "script-text"},
+		{name: "script-ndjson", json: true},
+		{name: "notebook-text", notebook: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.putSession(t, "s1")
+			var srcPath string
+			if tc.notebook {
+				n := nb.NewNotebook()
+				n.Cells = []nb.Cell{nb.NewCodeCell("print(1)")}
+				raw, err := nb.Marshal(n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				srcPath = filepath.Join(t.TempDir(), "script.ipynb")
+				if err := os.WriteFile(srcPath, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				srcPath = filepath.Join(t.TempDir(), "script.py")
+				if err := os.WriteFile(srcPath, []byte("print(1)\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// /content prelude, then the cell carrying the injected --env-file
+			// prelude. Every surface echoes the value to prove redaction.
+			h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+			h.kernel.Script(
+				fakekernel.Stream("stdout", "echo:"+secret+"\n"),
+				fakekernel.Stream("stderr", "warn:"+secret+"\n"),
+				fakekernel.DisplayData(map[string]any{"text/plain": secret}, nil, ""),
+				fakekernel.Error("ValueError", secret, []string{"ValueError: " + secret + "\n"}),
+				fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+			)
+			args := []string{"exec", "-s", "s1", "-f", srcPath, "--env-file", envPath}
+			if tc.json {
+				args = append(args, "--json")
+			}
+			if code := h.run(t, "", args...); code != 1 {
+				t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+			}
+			// The value MUST still reach the kernel's code payload.
+			execs := h.kernel.Executions()
+			if len(execs) < 2 || !strings.Contains(execs[1].Code, pyRepr(secret)) {
+				t.Fatalf("secret not injected into kernel payload: %+v", execs)
+			}
+			// History JSONL is the source of `golab log -o exported.jsonl`.
+			hist, err := os.ReadFile(filepath.Join(h.dir, "s1.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNoSecret(t, secret, string(hist))
+			assertNoSecret(t, pyRepr(secret), string(hist))
+			// The export itself must be clean too, not just its source.
+			exportPath := filepath.Join(t.TempDir(), "exported.jsonl")
+			if code := h.run(t, "", "log", "-s", "s1", "-o", exportPath); code != 0 {
+				t.Fatalf("log exit=%d stderr=%q", code, h.stderr.String())
+			}
+			exp, err := os.ReadFile(exportPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNoSecret(t, secret, string(exp))
+			assertNoSecret(t, pyRepr(secret), string(exp))
+			// stdout carries NDJSON records in --json mode; stderr is shared.
+			assertNoSecret(t, secret, h.stdout.String(), h.stderr.String())
+			assertNoSecret(t, pyRepr(secret), h.stdout.String(), h.stderr.String())
+			// The deferred notebook write shares the same redacted outputs.
+			if tc.notebook {
+				outPath := strings.TrimSuffix(srcPath, ".ipynb") + "_output.ipynb"
+				out, err := os.ReadFile(outPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertNoSecret(t, secret, string(out))
+				assertNoSecret(t, pyRepr(secret), string(out))
 			}
 		})
 	}

@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -229,28 +231,48 @@ func ttyName() string {
 // bounded by the automation context so a headless host cannot hang forever.
 func waitForEnter(ctx context.Context, d *app.Deps) {
 	fmt.Fprint(d.Stderr, "Press Enter after you have granted access... ")
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	defer fmt.Fprintln(d.Stderr)
+
+	// Every blocking read is covered by a source we can close on cancellation,
+	// so no reader goroutine can outlive the caller's context. On normal
+	// completion nothing is closed: stdin stays owned by the caller.
+	var ttyFile *os.File
+	if platform.IsStdinTTY() {
 		// Only touch the controlling terminal when stdin really is a TTY.
 		// On Windows CONIN$ can open successfully in a headless runner and
 		// then block forever, so the injected stdin must be used instead.
-		if platform.IsStdinTTY() {
-			if f, err := os.Open(ttyName()); err == nil {
-				if _, readErr := bufio.NewReader(f).ReadString('\n'); readErr == nil {
-					_ = f.Close()
-					return
-				}
-				_ = f.Close() // e.g. EIO when there is no controlling terminal
+		if f, err := os.Open(ttyName()); err == nil {
+			ttyFile = f
+		}
+	}
+	var once sync.Once
+	closeSources := func() {
+		once.Do(func() {
+			if ttyFile != nil {
+				_ = ttyFile.Close()
 			}
+			if c, ok := d.Stdin.(io.Closer); ok {
+				_ = c.Close()
+			}
+		})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if ttyFile != nil {
+			if _, err := bufio.NewReader(ttyFile).ReadString('\n'); err == nil || ctx.Err() != nil {
+				return
+			}
+			// e.g. EIO when there is no controlling terminal: fall back to stdin.
 		}
 		_, _ = bufio.NewReader(d.Stdin).ReadString('\n')
 	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
+		closeSources() // unblocks ReadString so the goroutine can exit
 	}
-	fmt.Fprintln(d.Stderr)
 }
 
 // Consent in a browser is inherently interactive, so a fully click-free
@@ -273,20 +295,41 @@ func pollForConsent(ctx context.Context, timeout, interval time.Duration, probe 
 	defer cancel()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var lastErr error
 	for {
-		cp, err := probe(ctx)
-		if err != nil {
-			return nil, err
+		if err := ctx.Err(); err != nil {
+			return nil, consentTimeoutError(err, lastErr)
 		}
-		if cp != nil && cp.Success {
+		cp, err := probe(ctx)
+		if err == nil && cp != nil && cp.Success {
 			return cp, nil
+		}
+		// A transient probe failure (5xx, stalled request, ...) is not a
+		// consent decision: remember it and keep polling until the deadline.
+		if err != nil {
+			lastErr = err
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, consentTimeoutError(ctx.Err(), lastErr)
 		case <-ticker.C:
 		}
 	}
+}
+
+// consentTimeoutError reports a bounded timeout without echoing server text.
+// lastErr is deliberately NOT wrapped with %w: a StatusError body must never
+// re-enter the terminal through errors.As in reportDriveFailure. Only its
+// HTTP status is surfaced, which is bounded and carries no HTML or token.
+func consentTimeoutError(ctxErr, lastErr error) error {
+	if lastErr == nil {
+		return ctxErr
+	}
+	var se *colabapi.StatusError
+	if errors.As(lastErr, &se) && se.Code != 0 {
+		return fmt.Errorf("%w: last propagation probe returned HTTP %d", ctxErr, se.Code)
+	}
+	return fmt.Errorf("%w: last propagation probe failed", ctxErr)
 }
 
 // cleanDetail strips ANSI/CSI/OSC escapes and control characters from an
@@ -394,13 +437,37 @@ func driveFailureMessage(status int, detail string) string {
 		"[colab] even though the consent itself succeeded."), "\n")
 }
 
-func showDriveAuthURL(d *app.Deps, uri string) bool {
-	fmt.Fprintf(d.Stderr, "\n[colab] REQUIRED: Google Drive Authorization needed.\nPlease visit:\n\n%s\n", uri)
-	if !openURL(uri) {
-		return false
+// safeAuthURI sanitises a server-supplied authorization URL before it can
+// reach the terminal, the browser launcher or the history log. Terminal
+// escapes are stripped first (cleanDetail), then only absolute http(s) URLs
+// are accepted. An empty return means "never display or launch this".
+func safeAuthURI(raw string) string {
+	s := cleanDetail(raw)
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return s
+}
+
+// showDriveAuthURL prints the sanitized authorization URL and returns the
+// exact same value so the caller records it in history. No untrusted text is
+// returned to either sink, and an invalid link is never handed to openURL.
+func showDriveAuthURL(d *app.Deps, uri string) string {
+	safe := safeAuthURI(uri)
+	if safe == "" {
+		fmt.Fprintln(d.Stderr, "[colab] Server returned an invalid authorization URL; not displaying it.")
+		return ""
+	}
+	fmt.Fprintf(d.Stderr, "\n[colab] REQUIRED: Google Drive Authorization needed.\nPlease visit:\n\n%s\n", safe)
+	if !openURL(safe) {
+		return safe
 	}
 	fmt.Fprintln(d.Stderr, "[colab] Opened the authorization page in your default browser.")
-	return true
+	return safe
 }
 
 func reportDriveFailure(d *app.Deps, name string, err error) {
@@ -480,8 +547,8 @@ func driveCommand() *cobra.Command {
 							reportDriveFailure(d, s.Name, nil)
 							return
 						}
-						showDriveAuthURL(d, cp.UnauthorizedRedirectURI)
-						writeEvent(d, s.Name, history.EventDriveAuthNeeded, map[string]any{"uri": cp.UnauthorizedRedirectURI})
+						safeURI := showDriveAuthURL(d, cp.UnauthorizedRedirectURI)
+						writeEvent(d, s.Name, history.EventDriveAuthNeeded, map[string]any{"uri": safeURI})
 						// The browser consent itself stays human-only. --wait-for-consent
 						// replaces the Enter prompt with a bounded poll of the control
 						// plane; --yes skips the prompt too (and goes straight to Confirm).

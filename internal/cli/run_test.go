@@ -122,6 +122,61 @@ func TestRunNotebookCellsShareKernelAndSaveOutputs(t *testing.T) {
 	}
 }
 
+// Live v0.2.0 regression: `colab run notebook.ipynb` saved every executed cell
+// with "execution_count": null because the reply's count was never copied onto
+// nb.Cell. Markdown cells must stay null and text output must stay unchanged.
+func TestRunNotebookCellExecutionCount(t *testing.T) {
+	h := newHarness(t)
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", map[string]any{"execution_count": 1}))
+	h.kernel.Script(
+		fakekernel.Stream("stdout", "one\n"),
+		fakekernel.Status("idle"),
+		fakekernel.Reply("ok", map[string]any{"execution_count": 7}),
+	)
+	h.kernel.Script(
+		fakekernel.Stream("stdout", "two\n"),
+		fakekernel.Status("idle"),
+		fakekernel.Reply("ok", map[string]any{"execution_count": 8}),
+	)
+
+	md := nb.NewMarkdownCell("notes")
+	c1 := nb.NewCodeCell("print('one')")
+	c2 := nb.NewCodeCell("print('two')")
+	path, outPath := writeRunNotebook(t, ".ipynb", md, c1, c2)
+	if code := h.run(t, "", "run", path); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stdout.String(), "one") || !strings.Contains(h.stdout.String(), "two") {
+		t.Fatalf("stdout = %q", h.stdout.String())
+	}
+
+	saved := readRunOutput(t, outPath)
+	if len(saved.Cells) != 3 {
+		t.Fatalf("saved cells = %d", len(saved.Cells))
+	}
+	if saved.Cells[0].ExecutionCount != nil {
+		t.Fatalf("markdown execution_count = %v, want nil", *saved.Cells[0].ExecutionCount)
+	}
+	for i, want := range []int{7, 8} {
+		got := saved.Cells[i+1].ExecutionCount
+		if got == nil {
+			t.Fatalf("cell %d execution_count is null", i+1)
+		}
+		if *got != want {
+			t.Fatalf("cell %d execution_count = %d, want %d", i+1, *got, want)
+		}
+	}
+	if *saved.Cells[1].ExecutionCount >= *saved.Cells[2].ExecutionCount {
+		t.Fatalf("execution counts not increasing: %d, %d",
+			*saved.Cells[1].ExecutionCount, *saved.Cells[2].ExecutionCount)
+	}
+	for i, want := range []string{"one\n", "two\n"} {
+		if len(saved.Cells[i+1].Outputs) != 1 || string(saved.Cells[i+1].Outputs[0].Text) != want {
+			t.Fatalf("cell %d outputs = %+v", i+1, saved.Cells[i+1].Outputs)
+		}
+	}
+}
+
 // A failing cell must abort before the next one is sent, but the partial
 // notebook (including the error output) must still be saved.
 func TestRunNotebookStopsOnFirstFailingCell(t *testing.T) {

@@ -10,6 +10,30 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Post-release audit + live e2e found and fixed six defects in the batch 2
+  features: `exec --json` now matches text mode for `SystemExit(0)` (clean
+  `status:"ok"`, no IPython banner); all `--env-file` values are redacted even
+  when the key name looks ordinary (previously plaintext in history and exported
+  logs); `--secret` refuses reserved internal credential names such as
+  `oauth_token`; saved notebooks keep cell-level `execution_count`; `--output-image`
+  paths containing `]` are reported exactly; and `drivemount --wait-for-consent`
+  sanitizes the server-supplied auth URI, retries transient probe failures and
+  unblocks its prompt reader on cancellation.
+
+### Verification
+
+v0.2.0 release run `45489842618` and CI run `45487165817` are green; a real
+v0.1.9 → v0.2.0 signed self-update installed an executable ELF. Live e2e on a
+billable CPU VM covered `new`, `status`, `ls`, `exec` (text/JSON/secrets),
+`run` (script and notebook), `ssh`, piped `repl`, upload/download, `stop --verify`,
+`resume` error paths and cleanup — final `golab sessions` was empty. Fuzz smoke
+passed both seeds. Coverage gate misses the 80% target for `state`/`sshx`
+(the CI floor is 70%, as documented). Cross-build smoke was interrupted by a
+server restart and is not claimed. Fake-kernel tests cover all six fixes; a
+live re-run of the fixed cases follows this commit.
+
 ## [0.2.0] - 2026-11-24
 
 ### Added
