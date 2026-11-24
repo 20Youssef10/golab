@@ -60,12 +60,23 @@ func TestVerifyAndInstallExtractsBinaryFromArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "golab" {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
+	wantNames := []string{"golab"}
+	if runtime.GOOS == "windows" {
+		// A running .exe cannot be overwritten: replaceBinary renames the old
+		// executable to <target>.old and removes it on the next start.
+		wantNames = append(wantNames, "golab.old")
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != len(wantNames) {
+		t.Fatalf("unexpected files written by update: %v (want %v)", names, wantNames)
+	}
+	for i, want := range wantNames {
+		if names[i] != want {
+			t.Fatalf("unexpected files written by update: %v (want %v)", names, wantNames)
 		}
-		t.Fatalf("unexpected files written by update: %v", names)
 	}
 }
 
