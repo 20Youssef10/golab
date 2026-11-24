@@ -169,6 +169,10 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — v0.1.7 prepared: CLI version bumped to match the changelog
+  (guarded by `TestNumberMatchesLatestChangelogRelease`), with the new-format
+  cosign bundles and `whoami` fix. A signed tag and real `colab update --install`
+  proof are pending; the v0.1.6 bundle-format defect is recorded below.
 - 2026-11-24 — **CONFIRMED DEFECT in v0.1.6, producer fixed in this change.**
   v0.1.6 was signed and its cosign proof passed (run `45399682610`), but
   `golab update --install` against it fails with

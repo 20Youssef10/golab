@@ -10,6 +10,8 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-24
+
 ### Fixed
 
 - `whoami`: stop discarding the OAuth transport when extracting the access
