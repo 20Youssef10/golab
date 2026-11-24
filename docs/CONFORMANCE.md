@@ -234,7 +234,8 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
   `SystemExit(0)` record, plaintext `--env-file` history leak for ordinary key
   names, `--secret oauth_token` cross-plane risk, missing notebook
   `execution_count`, `]` in image paths, and Drive consent URI injection plus
-  polling/reader edge cases). All six are fixed test-first with fake-kernel
+  polling/reader edge cases, plus IPython's exit-hint warning in JSON stderr).
+  All seven are fixed test-first with fake-kernel
   coverage; live billable re-verification follows in the same working round.
   v0.2.0 remains published — these fixes are on `main` in `[Unreleased]` with no
   patch tag, per requester decision. `run --explain <script> --explain` is not a

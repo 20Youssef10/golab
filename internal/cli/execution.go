@@ -30,6 +30,11 @@ import (
 
 const contentPrelude = "import os; os.makedirs('/content', exist_ok=True); os.chdir('/content')"
 
+// execWarningsPrelude suppresses only IPython's harmless "To exit: use ..."
+// hint that a clean sys.exit emits. It is message-scoped: every other warning
+// keeps its normal behaviour (no global simplefilter/filterwarnings override).
+const execWarningsPrelude = `import warnings; warnings.filterwarnings("ignore", message="To exit: use")` + "\n"
+
 // attachSession resolves a session, attaches its kernel and performs the
 // mandatory /content chdir. Terminal 401/404 errors prune the local session.
 func attachSession(ctx context.Context, d *app.Deps, name string) (*state.Session, runtime.Kernel, error) {
@@ -144,6 +149,16 @@ func plainTraceback(lines []string) string {
 	return render.Sanitize(ansiEscapeRE.ReplaceAllString(strings.Join(lines, "\n"), ""))
 }
 
+// ipythonExitHintRE matches only IPython's "To exit: use ..." UserWarning
+// (including its indented warn(...) source line) on kernel stderr. The
+// prelude stops it at the source; this pass keeps an already-emitted copy out
+// of a --json record. Other warnings are untouched.
+var ipythonExitHintRE = regexp.MustCompile(`(?m)^[^\r\n]*UserWarning: To exit: use[^\r\n]*(?:\r?\n[ \t]+warn\("To exit: use[^\r\n]*)?\r?\n?`)
+
+func filterIPythonExitHint(s string) string {
+	return ipythonExitHintRE.ReplaceAllString(s, "")
+}
+
 // saveCellImage decodes a kernel image payload and saves it through the shared
 // render path (0600 file, --output-image honoured). Nothing is written to the
 // record's stdout: only the sanitized path is returned.
@@ -202,7 +217,7 @@ func buildCellRecord(outs []runtime.Output, index int, cellID *string, outputIma
 		case o.OutputType == "stream":
 			text := red.Redact(o.Text)
 			if o.Name == "stderr" {
-				rec.Stderr += text
+				rec.Stderr += filterIPythonExitHint(text)
 			} else {
 				rec.Stdout += text
 			}
@@ -371,7 +386,7 @@ func execCommand() *cobra.Command {
 				}
 				defer func() { _ = cells.Close() }()
 			}
-			prelude := injectedPrelude(envVars, cliSecrets)
+			prelude := execWarningsPrelude + injectedPrelude(envVars, cliSecrets)
 			isNB := strings.HasSuffix(strings.ToLower(file), ".ipynb")
 			defer func() {
 				setRunning(d, s, nil)

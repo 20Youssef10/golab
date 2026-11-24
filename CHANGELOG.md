@@ -12,9 +12,9 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ### Fixed
 
-- Post-release audit + live e2e found and fixed six defects in the batch 2
+- Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
-  `status:"ok"`, no IPython banner); all `--env-file` values are redacted even
+  `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even
   when the key name looks ordinary (previously plaintext in history and exported
   logs); `--secret` refuses reserved internal credential names such as
   `oauth_token`; saved notebooks keep cell-level `execution_count`; `--output-image`

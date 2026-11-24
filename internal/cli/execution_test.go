@@ -675,6 +675,52 @@ func jsonRecords(t *testing.T, raw string) []map[string]any {
 	return out
 }
 
+// Live v0.2.0 follow-up: a clean sys.exit(0) is silent in text mode, but
+// IPython emits a harmless "To exit: use ..." UserWarning that leaked into the
+// --json record's stderr. The narrow prelude filter stops it at the source;
+// the CLI-side scrub below defends records if a kernel still emits it.
+// A fake kernel cannot execute Python, so it proves the prelude is sent and
+// that an already-emitted warning never reaches a record — not the CPython
+// warning machinery itself (that remains a human live-e2e proof).
+func TestExecJSONFiltersIPythonExitHint(t *testing.T) {
+	const hint = "/usr/local/lib/python3.13/dist-packages/IPython/core/interactiveshell.py:3561: UserWarning: To exit: use 'exit', 'quit', or Ctrl-D.\n" +
+		"  warn(\"To exit: use 'exit', 'quit', or Ctrl-D.\", stacklevel=1)\n"
+	const otherWarning = "/tmp/other.py:1: UserWarning: something else entirely\n  warnings.warn(\"something else entirely\")\n"
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	h.kernel.Script(
+		fakekernel.Stream("stdout", "sys-exit-ok\n"),
+		fakekernel.Stream("stderr", hint+otherWarning),
+		fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+	)
+	if code := h.run(t, "print('sys-exit-ok')\n", "exec", "-s", "s1", "--json"); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	records := jsonRecords(t, h.stdout.String())
+	if len(records) != 1 {
+		t.Fatalf("records = %d: %q", len(records), h.stdout.String())
+	}
+	r := records[0]
+	if r["stdout"] != "sys-exit-ok\n" {
+		t.Fatalf("stdout field = %v", r["stdout"])
+	}
+	if got := r["stderr"]; got != otherWarning {
+		t.Fatalf("stderr field = %q, want only the unrelated warning %q", got, otherWarning)
+	}
+	execs := h.kernel.Executions()
+	if len(execs) < 2 {
+		t.Fatalf("executions = %+v", execs)
+	}
+	payload := execs[1].Code
+	if !strings.Contains(payload, `warnings.filterwarnings("ignore", message="To exit: use")`) {
+		t.Fatalf("prelude lacks the narrow warning filter: %q", payload)
+	}
+	if strings.Contains(payload, "simplefilter") || strings.Count(payload, "filterwarnings") != 1 {
+		t.Fatalf("prelude must not suppress warnings globally: %q", payload)
+	}
+}
+
 // Ports upstream tests/test_exec_json.py::test_exec_json_success_emits_one_record.
 // Go keeps its own CPython exit-code mapping; only the output shape is ported.
 func TestExecJSONSuccess(t *testing.T) {
