@@ -115,8 +115,15 @@ func TestAttachStaleKernelIDAlwaysPersistsEffectiveID(t *testing.T) {
 func TestAttachRetriesOnlyTimeouts(t *testing.T) {
 	srv := fakekernel.New(t)
 	srv.HangFirstREST(2)
-	rt := newTestRuntimeWithTimeout(t, srv, 250*time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// A localhost TLS handshake plus request-cancellation propagation can take
+	// far longer than 250 ms on a loaded CI runner. If the per-attempt deadline
+	// fires before the handler is reached, timeoutFirst never decrements and
+	// all three attempts time out ("inspect kernel: ... deadline exceeded").
+	// Give each attempt a multi-second budget and the whole Attach a generous
+	// deadline so the retry sequence is the only thing under test; the original
+	// comment about the 50 ms timeout applies with even more force here.
+	rt := newTestRuntimeWithTimeout(t, srv, 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	start := time.Now()
 	k, err := rt.Attach(ctx, target(srv, srv.KernelID()), AttachOptions{})
@@ -124,8 +131,21 @@ func TestAttachRetriesOnlyTimeouts(t *testing.T) {
 		t.Fatalf("Attach after retries: %v", err)
 	}
 	defer k.Close()
-	if time.Since(start) > 2*time.Second {
-		t.Fatal("retries took too long; test backoff was not injected")
+	if elapsed := time.Since(start); elapsed > 15*time.Second {
+		t.Fatalf("retries took too long (%v); test backoff was not injected", elapsed)
+	}
+	// The first two kernel GETs were hung until their deadline; only the third
+	// succeeds. Counting them proves the timeouts were actually retried.
+	gets := 0
+	for _, r := range srv.Requests() {
+		if r.Method == http.MethodGet &&
+			strings.HasPrefix(r.Path, "/api/kernels/") &&
+			!strings.HasSuffix(r.Path, "/channels") {
+			gets++
+		}
+	}
+	if gets != 3 {
+		t.Fatalf("want 3 kernel GETs (2 timed out + 1 success), got %d", gets)
 	}
 }
 

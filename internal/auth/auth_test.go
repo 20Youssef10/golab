@@ -529,13 +529,17 @@ func TestOAuth2CorruptStoredTokenFallsBackToRemoteFlow(t *testing.T) {
 		return 200, tokenJSON("fresh-access", "fresh-refresh", 3600, Scopes)
 	})
 	defer srv.Close()
-	cfg, kr, _, _ := testConfig(t, srv.URL, "code\n")
+	cfg, kr, _, stderr := testConfig(t, srv.URL, "code\n")
 	_ = kr.Set(KeyringService, KeyringUser, "not-valid-json")
 
 	mustClient(t, mustProvider(t, cfg))
 	var out storedToken
 	if err := json.Unmarshal([]byte(kr.value()), &out); err != nil || out.RefreshToken.Reveal() != "fresh-refresh" {
 		t.Fatalf("corrupt token was not replaced: %q, %v", kr.value(), err)
+	}
+	// Genuine auth errors are NOT debug-gated: only the routine tier hint is.
+	if !strings.Contains(stderr.String(), "Could not read the cached OAuth token") {
+		t.Fatalf("genuine auth error notice was silenced: %q", stderr.String())
 	}
 }
 
@@ -559,7 +563,8 @@ func TestOAuth2PartialGrantPersistsOnlyGrantedScopes(t *testing.T) {
 
 // Ports upstream test_get_credentials_keyring_inaccessible and
 // test_keyring_read_failure_warns_on_stderr: keyring failures fall back to the
-// 0600 file tier and emit a single, secret-free stderr notice.
+// 0600 file tier. The tier hint is debug-only, so an ordinary token-file read
+// stays silent; the file's owner-only mode is what `golab audit` reports.
 func TestOAuth2KeyringInaccessibleFallsBackToFile(t *testing.T) {
 	// S-4: the file holds a refresh token only, so minting the access token
 	// legitimately contacts this endpoint once.
@@ -590,11 +595,8 @@ func TestOAuth2KeyringInaccessibleFallsBackToFile(t *testing.T) {
 		t.Fatalf("refreshes = %d, want 1", refreshes)
 	}
 	msg := stderr.String()
-	if !strings.Contains(msg, "keyring") || !strings.Contains(msg, "--auth=adc") {
-		t.Fatalf("missing keyring fallback notice: %q", msg)
-	}
-	if strings.Count(msg, "[colab]") > 1 {
-		t.Fatalf("expected a single notice, got %q", msg)
+	if msg != "" {
+		t.Fatalf("ordinary token-file command must not emit the keyring notice: %q", msg)
 	}
 	info, err := os.Stat(path)
 	if err != nil {

@@ -36,7 +36,8 @@ func newTestTieredStore(t *testing.T, kr KeyringBackend, stderr io.Writer) (*tie
 
 // Ports upstream test_get_credentials_keyring_timeout_falls_back_to_remote_flow:
 // a keyring call that hangs beyond the probe timeout must fall back, and the
-// probe result is cached for the lifetime of the process (ADR-006).
+// probe result is cached for the lifetime of the process (ADR-006). The fallback
+// is routine, so an ordinary read-only command must stay silent on stderr.
 func TestKeyringProbeTimeoutIsCached(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block)
@@ -55,8 +56,8 @@ func TestKeyringProbeTimeoutIsCached(t *testing.T) {
 	if gets != 1 {
 		t.Fatalf("keyring probed %d times; want once (cached per process)", gets)
 	}
-	if !strings.Contains(stderr.String(), "[colab]") {
-		t.Fatalf("no fallback notice: %q", stderr.String())
+	if stderr.String() != "" {
+		t.Fatalf("file fallback must not emit a default stderr notice: %q", stderr.String())
 	}
 }
 
@@ -109,8 +110,9 @@ func TestFileStoreIsPrivate(t *testing.T) {
 }
 
 // Ports upstream test_keyring_save_failure_warns_on_stderr: a failing keyring
-// write falls back to the 0600 file with one concise notice.
-func TestTieredStoreSaveFallbackNoticeOnce(t *testing.T) {
+// write still falls back to the 0600 file, but the tier hint is debug-only —
+// the save itself succeeded, so there is no error to warn about by default.
+func TestTieredStoreSaveFallbackQuietByDefault(t *testing.T) {
 	kr := &memKeyring{data: map[string]string{}, setErr: fmt.Errorf("no backend")}
 	stderr := &bytes.Buffer{}
 	st, path := newTestTieredStore(t, kr, stderr)
@@ -124,14 +126,46 @@ func TestTieredStoreSaveFallbackNoticeOnce(t *testing.T) {
 	if err != nil || string(b) != "blob" {
 		t.Fatalf("file fallback did not receive the blob: %q, %v", b, err)
 	}
-	if n := strings.Count(stderr.String(), "[colab]"); n != 1 {
-		t.Fatalf("got %d notices: %q", n, stderr.String())
+	if stderr.String() != "" {
+		t.Fatalf("failing keyring write must not emit a default stderr notice: %q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "--auth=adc") {
-		t.Fatalf("notice lacks ADC advice: %q", stderr.String())
+}
+
+// The keyring fallback is routine (many hosts have no session bus), so the
+// human-facing hint is gated behind debug logging (COLAB_DEBUG=1). The debug
+// log entry is always recorded, so the diagnosis is never lost.
+func TestKeyringFallbackNoticeOnlyInDebug(t *testing.T) {
+	kr := &memKeyring{data: map[string]string{}, getErr: fmt.Errorf("no recommended backend")}
+
+	// Default (info-level) logger: no stderr noise for an ordinary command.
+	stderr := &bytes.Buffer{}
+	st, _ := newTestTieredStore(t, kr, stderr)
+	if _, err := st.Load(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Load error = %v; want file-tier not-exist", err)
 	}
-	if strings.Contains(stderr.String(), "blob") {
-		t.Fatal("notice leaked the stored bytes")
+	if stderr.String() != "" {
+		t.Fatalf("default mode emitted a keyring notice: %q", stderr.String())
+	}
+
+	// Debug-level logger (COLAB_DEBUG=1): show the hint once, keep the reason.
+	debugLog := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(debugLog, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	debugStderr := &bytes.Buffer{}
+	dbg, path := newTestTieredStore(t, kr, debugStderr)
+	dbg.logger = logger
+	if _, err := dbg.Load(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("debug Load error = %v; want file-tier not-exist", err)
+	}
+	msg := debugStderr.String()
+	if n := strings.Count(msg, "[colab]"); n != 1 {
+		t.Fatalf("got %d notices: %q", n, msg)
+	}
+	if !strings.Contains(msg, "keyring") || !strings.Contains(msg, "--auth=adc") || !strings.Contains(msg, path) {
+		t.Fatalf("debug notice lacks reason/advice/path: %q", msg)
+	}
+	if !strings.Contains(debugLog.String(), "keyring tier unavailable") ||
+		!strings.Contains(debugLog.String(), "no recommended backend") {
+		t.Fatalf("debug log lost the keyring reason: %q", debugLog.String())
 	}
 }
 

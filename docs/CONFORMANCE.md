@@ -229,6 +229,27 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — Small user-visible fix: the routine OS-keyring fallback no longer
+  prints `[colab] OS keyring unavailable; using owner-only token file …` on
+  stderr for every command. `internal/auth/tokenstore.go` `tieredStore.notice`
+  still writes a redacted `oauth2: keyring tier unavailable` debug log entry on
+  every fallback, and now prints the human-facing hint only when debug logging
+  is on (`COLAB_DEBUG=1`, the only debug switch — there is no `--debug` flag).
+  `golab audit` continues to report the tier and the token file mode, so the
+  diagnosis is not lost. Genuine auth failures (corrupt cached token, refresh
+  failure, save failure) are untouched: they still go through
+  `oauth2Provider.notice` and are visible by default. RED→GREEN: four auth tests
+  (`TestKeyringProbeTimeoutIsCached`,
+  `TestTieredStoreSaveFallbackQuietByDefault`,
+  `TestKeyringFallbackNoticeOnlyInDebug`,
+  `TestOAuth2KeyringInaccessibleFallsBackToFile`) failed on the old behavior
+  and pass after the change; an assertion was added to
+  `TestOAuth2CorruptStoredTokenFallsBackToRemoteFlow` to prove genuine notices
+  are not silenced. Verification: focused auth tests, `go vet ./...`,
+  `go test -count=1 ./...`, golangci-lint (0 issues),
+  `bash scripts/check-redaction.sh` and `bash scripts/check-paths.sh` all pass
+  locally with Go 1.27.4 (`GOTOOLCHAIN=local`, no `-race` on this host). No live
+  test, release or tag is claimed.
 - 2026-11-24 — v0.1.9 tagged and **verified end-to-end**: CLI version bumped to
   match the changelog (guarded by `TestNumberMatchesLatestChangelogRelease`);
   release run `45446096192` green; a real v0.1.8 → v0.1.9 signed self-update

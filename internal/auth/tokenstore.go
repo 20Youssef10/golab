@@ -2,6 +2,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -105,16 +106,22 @@ func (s *tieredStore) probe() {
 	})
 }
 
-// notice emits one concise, secret-free line on stderr and a debug log entry.
+// notice records the keyring tier fallback. A missing OS keyring is routine on
+// hosts without a session bus, not an auth failure, so the human-facing hint is
+// debug-only (COLAB_DEBUG=1); the debug log entry is always written so the
+// diagnosis survives in colab.log. Genuine failures (corrupt/refresh/save) are
+// reported by oauth2Provider.notice and stay visible by default.
 func (s *tieredStore) notice(err error) {
 	s.noticeOnce.Do(func() {
-		fmt.Fprintf(s.stderr, "[colab] OS keyring unavailable; using owner-only token file %s. Use --auth=adc to avoid token storage.\n", s.path)
 		if s.logger != nil {
 			msg := ""
 			if err != nil {
 				msg = logx.Redact(err.Error())
 			}
 			s.logger.Debug("oauth2: keyring tier unavailable", "error", msg)
+			if s.logger.Enabled(context.Background(), slog.LevelDebug) {
+				fmt.Fprintf(s.stderr, "[colab] OS keyring unavailable; using owner-only token file %s. Use --auth=adc to avoid token storage.\n", s.path)
+			}
 		}
 	})
 }

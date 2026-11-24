@@ -10,6 +10,18 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Routine OS-keyring fallback no longer prints on stderr for ordinary commands.
+  `tieredStore.notice` still records a redacted `oauth2: keyring tier
+  unavailable` debug log entry, but the `[colab] OS keyring unavailable; using
+  owner-only token file …` hint is now shown only when debug logging is enabled
+  (`COLAB_DEBUG=1`). `golab audit` remains the authoritative report of the
+  token-store tier and file mode. Genuine auth failures (corrupt cached token,
+  refresh failure, save failure) are unchanged and still use
+  `oauth2Provider.notice` in the default configuration. No release, tag or live
+  test is claimed for this fix.
+
 ## [0.1.9] - 2026-11-24
 
 ### Fixed
