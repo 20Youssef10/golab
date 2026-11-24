@@ -100,7 +100,10 @@ Tier-1 archive:
   `verify-attestation` accepts only an OCI `<IMAGE>` and exposes no `--bundle`
   flag, so blob attestations made by `attest-blob` must be verified with
   `verify-blob-attestation` (whose `--check-claims` defaults to true and checks
-  the in-toto subject digest against the archive).
+  the in-toto subject digest against the archive). A format guard now also
+  asserts every bundle is v0.3 protobuf (`.mediaType` contains `v0.3` and
+  `.verificationMaterial.tlogEntries[0].inclusionProof` exists), because the
+  cosign commands accept legacy bundles that the updater rejects.
 - **Release job is gated by the `release` GitHub environment.** GitHub
   auto-creates it on first use, but repo admins must add required reviewers for
   it to actually gate publishing; until then it is bookkeeping only. Reducing
@@ -111,15 +114,26 @@ Tier-1 archive:
   updater pin `20Youssef10/golab` so a rename/transfer cannot silently publish
   un-installable signed releases. Published signature assets are immutable:
   `gh release upload` no longer passes `--clobber`.
-- **v0.1.6 was cut from this pipeline and verified (2026-11-24).** Release run
-  `45399682610` is green: `goreleaser check`, snapshot dry-run, signed tag,
-  syft SBOM, per-artifact cosign verification and the checksum gate all ran
-  against real material. The release carries 13 archives, 13 signature bundles,
-  13 CycloneDX attestation bundles and `checksums.txt`. A sampled attestation
-  is CycloneDX 1.7 with 1,627 components (including the Go modules) and is
-  bound to its exact archive. The read-only `golab update` check against the
-  published release succeeds. Only `colab update --install` of a newer release
-  remains human-only.
+- **v0.1.6 was cut from this pipeline and cosign-verified, but its updater was
+  BROKEN (2026-11-24).** Release run `45399682610` is green: `goreleaser check`,
+  snapshot dry-run, signed tag, syft SBOM, per-artifact cosign verification and
+  the checksum gate all ran against real material. The release carries 13
+  archives, 13 signature bundles, 13 CycloneDX attestation bundles and
+  `checksums.txt`. A sampled attestation is CycloneDX 1.7 with 1,627 components
+  (including the Go modules) and is bound to its exact archive. The read-only
+  `golab update` discovery against the published release offered the new
+  version. **However, `golab update --install` against v0.1.6 fails** with
+  `unknown field "base64Signature": invalid signature`: cosign v2.6.5 wrote
+  LEGACY bundles (`base64Signature`, `cert`, `rekorBundle`), while
+  `internal/update/verify.go` parses only sigstore v0.3 protobuf bundles
+  (`mediaType: application/vnd.dev.sigstore.bundle.v0.3+json`). The workflow's
+  cosign proof passed because `verify-blob`/`verify-blob-attestation` auto-detect
+  both formats, so it could not detect the mismatch. **Fix:** both `sign-blob`
+  and `attest-blob` now pass cosign v2.6.5's `--new-bundle-format`, and the
+  post-release proof asserts v0.3 `mediaType` plus a tlog `inclusionProof` on
+  every bundle with `jq` before the cosign checks. Release assets are immutable,
+  so v0.1.6 cannot be repaired in place: a **new tag** is required to prove the
+  updater end-to-end (§6 item 5). No `verify.go` change was needed or made.
 
 ## 5. WSL / Termux URL-launcher expectations (docs/04 §2)
 
@@ -141,9 +155,13 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
    `bash scripts/golden.sh --scenario wire`.
 3. Chunked upload of >75 MiB with SHA-256 comparison (S6 / P0-3, HIGH).
 4. One CPU `new`/`run`, then `colab sessions` shows nothing (live-e2e manual run).
-5. Verify `colab update --install` accepts a newer signed release end-to-end
-   (v0.1.6 was signed and its proof passed; the read-only check succeeded, but
-   installing an update still needs a newer tag and a human-pending run).
+5. Verify `golab update --install` accepts a newer signed release end-to-end.
+   **v0.1.6 FAILED this check** (legacy cosign bundle format; see §4) even though
+   its cosign proof passed and read-only discovery offered the upgrade. The
+   producer fix (`--new-bundle-format` + jq format guard) is in place, but a
+   **new tag** is required to prove it: v0.1.6's assets are immutable and cannot
+   be repaired in place. This item is non-waivable for a release that claims a
+   working updater.
 6. Wire goleak `TestMain` + dependency (another agent), then drop `ADVISORY=1`
    from `ci.yml` and raise `COVERAGE_MIN` to 80.
 7. Termux device matrix, Windows console/ACL/`.old` cleanup, macOS keychain
@@ -151,6 +169,25 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — **CONFIRMED DEFECT in v0.1.6, producer fixed in this change.**
+  v0.1.6 was signed and its cosign proof passed (run `45399682610`), but
+  `golab update --install` against it fails with
+  `unknown field "base64Signature": invalid signature`. Root cause: cosign
+  v2.6.5's `sign-blob`/`attest-blob` default to LEGACY bundles, while
+  `internal/update/verify.go` parses sigstore v0.3 protobuf bundles only; the
+  cosign proof hid this because `verify-blob`/`verify-blob-attestation`
+  auto-detect both formats. Fix: add `--new-bundle-format` to both signing
+  commands and a `jq` guard in the post-release proof asserting `.mediaType`
+  contains `v0.3` and a tlog `inclusionProof` exists on every bundle. The
+  verifier is deliberately unchanged — the producer is the defect. A **new
+  tag** is required to prove the fix end-to-end; v0.1.6 is immutable and cannot
+  be repaired in place. §4 and §6 item 5 corrected accordingly; no release was
+  cut or tagged in this change.
+- 2026-11-24 — Docs corrected where they lagged the code: SCT enforcement is
+  **not** an open gap (`internal/update/verify.go:157-163` enables
+  `WithSignedCertificateTimestamps(1)` in production; only the test-CA opt-out
+  for SCT-less bundles remains). Updated `docs/03-go-architecture.md`,
+  `docs/AUDIT-02-protocol-security.md` S-8 and `docs/08-risks-decisions-security.md`.
 - 2026-11-24 — `whoami` failed with `credentials have no access token after
   refresh` despite a valid stored refresh token (reproduced live). `accessTokenFromAuth`
   replaced the client's `*oauth2.Transport` with a capture RoundTripper, so no

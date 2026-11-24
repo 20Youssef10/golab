@@ -20,6 +20,10 @@
       `run` e2e ending with an empty `golab sessions`, signed-release verification,
       Windows `.old` cleanup, the Termux/Windows console matrix and the
       `HTTP_PROXY` probe. Record the waiver or evidence in the release PR.
+      **Exception:** the real updater install test in §5 item 3 is
+      **non-waivable** — a release that cannot be installed by its own updater
+      is not releasable (see the v0.1.6 legacy-bundle failure in
+      [`CONFORMANCE.md` §4](CONFORMANCE.md#4-release-pipeline-and-updater-identity)).
 - [ ] Live probes never leave billable VMs allocated; `golab sessions` is empty.
 - [ ] Upstream compatibility target in `internal/version` is still accurate
       (check `docs/COMPAT.md` / upstream-sync triage).
@@ -60,10 +64,16 @@ part of the updater's pinned signing identity (§4). The job:
 2. runs `goreleaser check` and `goreleaser release --snapshot --clean` (no publish);
 3. runs `goreleaser release --clean` to publish archives + `checksums.txt`;
 4. generates a CycloneDX SBOM (`dist/sbom.cdx.json`) and, per archive, publishes
-   a cosign keyless signature bundle and a signed SBOM attestation, then uploads
-   all bundles with `gh release upload … --clobber`;
-5. verifies published asset classes and a sample keyless signature against the
-   real repo identity (`cosign verify-blob`).
+   a cosign keyless signature bundle and a signed SBOM attestation (both with
+   cosign v2.6.5's `--new-bundle-format`), then uploads all bundles with
+   `gh release upload` (no `--clobber`: published signatures are immutable);
+5. verifies every published asset class against the real repo identity — all
+   checksums (`sha256sum -c`), every archive bundle with `cosign verify-blob`,
+   every SBOM bundle with `cosign verify-blob-attestation --type cyclonedx`,
+   and a `jq` format guard asserting each bundle is a v0.3 sigstore bundle
+   (`.mediaType` contains `v0.3`, tlog `inclusionProof` present). The format
+   guard is essential: cosign's verifiers accept legacy bundles that
+   `golab update --install` rejects.
 
 Monitor the workflow to completion; if any step fails, fix the cause and create a
 **new** patch version — never re-tag or force-update a published tag.
@@ -83,7 +93,12 @@ used for **all** targets, including Windows):
 The updater (`internal/update`) requires **all three classes**. A missing or
 invalid SBOM bundle fails with `ErrMissingSBOM`; missing/invalid signature or
 identity material fails closed — there is no unverified fallback. Keep the exact
-names: `checksums.txt`, `*.sigstore.json`, `*.sbom.sigstore.json`.
+names: `checksums.txt`, `*.sigstore.json`, `*.sbom.sigstore.json`. Both bundle
+classes must be **sigstore v0.3 protobuf bundles** — cosign v2.6.5 emits these
+only with `--new-bundle-format`. Legacy bundles (`base64Signature`, `cert`,
+`rekorBundle`) pass `cosign verify-*` but are rejected by
+`golab update --install`; the §2 step 5 format guard fails the job if one is
+produced.
 
 ## 4. Updater identity pin
 
@@ -116,8 +131,11 @@ signed under any other identity are rejected by `golab update --install`.
      --bundle golab_X.Y.Z_linux_amd64.tar.gz.sigstore.json \
      golab_X.Y.Z_linux_amd64.tar.gz
    ```
-3. **Real updater test (required)** — on a **test host** with the *previous*
-   version installed, run `colab update --install` (or `golab update --install`).
+3. **Real updater test (REQUIRED — NON-WAIVABLE)** — on a **test host** with the
+   *previous* version installed, run `golab update --install`. A cosign-green
+   workflow is **not** sufficient: v0.1.6 passed every cosign check but its
+   legacy bundles made this test fail, so a format failure here blocks the
+   release and requires a **new tag** (assets are immutable).
    Confirm it fetches the new release, validates the checksum, signature and
    signed SBOM, and installs the new binary. Then:
    - `golab version` reports the new number and the intended upstream target;

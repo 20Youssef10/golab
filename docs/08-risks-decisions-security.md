@@ -56,7 +56,7 @@ Likelihood (L) / Impact (I): **H**igh · **M**edium · **L**ow.
 | Hanging forever | explicit timeouts everywhere (D-5) |
 | Hostile output on the local terminal | escape-sequence sanitiser (R-15) |
 | SSH MITM beyond TLS | transport already authenticated by TLS+bearer; host keys ephemeral ⇒ accept-any is documented (ADR-005); keys limited to ed25519/ECDSA |
-| Supply chain | minimal deps, `govulncheck`, pinned Actions, cosign keyless verification (Fulcio chain + Rekor proof/SET + pinned identity) **and a required signed SBOM attestation**, protected branches. SCT checking remains a documented gap (2026-11-23). |
+| Supply chain | minimal deps, `govulncheck`, pinned Actions, cosign keyless verification (Fulcio chain + Rekor proof/SET + pinned identity) **and a required signed SBOM attestation**, protected branches. Fulcio SCT checking **is enforced** in production (`internal/update/verify.go:157-163`; only a test-CA opt-out for SCT-less bundles exists), and bundles must be sigstore v0.3 protobuf format — legacy bundles pass `cosign verify-*` but fail `golab update --install` (corrected 2026-11-24; previously recorded as an "SCT gap"). |
 | Typosquatting | distinct names; documentation of canonical install commands; checksums |
 
 **Review gate (WP-21):** threat-model walk-through, `gosec`, dependency audit, fuzz run ≥ 1 h per decoder, manual token-leak hunt (`strings`, `ps`, `strace -f -e trace=execve`, Process Monitor on Windows).

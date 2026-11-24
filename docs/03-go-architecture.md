@@ -226,8 +226,13 @@ validation, Rekor inclusion proof and SET, certificate-time checks, an OIDC
 issuer/SAN pinned to this repository's release workflow, and an in-toto digest
 bound to the downloaded bytes. A second signed CycloneDX/SPDX attestation is
 **required** — GoReleaser must publish `*.sbom.sigstore.json` or `Check` fails
-with `ErrMissingSBOM`. Fulcio CT SCT checking is not enforced (documented gap,
-not a bypass); TUF refresh and live release verification still need a human.
+with `ErrMissingSBOM`. Fulcio CT SCT checking **is enforced** in production
+(`internal/update/verify.go:157-163` adds
+`verify.WithSignedCertificateTimestamps(1)`; only an explicit test-CA opt-out
+for SCT-less bundles can relax it, and a present SCT is still verified). TUF
+refresh and live release verification still need a human. Signed bundles must be
+sigstore v0.3 protobuf format — legacy cosign bundles pass `cosign verify-*` but
+break `golab update --install` (see `docs/CONFORMANCE.md` §4).
 
 ## 10. Dependency shortlist (verify licence/maintenance at kickoff)
 

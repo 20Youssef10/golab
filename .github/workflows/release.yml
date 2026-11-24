@@ -117,11 +117,18 @@ jobs:
             base="$(basename "$artifact")"
             # Keyless signature bundle -> contains "sigstore", not "sbom":
             # internal/update/check.go isSignatureAsset() picks this one.
-            cosign sign-blob --yes --bundle "dist/${base}.sigstore.json" "$artifact"
+            # --new-bundle-format is REQUIRED: cosign v2.6.5 otherwise writes a
+            # LEGACY bundle (base64Signature/cert/rekorBundle) that the updater's
+            # sigstore v0.3 protobuf bundle parser (internal/update/verify.go)
+            # cannot read. cosign verify-blob accepts either format, so the cosign
+            # proof alone would not catch a regression here (see the format guard
+            # in the post-release proof step).
+            cosign sign-blob --yes --new-bundle-format --bundle "dist/${base}.sigstore.json" "$artifact"
             # DSSE attestation: subject digest is the *artifact*; predicate is a
             # CycloneDX SBOM. Name matches `*.sbom.sigstore.json`, which is what
-            # internal/update/check.go isSBOMAsset() requires.
-            cosign attest-blob --yes --type cyclonedx \
+            # internal/update/check.go isSBOMAsset() requires. Same v0.3 bundle
+            # requirement as sign-blob above.
+            cosign attest-blob --yes --new-bundle-format --type cyclonedx \
               --predicate dist/sbom.cdx.json \
               --bundle "dist/${base}.sbom.sigstore.json" "$artifact"
           done
@@ -163,6 +170,30 @@ jobs:
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
           issuer="https://token.actions.githubusercontent.com"
           shopt -s nullglob
+
+          # (0) Bundle-format guard. The updater (internal/update/verify.go)
+          # parses sigstore v0.3 protobuf bundles only; a legacy cosign bundle
+          # (base64Signature/cert/rekorBundle) makes `golab update --install`
+          # fail with `unknown field "base64Signature"`. cosign verify-blob and
+          # verify-blob-attestation auto-detect both formats, so the cosign proof
+          # below would pass even if --new-bundle-format were dropped. Assert the
+          # format on disk so that regression fails the release loudly instead.
+          # jq is preinstalled on GitHub's ubuntu-latest runners.
+          fmt_bundles=(dist/golab_*.tar.gz.sigstore.json dist/golab_*.sbom.sigstore.json)
+          if (( ${#fmt_bundles[@]} == 0 )); then
+            echo "FAIL: no sigstore bundles found for format check" >&2; exit 1
+          fi
+          for bundle in "${fmt_bundles[@]}"; do
+            if ! jq -e '.mediaType | strings | contains("v0.3")' "$bundle" >/dev/null; then
+              echo "FAIL: $bundle is not a v0.3 sigstore bundle (.mediaType missing or not v0.3) - legacy bundles break golab update --install" >&2
+              exit 1
+            fi
+            if ! jq -e '.verificationMaterial.tlogEntries[0].inclusionProof' "$bundle" >/dev/null; then
+              echo "FAIL: $bundle has no tlogEntries[0].inclusionProof" >&2
+              exit 1
+            fi
+          done
+          echo "all ${#fmt_bundles[@]} sigstore bundles are v0.3 format with inclusion proofs"
 
           # (a) Keyless signature bundle for EVERY archive, not just one sample.
           archive_bundles=(dist/golab_*.tar.gz.sigstore.json)

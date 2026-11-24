@@ -18,6 +18,22 @@ on-disk schema or persisted token format (per AGENTS.md).
   `credentials have no access token after refresh` even with valid credentials.
   Verified by `TestAccessTokenFromAuthCapturesBearer` (red before, green after);
   no token is logged or included in errors.
+- Release workflow: add `--new-bundle-format` to both `cosign sign-blob` and
+  `cosign attest-blob` so published bundles are sigstore v0.3 protobuf bundles,
+  and add a `jq` post-release guard asserting `.mediaType` contains `v0.3` and
+  a tlog `inclusionProof` exists on every bundle. v0.1.6's legacy bundles passed
+  the cosign proof but made `golab update --install` fail with
+  `unknown field "base64Signature"`; cosign's verifiers accept both formats, so
+  the format guard is what prevents a silent regression. The verifier is
+  unchanged. Published assets are immutable, so a **new tag** is required to
+  prove the updater end-to-end; v0.1.6 cannot be repaired in place. No release
+  was cut or tagged in this change.
+- Docs: correct the verification record — v0.1.6 was signed and cosign-verified
+  but its updater was broken (legacy bundle format), and Fulcio SCT checking is
+  **not** an open gap (`internal/update/verify.go:157-163` enforces it).
+  Updated `docs/CONFORMANCE.md`, `docs/FAQ.md`, `docs/RELEASING.md`,
+  `docs/03-go-architecture.md`, `docs/AUDIT-02-protocol-security.md` S-8 and
+  `docs/08-risks-decisions-security.md`.
 
 ## [0.1.6] - 2026-11-24
 
@@ -185,7 +201,7 @@ remote-path scans. **Live Colab e2e is still human-gated** per AGENTS.md.
 
 - Audit baseline: initial Go port, audit reports AUDIT-00…04, canonical module path.
 
-[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.6...HEAD
 [0.1.5]: https://github.com/20Youssef10/golab/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/20Youssef10/golab/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/20Youssef10/golab/compare/v0.1.2...v0.1.3
