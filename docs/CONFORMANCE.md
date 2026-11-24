@@ -151,6 +151,16 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — `whoami` failed with `credentials have no access token after
+  refresh` despite a valid stored refresh token (reproduced live). `accessTokenFromAuth`
+  replaced the client's `*oauth2.Transport` with a capture RoundTripper, so no
+  `Authorization: Bearer` header was ever attached. The fix preserves the oauth2
+  transport and swaps only its `Base` for the capture, keeping the synthetic
+  200 `{}` short-circuit; non-oauth2 transports fail closed. No token is logged
+  or embedded in errors. `TestAccessTokenFromAuthCapturesBearer` fails on the
+  old code and passes after; focused `TestWhoami|TestAccess`, `go vet ./...`,
+  `go test -count=1 ./...` and both shell safety scans pass locally. No live
+  signed-release or tokeninfo claim is made for this fix.
 - 2026-11-24 — v0.1.6 tagged and published: CLI version bumped to match the
   changelog, with `TestNumberMatchesLatestChangelogRelease` guarding against a
   future tag carrying a stale binary version. Signed release run

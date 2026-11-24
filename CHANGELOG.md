@@ -10,6 +10,15 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- `whoami`: stop discarding the OAuth transport when extracting the access
+  token. The previous code replaced `client.Transport` with a capture
+  RoundTripper, so no bearer header was attached and `whoami` always failed with
+  `credentials have no access token after refresh` even with valid credentials.
+  Verified by `TestAccessTokenFromAuthCapturesBearer` (red before, green after);
+  no token is logged or included in errors.
+
 ## [0.1.6] - 2026-11-24
 
 ### Fixed

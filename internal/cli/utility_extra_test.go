@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"golang.org/x/oauth2"
 )
 
 // Ports upstream tests/test_cli.py (utility cases): `pay` must print the
@@ -23,6 +25,50 @@ func TestPayPrintsSignupURL(t *testing.T) {
 	}
 	if strings.Contains(h.stdout.String(), "[colab]") {
 		t.Fatalf("chatter on stdout: %q", h.stdout.String())
+	}
+}
+
+// Regression test for a confirmed live defect (no upstream Python port):
+// accessTokenFromAuth used to overwrite client.Transport with bearerCapture,
+// removing the *oauth2.Transport that attaches Authorization: Bearer. No header
+// ever reached the capture, so `whoami` failed with "credentials have no access
+// token after refresh" even with a valid stored refresh token. Use a real
+// oauth2.NewClient with a static token source and assert the captured token.
+func TestAccessTokenFromAuthCapturesBearer(t *testing.T) {
+	const token = "STATIC_ACCESS_TOKEN_FOR_CAPTURE_12345"
+	ctx := context.Background()
+	h := newHarness(t)
+	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token, TokenType: "Bearer"})
+	h.deps.Auth = fakeAuth{client: oauth2.NewClient(ctx, src)}
+
+	got, err := accessTokenFromAuth(ctx, h.deps)
+	if err != nil {
+		t.Fatalf("accessTokenFromAuth: %v", err)
+	}
+	if got != token {
+		t.Fatalf("captured token = %q, want %q", got, token)
+	}
+	// The capture must short-circuit: no real network request and no output.
+	if h.stdout.Len() != 0 || h.stderr.Len() != 0 {
+		t.Fatalf("unexpected output: stdout=%q stderr=%q", h.stdout.String(), h.stderr.String())
+	}
+}
+
+// A client whose transport is not *oauth2.Transport cannot attach a bearer
+// header; the helper must fail closed (no real network, no token in the error)
+// instead of silently proceeding.
+func TestAccessTokenFromAuthNonOAuthTransportFailsClosed(t *testing.T) {
+	const token = "SHOULD_NEVER_BE_EMITTED_12345"
+	ctx := context.Background()
+	h := newHarness(t)
+	h.deps.Auth = fakeAuth{client: &http.Client{Transport: http.DefaultTransport}}
+
+	got, err := accessTokenFromAuth(ctx, h.deps)
+	if err == nil || got != "" {
+		t.Fatalf("non-oauth transport: token=%q err=%v, want empty token and error", got, err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked into error: %q", err.Error())
 	}
 }
 

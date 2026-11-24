@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/oauth2"
 
 	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/logx"
@@ -75,7 +76,20 @@ func accessTokenFromAuth(ctx context.Context, d *app.Deps) (string, error) {
 	}
 	capture := &bearerCapture{}
 	c := *client
-	c.Transport = capture
+	if tr, ok := c.Transport.(*oauth2.Transport); ok {
+		// Keep the oauth2 transport: it is what attaches the
+		// Authorization: Bearer header. Swap only its Base for the capture so
+		// the header is seen before the synthetic 200 {} short-circuit. Copy
+		// the struct to avoid mutating a transport shared with other callers.
+		wrapped := *tr
+		wrapped.Base = capture
+		c.Transport = &wrapped
+	} else {
+		// No oauth2 transport means no bearer header can be attached. Keep
+		// the capture as the transport so no real request is made; the
+		// empty-token check below then fails closed without leaking anything.
+		c.Transport = capture
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tokenInfoURL, nil)
 	if err != nil {
 		return "", err
