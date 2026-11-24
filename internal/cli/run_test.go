@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -104,7 +105,9 @@ func TestRunNotebookCellsShareKernelAndSaveOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
+	// Windows reports 0666 for all files; owner-only access is enforced via
+	// NTFS ACLs by internal/platform, not Unix mode bits.
+	if got := info.Mode().Perm(); goruntime.GOOS != "windows" && got != 0o600 {
 		t.Fatalf("output mode = %o, want 600", got)
 	}
 	saved := readRunOutput(t, outPath)
