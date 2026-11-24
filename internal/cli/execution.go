@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,6 +96,28 @@ func readCodeBlocks(d *app.Deps, file string) ([]codeBlock, *nb.Notebook, error)
 	return []codeBlock{{code: string(data)}}, nil, nil
 }
 
+// execOutputHook renders a cell's outputs. IPython keeps the kernel alive by
+// reporting sys.exit as an error output, so SystemExit is translated back to
+// CPython's UX: empty/None/integer exits are silent and only a non-integer
+// message reaches stderr (without the "%tb" banner). Every other output is
+// rendered exactly as before. Exit codes come from exitCodeFromOutputs.
+func execOutputHook(d *app.Deps, outputImage string) func(runtime.Output) error {
+	return func(o runtime.Output) error {
+		if o.OutputType == "error" && o.EName == "SystemExit" {
+			value := strings.TrimSpace(o.EValue)
+			if value == "" || value == "None" {
+				return nil
+			}
+			if _, err := strconv.Atoi(strings.Trim(value, `"'`)); err == nil {
+				return nil
+			}
+			_, err := fmt.Fprintln(d.Stderr, render.Sanitize(value))
+			return err
+		}
+		return renderOne(d, o, outputImage)
+	}
+}
+
 func execCommand() *cobra.Command {
 	var name, file, outputImage string
 	var timeout float64
@@ -144,6 +167,7 @@ func execCommand() *cobra.Command {
 				}
 			}()
 			setRunning(d, s, running("exec("+sourceLabel(file)+")"))
+			outputHook := execOutputHook(d, outputImage)
 			for i, block := range blocks {
 				code := prelude + block.code
 				var cellID *string
@@ -166,7 +190,7 @@ func execCommand() *cobra.Command {
 				res, err := kernel.Execute(cmd.Context(), code, runtime.ExecOptions{
 					IdleTimeout: timeoutOption(timeout),
 					OnOutput: func(o runtime.Output) {
-						if e := renderOne(d, o, outputImage); e != nil && renderErr == nil {
+						if e := outputHook(o); e != nil && renderErr == nil {
 							renderErr = e
 						}
 					},
@@ -186,6 +210,13 @@ func execCommand() *cobra.Command {
 					extra["cell_id"] = block.id
 				}
 				logExecution(d, s.Name, code, res.Outputs, extra)
+				// A persistent IPython kernel keeps running after sys.exit, so
+				// the kernel's error outputs are the only signal of a failed
+				// cell. Mirror run's CPython mapping and stop at the first
+				// non-zero cell; the deferred notebook write still runs.
+				if exitCode := exitCodeFromOutputs(res.Outputs); exitCode != 0 {
+					return exitf(exitCode, "")
+				}
 			}
 			return nil
 		},

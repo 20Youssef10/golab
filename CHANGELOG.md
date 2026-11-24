@@ -10,8 +10,38 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+<!-- Next release is MINOR (0.2.0): new CLI surface (notebook run, --verify, reconnect) plus bug fixes. -->
+
+### Added
+
+- `colab run <notebook>.ipynb` executes code cells in order with shared kernel
+  state, skips markdown, writes `<base>_output.ipynb` with mode 0600, parses
+  before any VM allocation and warns (without injecting) on extra script args
+  (upstream issue #74 / PR #200).
+- `colab stop --verify` (also with `--all`) re-checks `/tun/m/assignments` after
+  unassigning and exits non-zero if the runtime is still assigned (upstream #47).
+- Bounded kernel WebSocket reconnect (~30 s) with a typed
+  `ConnectionLostError`; transient drops resume output on the same session,
+  permanent drops fail explicitly (upstream PR #261 / issue #220).
+- `docs/INSTALL-TERMUX.md`: Go-specific Termux install, checksum/cosign
+  verification, keyring fallback and runtime notes (upstream issue #131; the
+  Python-specific upstream guide does not apply to a static Go binary).
+
 ### Fixed
 
+- `colab exec` now propagates CPython `SystemExit`/error exit codes and stops a
+  notebook at the first failing cell while still writing the 0600 output file
+  (upstream PRs #278/#280).
+- Body-less control-plane POSTs use chunked transfer instead of
+  `Content-Length: 0`, avoiding HTTP 411 behind forward proxies (upstream #270).
+- A final assign timeout now performs one GET reconciliation before returning,
+  so an allocated-but-untracked billable runtime is reattached rather than
+  orphaned (upstream #263).
+- Assign `503` now maps to a typed `capacity_unavailable` error with actionable
+  text and a stable reason code instead of generic retry noise (upstream
+  #282/#273/#236).
+- `colab status` shows the server-assigned machine shape instead of the stale
+  locally requested shape (upstream #47).
 - Routine OS-keyring fallback no longer prints on stderr for ordinary commands.
   `tieredStore.notice` still records a redacted `oauth2: keyring tier
   unavailable` debug log entry, but the `[colab] OS keyring unavailable; using

@@ -237,10 +237,14 @@ func statusCommand() *cobra.Command {
 			if err := validateSessionName(name); err != nil {
 				return err
 			}
-			local, _, err := d.SyncSessions(cmd.Context())
+			local, assignments, err := d.SyncSessions(cmd.Context())
 			if err != nil {
 				return err
 			}
+			// `sessions` prints the server-assigned shape; mirror that in
+			// `status` at print time. SyncSessions deliberately does not write
+			// the shape to disk, so neither do we.
+			byEndpoint, byRuntime := indexAssignments(assignments)
 			if name != "" {
 				s, err := d.Store.Get(name)
 				if err != nil {
@@ -250,7 +254,7 @@ func statusCommand() *cobra.Command {
 					}
 					return err
 				}
-				printStatus(d, *s)
+				printStatus(d, withServerShape(*s, byEndpoint, byRuntime))
 				return nil
 			}
 			if len(local) == 0 {
@@ -258,7 +262,7 @@ func statusCommand() *cobra.Command {
 				return nil
 			}
 			for _, s := range local {
-				printStatus(d, s)
+				printStatus(d, withServerShape(s, byEndpoint, byRuntime))
 			}
 			return nil
 		},
@@ -281,6 +285,56 @@ func printStatus(d *app.Deps, s state.Session) {
 		}
 		fmt.Fprintf(d.Stdout, "  Last Execution: %s%s at %s\n", le.Kind, cell, le.At)
 	}
+}
+
+// indexAssignments indexes server assignments the same way SyncSessions
+// matches local sessions: by endpoint first, then by runtime name.
+func indexAssignments(assignments []colabapi.ListedAssignment) (map[string]colabapi.ListedAssignment, map[string]colabapi.ListedAssignment) {
+	byEndpoint := make(map[string]colabapi.ListedAssignment, len(assignments))
+	byRuntime := make(map[string]colabapi.ListedAssignment, len(assignments))
+	for _, a := range assignments {
+		byEndpoint[a.Endpoint] = a
+		if a.RuntimeName != "" {
+			byRuntime[a.RuntimeName] = a
+		}
+	}
+	return byEndpoint, byRuntime
+}
+
+// withServerShape returns a display-only copy of s carrying the shape the
+// server actually assigned. When there is no matching assignment the local
+// value is kept. It never writes to the store, so the on-disk schema and
+// values are unchanged.
+func withServerShape(s state.Session, byEndpoint, byRuntime map[string]colabapi.ListedAssignment) state.Session {
+	a, ok := byEndpoint[s.Endpoint]
+	if !ok && s.RuntimeName != "" {
+		a, ok = byRuntime[s.RuntimeName]
+	}
+	if ok {
+		s.MachineShape = a.MachineShape.String()
+	}
+	return s
+}
+
+// verifyStopped re-reads GET /tun/m/assignments once and reports any stopped
+// session that is still present. A survivor maps to exit code 1.
+func verifyStopped(ctx context.Context, d *app.Deps, stopped []state.Session) error {
+	client, err := d.ColabClient(ctx)
+	if err != nil {
+		return err
+	}
+	assignments, err := client.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, a := range assignments {
+		for _, s := range stopped {
+			if state.MatchAssignment(s, a.Endpoint, a.RuntimeName) {
+				return exitf(1, "[colab] Session '%s' still assigned at %s.", s.Name, a.Endpoint)
+			}
+		}
+	}
+	return nil
 }
 
 // stopOne terminates one session: kernel (best effort), backend, local state.
@@ -307,6 +361,7 @@ func stopOne(ctx context.Context, d *app.Deps, name string, s state.Session, qui
 func stopCommand() *cobra.Command {
 	var name string
 	var all bool
+	var verify bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop a session, or all sessions with --all",
@@ -344,6 +399,16 @@ func stopCommand() *cobra.Command {
 					_ = stopOne(cmd.Context(), d, n, local[n], false)
 				}
 				fmt.Fprintf(d.Stderr, "[colab] Stopped %d session(s).\n", len(local))
+				if verify {
+					stopped := make([]state.Session, 0, len(local))
+					for _, n := range names {
+						stopped = append(stopped, local[n])
+					}
+					if err := verifyStopped(cmd.Context(), d, stopped); err != nil {
+						return err
+					}
+					fmt.Fprintf(d.Stderr, "[colab] Verified: all %d session(s) are no longer assigned.\n", len(local))
+				}
 				return nil
 			}
 			if name == "" {
@@ -365,11 +430,18 @@ func stopCommand() *cobra.Command {
 				return err
 			}
 			fmt.Fprintln(d.Stderr, "[colab] Session terminated.")
+			if verify {
+				if err := verifyStopped(cmd.Context(), d, []state.Session{*s}); err != nil {
+					return err
+				}
+				fmt.Fprintf(d.Stderr, "[colab] Verified: session '%s' is no longer assigned.\n", name)
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
 	cmd.Flags().BoolVar(&all, "all", false, "Stop all active sessions")
+	cmd.Flags().BoolVar(&verify, "verify", false, "Verify after stopping that no assignment remains")
 	return cmd
 }
 

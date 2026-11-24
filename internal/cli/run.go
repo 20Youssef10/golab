@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/20Youssef10/golab/internal/app"
+	"github.com/20Youssef10/golab/internal/nb"
 	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/state"
 )
@@ -182,6 +183,23 @@ func runCommand() *cobra.Command {
 				}))
 				return nil
 			}
+			// Issue #74 / PR #200: a notebook is parsed up front so a malformed
+			// file never costs a VM allocation. readCodeBlocks (execution.go)
+			// is the single notebook parser; markdown cells are dropped there.
+			isNB := strings.HasSuffix(strings.ToLower(script), ".ipynb")
+			var notebook *nb.Notebook
+			var blocks []codeBlock
+			if isNB {
+				var err error
+				blocks, notebook, err = readCodeBlocks(d, script)
+				if err != nil {
+					return err
+				}
+				if len(forwarded) > 0 {
+					// No sys.argv injection for notebooks: never echo the values.
+					fmt.Fprintf(d.Stderr, "[colab] Warning: extra arguments ignored for notebook '%s' (no sys.argv injection).\n", filepath.Base(script))
+				}
+			}
 			if err := guardBudget(cmd.Context(), d, cmd); err != nil {
 				return err
 			}
@@ -209,6 +227,13 @@ func runCommand() *cobra.Command {
 			defer func() {
 				setRunning(d, &s, nil)
 				_ = kernel.Close()
+				if isNB && notebook != nil {
+					out := strings.TrimSuffix(script, filepath.Ext(script)) + "_output.ipynb"
+					fmt.Fprintf(d.Stderr, "[colab] Saving notebook with outputs to '%s'...\n", out)
+					if data, err := nb.Marshal(notebook); err == nil {
+						_ = os.WriteFile(out, data, 0o600)
+					}
+				}
 				if !keep {
 					teardown(context.Background(), d, name, s, reason)
 				}
@@ -222,34 +247,88 @@ func runCommand() *cobra.Command {
 				return err
 			}
 
-			payload := buildScriptPayload(script, forwarded, envVars)
-			setRunning(d, &s, running("run("+filepath.Base(script)+")"))
-			setLastExecution(d, &s, script, nil)
-			var renderErr error
-			res, err := kernel.Execute(ctx, payload, runtime.ExecOptions{
-				IdleTimeout: timeoutOption(timeout),
-				OnOutput: func(o runtime.Output) {
-					if o.OutputType == "error" && o.EName == "SystemExit" {
-						return // never print a SystemExit traceback
+			if isNB {
+				// One kernel for every cell: state set by an earlier cell is
+				// visible to later cells. --env is re-applied per cell because
+				// each Execute is an independent kernel request.
+				prelude := envPrelude(envVars)
+			cells:
+				for i, block := range blocks {
+					code := prelude + string(block.code)
+					label := nb.Title(code)
+					if label == "" {
+						label = block.id
 					}
-					if e := renderOne(d, o, ""); e != nil && renderErr == nil {
-						renderErr = e
+					var cellID *string
+					suffix := ""
+					if label != "" {
+						cellID = &label
+						suffix = " - " + label
 					}
-				},
-			})
-			switch {
-			case err != nil:
-				reason = "run_failed"
-				return pruneLost(d, name, err)
-			case renderErr != nil:
-				reason = "run_failed"
-				return renderErr
-			default:
-				exitCode = exitCodeFromOutputs(res.Outputs)
-				if exitCode != 0 {
-					reason = "run_failed"
+					fmt.Fprintf(d.Stderr, "[colab] Executing cell %d/%d%s...\n", i+1, len(blocks), suffix)
+					setRunning(d, &s, running("run("+filepath.Base(script)+")"))
+					setLastExecution(d, &s, script, cellID)
+					var renderErr error
+					res, err := kernel.Execute(ctx, code, runtime.ExecOptions{
+						IdleTimeout: timeoutOption(timeout),
+						OnOutput: func(o runtime.Output) {
+							if o.OutputType == "error" && o.EName == "SystemExit" {
+								return // never print a SystemExit traceback
+							}
+							if e := renderOne(d, o, ""); e != nil && renderErr == nil {
+								renderErr = e
+							}
+						},
+					})
+					switch {
+					case err != nil:
+						reason = "run_failed"
+						return pruneLost(d, name, err)
+					case renderErr != nil:
+						reason = "run_failed"
+						return renderErr
+					default:
+						notebook.Cells[block.cellIdx].Outputs = notebookOutputs(res.Outputs)
+						logExecution(d, name, code, res.Outputs, map[string]any{
+							"via": "run", "cell_index": i, "cell_id": block.id,
+						})
+						if c := exitCodeFromOutputs(res.Outputs); c != 0 {
+							exitCode = c
+							reason = "run_failed"
+							break cells // CPython-style: stop on the first failing cell
+						}
+					}
 				}
-				logExecution(d, name, payload, res.Outputs, map[string]any{"via": "run"})
+			} else {
+				payload := buildScriptPayload(script, forwarded, envVars)
+				setRunning(d, &s, running("run("+filepath.Base(script)+")"))
+				setLastExecution(d, &s, script, nil)
+				var renderErr error
+				res, err := kernel.Execute(ctx, payload, runtime.ExecOptions{
+					IdleTimeout: timeoutOption(timeout),
+					OnOutput: func(o runtime.Output) {
+						if o.OutputType == "error" && o.EName == "SystemExit" {
+							return // never print a SystemExit traceback
+						}
+						if e := renderOne(d, o, ""); e != nil && renderErr == nil {
+							renderErr = e
+						}
+					},
+				})
+				switch {
+				case err != nil:
+					reason = "run_failed"
+					return pruneLost(d, name, err)
+				case renderErr != nil:
+					reason = "run_failed"
+					return renderErr
+				default:
+					exitCode = exitCodeFromOutputs(res.Outputs)
+					if exitCode != 0 {
+						reason = "run_failed"
+					}
+					logExecution(d, name, payload, res.Outputs, map[string]any{"via": "run"})
+				}
 			}
 			if ctx.Err() != nil {
 				return exitf(130, "")

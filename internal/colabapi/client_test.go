@@ -167,6 +167,48 @@ func TestAssignRetryReconcilesAfterTimeout(t *testing.T) {
 	require.Equal(t, 2, gets, "initial GET + reconcile GET")
 }
 
+// Regression for upstream issue #263: a final ReadTimeout on assign leaves a
+// billable runtime with no local session. Same recovery shape as
+// tests/test_client.py::test_assign_recovers_before_another_post, but on the
+// LAST attempt (no retries left), where the port previously returned raw err.
+func TestAssignFinalTimeoutReconciles(t *testing.T) {
+	fake := fakecolab.New()
+	defer fake.Close()
+	// ApplyHandler makes the fake allocate before losing the response; the
+	// client therefore times out on its one and only POST attempt.
+	fake.SetFault(fakecolab.Fault{
+		Method:       http.MethodPost,
+		PathContains: "/tun/m/assign",
+		Status:       http.StatusBadGateway,
+		Hang:         true,
+		ApplyHandler: true,
+	})
+	cli := fake.Client()
+	cli.Timeout = 400 * time.Millisecond
+	c, err := colabapi.New(colabapi.Config{
+		Domain: fake.TunURL(), HTTPClient: cli, ClientAgent: "colab-go-test",
+		Retries: -1, Backoff: 0, // -1 explicitly disables retries (0 = env default)
+	})
+	require.NoError(t, err)
+
+	res, err := c.Assign(context.Background(), colabapi.AssignRequest{NotebookHash: fixedHash(t)})
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Endpoint)
+	require.True(t, res.Reattached, "final failure must reattach an already-billed runtime")
+
+	posts, gets := 0, 0
+	for _, r := range fake.Requests() {
+		if r.Method == http.MethodPost && strings.Contains(r.Path, "/assign") {
+			posts++
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.Path, "/assign") {
+			gets++
+		}
+	}
+	require.Equal(t, 1, posts, "no second assign")
+	require.Equal(t, 2, gets, "initial GET + reconciliation GET after the final POST")
+}
+
 // Ports tests/test_client.py::test_assign_refreshes_token_and_uses_bounded_backoff.
 func TestAssignBoundedBackoffAndFreshXSRF(t *testing.T) {
 	fake := fakecolab.New()
@@ -239,6 +281,99 @@ func TestAssignTypedErrors(t *testing.T) {
 		require.True(t, errors.As(err, &se))
 		require.Equal(t, 400, se.Code)
 		require.Contains(t, se.Body, "bad request")
+	})
+}
+
+// Regressions for upstream issues #282/#273/#236: HTTP 503 on /assign means
+// Colab has no capacity, not a generic transient failure. It must be typed,
+// must not be retried, and must still reconcile a possible allocation.
+func TestAssignCapacityUnavailable(t *testing.T) {
+	t.Run("503 is typed, stops retrying and reconciles", func(t *testing.T) {
+		fake := fakecolab.New()
+		defer fake.Close()
+		fake.SetFault(fakecolab.Fault{
+			Method:       http.MethodPost,
+			PathContains: "/tun/m/assign",
+			Status:       http.StatusServiceUnavailable,
+			Body:         `{"error":"capacity"}`,
+			Times:        -1, // every POST returns 503
+		})
+		c, err := colabapi.New(colabapi.Config{
+			Domain: fake.TunURL(), HTTPClient: fake.Client(), ClientAgent: "colab-go-test",
+			Retries: 3, Backoff: time.Second,
+		})
+		require.NoError(t, err)
+
+		start := time.Now()
+		_, err = c.Assign(context.Background(), colabapi.AssignRequest{NotebookHash: fixedHash(t)})
+		require.Error(t, err)
+		require.Less(t, time.Since(start), time.Second, "capacity must not wait for backoff")
+		require.True(t, errors.Is(err, colabapi.ErrCapacity), "got %v", err)
+		require.False(t, errors.Is(err, colabapi.ErrTooManyAssignments))
+		require.False(t, errors.Is(err, colabapi.ErrNoQuota))
+		var se *colabapi.StatusError
+		require.True(t, errors.As(err, &se))
+		require.Equal(t, http.StatusServiceUnavailable, se.Code)
+
+		posts, gets := 0, 0
+		for _, r := range fake.Requests() {
+			if r.Method == http.MethodPost && strings.Contains(r.Path, "/assign") {
+				posts++
+			}
+			if r.Method == http.MethodGet && strings.Contains(r.Path, "/assign") {
+				gets++
+			}
+		}
+		require.Equal(t, 1, posts, "no retry after capacity is identified")
+		require.Equal(t, 2, gets, "initial GET + final reconciliation GET")
+	})
+
+	t.Run("503 after allocation reattaches", func(t *testing.T) {
+		fake := fakecolab.New()
+		defer fake.Close()
+		fake.SetFault(fakecolab.Fault{
+			Method:       http.MethodPost,
+			PathContains: "/tun/m/assign",
+			Status:       http.StatusServiceUnavailable,
+			ApplyHandler: true, // allocation happens before the 503 reply
+		})
+		c, err := colabapi.New(colabapi.Config{
+			Domain: fake.TunURL(), HTTPClient: fake.Client(), ClientAgent: "colab-go-test",
+			Retries: 3, Backoff: time.Second,
+		})
+		require.NoError(t, err)
+
+		res, err := c.Assign(context.Background(), colabapi.AssignRequest{NotebookHash: fixedHash(t)})
+		require.NoError(t, err)
+		require.NotEmpty(t, res.Endpoint)
+		require.True(t, res.Reattached, "503 must not orphan an allocation that succeeded")
+	})
+
+	t.Run("502 stays retryable and untyped", func(t *testing.T) {
+		fake := fakecolab.New()
+		defer fake.Close()
+		fake.SetFault(fakecolab.Fault{
+			Method:       http.MethodPost,
+			PathContains: "/tun/m/assign",
+			Status:       http.StatusBadGateway,
+			Times:        2,
+		})
+		c, err := colabapi.New(colabapi.Config{
+			Domain: fake.TunURL(), HTTPClient: fake.Client(), ClientAgent: "colab-go-test",
+			Retries: 3, Backoff: -1, // -1 disables backoff (0 = env default 10s)
+		})
+		require.NoError(t, err)
+
+		res, err := c.Assign(context.Background(), colabapi.AssignRequest{NotebookHash: fixedHash(t)})
+		require.NoError(t, err)
+		require.False(t, res.Reattached)
+		posts := 0
+		for _, r := range fake.Requests() {
+			if r.Method == http.MethodPost && strings.Contains(r.Path, "/assign") {
+				posts++
+			}
+		}
+		require.Equal(t, 3, posts, "other 5xx codes must keep their retry behaviour")
 	})
 }
 

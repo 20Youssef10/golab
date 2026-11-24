@@ -22,9 +22,24 @@ var (
 	ErrTooManyAssignments = errors.New("too many Colab assignments")
 	// ErrNoQuota maps HTTP 400 on /assign when an accelerator was requested.
 	ErrNoQuota = errors.New("no quota or entitlement for the requested accelerator")
+	// ErrCapacity maps HTTP 503 on /assign (Colab has no capacity). Not retryable.
+	ErrCapacity = errors.New("colab has no capacity for the requested runtime")
 	// ErrUnexpectedResponse marks a structurally invalid control-plane reply.
 	ErrUnexpectedResponse = errors.New("unexpected Colab control-plane response")
 )
+
+// ReasonCapacityUnavailable is the stable machine-readable reason code carried
+// by ErrCapacity in both text and structured CLI output.
+const ReasonCapacityUnavailable = "capacity_unavailable"
+
+// ReasonOf returns the stable reason code for a typed control-plane error, or
+// "" when the error has no published reason code.
+func ReasonOf(err error) string {
+	if errors.Is(err, ErrCapacity) {
+		return ReasonCapacityUnavailable
+	}
+	return ""
+}
 
 // StatusError is the typed non-2xx error. Body is redacted and length-capped.
 type StatusError struct {

@@ -195,6 +195,135 @@ func TestExecIPynb(t *testing.T) {
 	}
 }
 
+// Ports upstream tests/test_exec.py::test_cli_exec_file_error_exits_nonzero,
+// test_cli_exec_systemexit_zero_exits_zero_silently,
+// test_cli_exec_systemexit_nonzero_propagates_code and
+// test_cli_exec_systemexit_string_prints_message_and_exits_one (PRs #278/#280).
+// IPython keeps the kernel alive by reporting sys.exit as an error output, so
+// exec must translate it back to CPython's process-exit semantics.
+func TestExecExitSemantics(t *testing.T) {
+	systemExit := func(evalue string) fakekernel.Step {
+		return fakekernel.Error("SystemExit", evalue, []string{
+			"An exception has occurred, use %tb to see the full traceback.\n",
+			"SystemExit: " + evalue + "\n",
+		})
+	}
+	quiet := []string{"An exception has occurred", "SystemExit:"}
+	for _, tc := range []struct {
+		name       string
+		step       fakekernel.Step
+		wantCode   int
+		wantStderr string
+		noStderr   []string
+	}{
+		{name: "success", step: fakekernel.Stream("stdout", "ok\n"), wantCode: 0},
+		{
+			name:       "error output",
+			step:       fakekernel.Error("ValueError", "boom", []string{"Traceback...\n", "ValueError: boom\n"}),
+			wantCode:   1,
+			wantStderr: "ValueError: boom",
+		},
+		{name: "systemexit empty", step: systemExit(""), wantCode: 0, noStderr: quiet},
+		{name: "systemexit None", step: systemExit("None"), wantCode: 0, noStderr: quiet},
+		{name: "systemexit zero", step: systemExit("0"), wantCode: 0, noStderr: quiet},
+		{name: "systemexit seven", step: systemExit("7"), wantCode: 7, noStderr: quiet},
+		{
+			name:       "systemexit message",
+			step:       systemExit("fatal config error"),
+			wantCode:   1,
+			wantStderr: "fatal config error\n",
+			noStderr:   quiet,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.putSession(t, "s1")
+			h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+			h.kernel.Script(tc.step, fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+
+			code := h.run(t, "raise SystemExit\n", "exec", "-s", "s1")
+			if code != tc.wantCode {
+				t.Fatalf("exit=%d want=%d stderr=%q stdout=%q", code, tc.wantCode, h.stderr.String(), h.stdout.String())
+			}
+			if tc.wantStderr != "" && !strings.Contains(h.stderr.String(), tc.wantStderr) {
+				t.Fatalf("stderr missing %q: %q", tc.wantStderr, h.stderr.String())
+			}
+			for _, unwanted := range tc.noStderr {
+				if strings.Contains(h.stderr.String(), unwanted) {
+					t.Fatalf("stderr should not contain %q: %q", unwanted, h.stderr.String())
+				}
+			}
+		})
+	}
+}
+
+// Ports upstream tests/test_ipynb_exec.py::test_exec_ipynb_cell_error_stops_
+// and_exits_nonzero (PR #278): the first failing cell ends execution but the
+// deferred *_output.ipynb write still records every cell executed so far.
+func TestExecIPynbStopsAtFailingCell(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	h.kernel.Script(fakekernel.Stream("stdout", "first\n"), fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+	h.kernel.Script(
+		fakekernel.Error("RuntimeError", "cell 1 failed", []string{"RuntimeError: cell 1 failed\n"}),
+		fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+	)
+	// No script queued for a hypothetical third cell: executing it would use
+	// the kernel's default idle/ok reply, so Executions() detects the overrun.
+
+	n := nb.NewNotebook()
+	c1 := nb.NewCodeCell("print('a')")
+	c1.ID = "cell-1"
+	c2 := nb.NewCodeCell("raise RuntimeError('cell 1 failed')")
+	c2.ID = "cell-2"
+	c3 := nb.NewCodeCell("print('never')")
+	c3.ID = "cell-3"
+	n.Cells = []nb.Cell{c1, c2, c3}
+	raw, err := nb.Marshal(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notebookPath := filepath.Join(t.TempDir(), "broken.ipynb")
+	if err := os.WriteFile(notebookPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := h.run(t, "", "exec", "-s", "s1", "-f", notebookPath); code != 1 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	if execs := h.kernel.Executions(); len(execs) != 3 { // prelude + 2 cells, never the third
+		t.Fatalf("executions = %d (want 3): %+v", len(execs), execs)
+	}
+	if !strings.Contains(h.stderr.String(), "RuntimeError: cell 1 failed") {
+		t.Fatalf("stderr = %q", h.stderr.String())
+	}
+
+	outPath := strings.TrimSuffix(notebookPath, ".ipynb") + "_output.ipynb"
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("output notebook mode = %o, want 600", got)
+	}
+	b, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := nb.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Cells) != 3 || len(saved.Cells[0].Outputs) != 1 ||
+		len(saved.Cells[1].Outputs) != 1 || len(saved.Cells[2].Outputs) != 0 {
+		t.Fatalf("saved notebook = %+v", saved)
+	}
+	if saved.Cells[1].Outputs[0].OutputType != "error" || saved.Cells[1].Outputs[0].Evalue != "cell 1 failed" {
+		t.Fatalf("failing cell output = %+v", saved.Cells[1].Outputs[0])
+	}
+}
+
 // Ports upstream tests/test_repl.py::test_cli_repl_piped and
 // test_cli_repl_piped_empty.
 func TestReplPiped(t *testing.T) {

@@ -198,6 +198,16 @@ func (c *client) doRequest(ctx context.Context, method string, target *url.URL, 
 	if err != nil {
 		return err
 	}
+	// Upstream issue #270: a body-less POST gets an explicit "Content-Length:
+	// 0", which some forward proxies reject with HTTP 411. Force chunked
+	// transfer for exactly that shape. GET and requests carrying a body keep
+	// net/http's normal Content-Length calculation.
+	if method == http.MethodPost && opts.body == nil {
+		// http.NoBody would be special-cased back to Content-Length: 0, so
+		// use a real (empty) reader to make net/http emit chunked encoding.
+		req.ContentLength = -1
+		req.Body = io.NopCloser(bytes.NewReader(nil))
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Colab-Client-Agent", c.agent)
 	if tok := opts.xsrf.Reveal(); tok != "" {
@@ -392,6 +402,10 @@ func mapAssignError(err error, req AssignRequest) error {
 		if req.Accelerator != AccelNone {
 			return fmt.Errorf("%w: %s: %w", ErrNoQuota, req.Accelerator, err)
 		}
+	case http.StatusServiceUnavailable:
+		// Upstream issues #282/#273/#236: 503 on /assign is a capacity
+		// signal, not a transient failure to retry with backoff.
+		return fmt.Errorf("%w: %w", ErrCapacity, err)
 	}
 	return err
 }
@@ -404,6 +418,18 @@ func fromAssignment(a *Assignment, req AssignRequest) *AssignmentResponse {
 		Variant:          variantToAssignment(req.Variant),
 		Reattached:       true,
 	}
+}
+
+// reconcileFinal is the last-chance GET after a failed POST when no retry is
+// left (or capacity ruled one out). An uncertain POST may already have billed
+// a runtime; discovering it here prevents an orphaned billable assignment.
+// The original failure is preserved when no allocation is visible.
+func (c *client) reconcileFinal(ctx context.Context, req AssignRequest, failure error) (*AssignmentResponse, error) {
+	_, existing, recErr := c.getAssignment(ctx, req)
+	if recErr == nil && existing != nil {
+		return fromAssignment(existing, req), nil
+	}
+	return nil, failure
 }
 
 // Assign implements C1+C2 with retry/backoff and GET reconciliation so an
@@ -436,6 +462,10 @@ func (c *client) Assign(ctx context.Context, req AssignRequest) (*AssignmentResp
 				if req.Accelerator != AccelNone {
 					return nil, mapAssignError(err, req)
 				}
+			case http.StatusServiceUnavailable:
+				// Capacity is definitive: no backoff, no second POST, but the
+				// final reconciliation still runs in case the POST landed.
+				return c.reconcileFinal(ctx, req, mapAssignError(err, req))
 			}
 			if !retryableStatus(se.Code) {
 				return nil, err
@@ -444,7 +474,9 @@ func (c *client) Assign(ctx context.Context, req AssignRequest) (*AssignmentResp
 			return nil, err
 		}
 		if attempt == c.retries {
-			return nil, err
+			// Upstream issue #263: the LAST failed POST used to return raw
+			// error without checking whether it had already allocated a VM.
+			return c.reconcileFinal(ctx, req, err)
 		}
 
 		if err := c.sleep(ctx, backoffDelay(c.backoff, attempt)); err != nil {

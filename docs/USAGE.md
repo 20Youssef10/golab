@@ -49,7 +49,7 @@ golab status            # all sessions, or the unique one
 golab status -s train
 ```
 
-Each line shows name, endpoint, hardware, shape, variant and `IDLE` / `BUSY (<what>)`. A separately indented `Last Execution:` line shows the most recent execution kind, cell label (for notebooks) and timestamp. A `-s` name that does not exist locally prints `Session '<name>' not found.` to stderr.
+Each line shows name, endpoint, hardware, shape, variant and `IDLE` / `BUSY (<what>)`. The shape shown is the one reported by the server (overlaid on the locally requested value at print time); the on-disk record is unchanged. A separately indented `Last Execution:` line shows the most recent execution kind, cell label (for notebooks) and timestamp. A `-s` name that does not exist locally prints `Session '<name>' not found.` to stderr.
 
 ### `golab stop`
 
@@ -57,9 +57,10 @@ Each line shows name, endpoint, hardware, shape, variant and `IDLE` / `BUSY (<wh
 golab stop -s train     # kernel (best effort) → unassign → remove local state
 golab stop              # uses the unique-session rule
 golab stop --all        # stop every active session
+golab stop -s train --verify          # confirm no assignment remains on the server
 ```
 
-`--all` asks for confirmation on stderr (`Stop N session(s)? [y/N]`) **only when stdin is a TTY**; in a pipeline it proceeds without prompting. Pass `--yes` (or `COLAB_ASSUME_YES=1`) to skip the prompt. It finishes with `Stopped N session(s).` on stderr. Removing local state always happens, even when the backend is already gone.
+`--all` asks for confirmation on stderr (`Stop N session(s)? [y/N]`) **only when stdin is a TTY**; in a pipeline it proceeds without prompting. Pass `--yes` (or `COLAB_ASSUME_YES=1`) to skip the prompt. It finishes with `Stopped N session(s).` on stderr. Removing local state always happens, even when the backend is already gone. `--verify` re-reads `/tun/m/assignments` after unassigning and exits non-zero if a stopped runtime is still assigned (works with `--all` too); this is an extra GET and is opt-in.
 
 ### `golab restart-kernel`
 
@@ -97,6 +98,7 @@ Details worth knowing:
 - With no `-f` and a TTY on stdin, `golab exec` refuses to wait: you get `Error: No input provided. Pipe code or provide a file.` and exit 1. Empty input exits 0 without allocating a kernel.
 - Values passed via `--env` are emitted as quoted Python literals, never spliced as raw source.
 - For a `.ipynb` input, code cells run in order. Progress is printed to stderr as `Executing cell i/N - <label>...`, where the label is a cell's `# @title …` line or its cell ID. Outputs are written back into the cells and saved next to the input as `<name>_output.ipynb` with owner-only permissions.
+- Exit codes follow CPython semantics: `sys.exit(N)` → `N`, `sys.exit("msg")` → stderr + exit 1, uncaught errors → exit 1, clean cells → exit 0. A notebook stops at the first failing cell but still writes the output file.
 - Output streaming is sanitised: unsafe terminal control sequences are stripped, SGR colour is kept.
 - A terminal 401/404 prunes the lost session from local state and reports it on stderr.
 
@@ -118,6 +120,7 @@ One-shot: validate the script locally, create a runtime, upload and execute it, 
 golab run train.py --gpu t4
 golab run train.py --gpu t4 --env EPOCHS=5 -- --data /content/data.csv
 golab run train.py --keep -s longlived
+golab run analysis.ipynb --gpu t4      # code cells only; outputs saved to analysis_output.ipynb
 ```
 
 | Flag | Meaning |
@@ -133,6 +136,7 @@ Script semantics:
 - The script must exist locally **before** anything is allocated; a typo exits 2 without touching Colab.
 - A leading `#!…` shebang is stripped. `sys.argv` is set to the script basename followed by your arguments, and `__name__` is set to `'__main__'`, so `if __name__ == "__main__":` blocks work.
 - Flags after `SCRIPT` belong to the script, not to `golab`. Put `golab` flags **before** the script name; the sole exception is `--env KEY=VALUE`, which is recognised on either side.
+- A `.ipynb` input is parsed **before** any VM allocation: code cells run in order on one kernel with shared state, markdown is skipped, and outputs are written next to the input as `<name>_output.ipynb` with mode 0600. Extra script arguments are warned about and never become `sys.argv` for notebooks. A failing cell stops the run with the cell's exit code.
 - Exit codes follow CPython: `sys.exit()` / `sys.exit(0)` → 0, `sys.exit(N)` → N, `sys.exit("message")` → 1 with the message on stderr, an uncaught exception → 1 with a traceback.
 - SIGINT, SIGTERM and SIGHUP tear the runtime down; an interrupt while piped exits 130. `--keep` disables teardown.
 

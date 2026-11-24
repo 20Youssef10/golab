@@ -41,6 +41,15 @@ func (t *idleTracker) slice() time.Duration {
 	return left
 }
 
+// shift pauses the idle deadline by d, so time spent redialing a dropped
+// socket does not count as kernel silence. A zero deadline (--timeout 0,
+// meaning unlimited) stays zero.
+func (t *idleTracker) shift(d time.Duration) {
+	if !t.deadline.IsZero() {
+		t.deadline = t.deadline.Add(d)
+	}
+}
+
 type kernel struct {
 	id        string
 	sessionID string
@@ -80,6 +89,24 @@ func (k *kernel) Execute(ctx context.Context, code string, opts ExecOptions) (*R
 	ctxDone := ctx.Done()
 	var reply, pendingReply *Message
 
+	// interrupt is shared by the cancellation branch and the reconnect branch:
+	// a cancellation that races with a socket drop still sends the best-effort
+	// REST interrupt and enters the graceful-idle wait.
+	interrupt := func() {
+		// Only the first cancellation interrupts: ctx.Done() stays closed, so
+		// it must be disabled or the next select would immediately take the
+		// force-close branch without waiting for idle.
+		ctxDone = nil
+		interrupted = true
+		idle.reset(k.graceful)
+		if k.rest == nil {
+			return
+		}
+		ictx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = k.rest.lifecycle(ictx, "interrupt", k.id)
+		cancel()
+	}
+
 executeLoop:
 	for {
 		phase := "output"
@@ -99,22 +126,32 @@ executeLoop:
 		select {
 		case <-ctxDone:
 			timer.Stop()
-			// Only the first cancellation interrupts: ctx.Done() stays closed,
-			// so it must be disabled or the next select would immediately
-			// take the force-close branch without waiting for idle.
-			ctxDone = nil
-			interrupted = true
-			// Best-effort REST interrupt; the interrupt uses a fresh,
-			// bounded context because the caller's is already cancelled.
-			ictx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = k.rest.lifecycle(ictx, "interrupt", k.id)
-			cancel()
-			idle.reset(k.graceful)
+			// The interrupt uses a fresh, bounded context because the caller's
+			// is already cancelled.
+			interrupt()
 			continue
 
-		case <-k.conn.lost:
+		case <-k.conn.lostChan():
 			timer.Stop()
-			return nil, fmt.Errorf("execute: %w", ConnectionLost)
+			if ctx.Err() != nil {
+				// Cancellation won the race with the drop: keep the normal
+				// interrupt + graceful-idle path instead of redialing.
+				interrupt()
+				continue
+			}
+			// A dropped channels socket is retried in place with the same
+			// kernel/session id. The idle deadline is paused for the duration
+			// so reconnection time is not mistaken for kernel silence.
+			pausedAt := time.Now()
+			if err := k.conn.reconnect(ctx, k.rest, k.id, k.sessionID); err != nil {
+				if ctx.Err() != nil {
+					interrupt()
+					continue
+				}
+				return nil, fmt.Errorf("execute: %w", err)
+			}
+			idle.shift(time.Since(pausedAt))
+			continue
 
 		case <-timer.C:
 			// A wait slice elapsed without a message: loop back so the

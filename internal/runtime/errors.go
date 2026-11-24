@@ -50,6 +50,34 @@ func (e *KernelGoneError) Error() string {
 func (e *KernelGoneError) Is(target error) bool { return target == ErrKernelGone }
 func (e *KernelGoneError) Unwrap() error        { return ErrKernelGone }
 
+// ConnectionLostError is surfaced only after a bounded reconnect budget has
+// been exhausted. Transient drops are retried in place and never reach the
+// caller. It keeps errors.Is(err, ConnectionLost) working for existing callers
+// while exposing the attempt count and last dial cause via errors.As.
+type ConnectionLostError struct {
+	Attempts int
+	Elapsed  time.Duration
+	Cause    error
+}
+
+func (e *ConnectionLostError) Error() string {
+	msg := fmt.Sprintf("kernel connection lost after %d reconnect attempts over %s",
+		e.Attempts, e.Elapsed.Round(time.Millisecond))
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
+}
+func (e *ConnectionLostError) Is(target error) bool { return target == ConnectionLost }
+func (e *ConnectionLostError) Unwrap() error {
+	// Keep the sentinel match via Is while preserving typed causes (e.g. a
+	// redial timeout) for errors.Is/errors.As callers.
+	if e.Cause != nil {
+		return e.Cause
+	}
+	return ConnectionLost
+}
+
 // TimeoutError reports which phase of the execute loop went quiet.
 type TimeoutError struct {
 	WaitingFor string

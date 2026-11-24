@@ -383,6 +383,137 @@ func TestLog(t *testing.T) {
 	}
 }
 
+// Ports upstream enhancement #47 and tests/test_cli.py::test_cli_status:
+// `status` must report the shape the server actually assigned, not the stale
+// locally recorded (requested) shape. The overlay is display-only.
+func TestStatusOverlaysServerShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"named", []string{"status", "-s", "s1"}},
+		{"all", []string{"status"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.assignAndStore(t, "s1", colabapi.AssignRequest{
+				NotebookHash: randomNBH(t),
+				Shape:        colabapi.ShapeHighRAM,
+			})
+			// The server assigned HIGH_RAM; simulate a stale local record of
+			// the originally requested STANDARD shape.
+			s, err := h.deps.Store.Get("s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.MachineShape = "STANDARD"
+			if err := h.deps.Store.Put(*s); err != nil {
+				t.Fatal(err)
+			}
+
+			if code := h.run(t, "", tc.args...); code != 0 {
+				t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+			}
+			if !strings.Contains(h.stdout.String(), "Shape: High-RAM") {
+				t.Fatalf("stdout = %q; want server-assigned Shape: High-RAM", h.stdout.String())
+			}
+			got, err := h.deps.Store.Get("s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.MachineShape != "STANDARD" {
+				t.Fatalf("on-disk shape = %q; want unchanged STANDARD", got.MachineShape)
+			}
+		})
+	}
+}
+
+// Ports upstream enhancement #47: `stop --verify` re-reads GET
+// /tun/m/assignments after unassigning and fails when the endpoint survives.
+func TestStopVerify(t *testing.T) {
+	t.Run("gone", func(t *testing.T) {
+		h := newHarness(t)
+		h.assignAndStore(t, "solo", colabapi.AssignRequest{NotebookHash: randomNBH(t)})
+		if code := h.run(t, "", "stop", "-s", "solo", "--verify"); code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+		}
+		if !strings.Contains(h.stderr.String(), "Session terminated.") {
+			t.Fatalf("stderr = %q", h.stderr.String())
+		}
+		if !strings.Contains(strings.ToLower(h.stderr.String()), "no longer assigned") {
+			t.Fatalf("stderr = %q", h.stderr.String())
+		}
+		var sawList bool
+		for _, r := range h.ctrl.Requests() {
+			if r.Method == http.MethodGet && r.Path == "/tun/m/assignments" {
+				sawList = true
+			}
+		}
+		if !sawList {
+			t.Fatalf("no GET /tun/m/assignments after stop: %+v", h.ctrl.Requests())
+		}
+		if assignments, err := h.client.List(context.Background()); err != nil || len(assignments) != 0 {
+			t.Fatalf("assignments = %v, %v", assignments, err)
+		}
+	})
+	t.Run("still present", func(t *testing.T) {
+		h := newHarness(t)
+		h.assignAndStore(t, "solo", colabapi.AssignRequest{NotebookHash: randomNBH(t)})
+		// Let the unassign POST succeed without actually deleting the server
+		// assignment, so the verification GET still sees it.
+		h.ctrl.SetFault(fakecolab.Fault{
+			Method: http.MethodPost, PathContains: "/unassign",
+			Status: http.StatusOK, Body: "[]",
+		})
+		code := h.run(t, "", "stop", "-s", "solo", "--verify")
+		if code != 1 {
+			t.Fatalf("exit=%d, want 1; stderr=%q", code, h.stderr.String())
+		}
+		if !strings.Contains(h.stderr.String(), "still assigned") {
+			t.Fatalf("stderr = %q", h.stderr.String())
+		}
+		if _, err := h.deps.Store.Get("solo"); err == nil {
+			t.Fatal("local session not removed")
+		}
+		var sawList bool
+		for _, r := range h.ctrl.Requests() {
+			if r.Method == http.MethodGet && r.Path == "/tun/m/assignments" {
+				sawList = true
+			}
+		}
+		if !sawList {
+			t.Fatalf("no GET /tun/m/assignments after stop: %+v", h.ctrl.Requests())
+		}
+	})
+	t.Run("all gone", func(t *testing.T) {
+		h := newHarness(t)
+		for _, name := range []string{"s1", "s2"} {
+			h.assignAndStore(t, name, colabapi.AssignRequest{NotebookHash: randomNBH(t)})
+		}
+		if code := h.run(t, "", "stop", "--all", "--verify"); code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+		}
+		if !strings.Contains(h.stderr.String(), "Stopped 2 session(s).") ||
+			!strings.Contains(h.stderr.String(), "Verified: all 2 session(s) are no longer assigned.") {
+			t.Fatalf("stderr = %q", h.stderr.String())
+		}
+	})
+	t.Run("all still present", func(t *testing.T) {
+		h := newHarness(t)
+		for _, name := range []string{"s1", "s2"} {
+			h.assignAndStore(t, name, colabapi.AssignRequest{NotebookHash: randomNBH(t)})
+		}
+		h.ctrl.SetFault(fakecolab.Fault{
+			Method: http.MethodPost, PathContains: "/unassign",
+			Status: http.StatusOK, Body: "[]", Times: -1,
+		})
+		if code := h.run(t, "", "stop", "--all", "--verify"); code != 1 ||
+			!strings.Contains(h.stderr.String(), "still assigned") {
+			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+		}
+	})
+}
+
 func ptr(s string) *string { return &s }
 
 func randomNBH(t *testing.T) colabapi.NotebookHash {

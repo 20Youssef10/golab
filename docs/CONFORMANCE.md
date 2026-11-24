@@ -229,6 +229,23 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — Upstream triage (`googlecolab/google-colab-cli`: 18 open issues,
+  19 open PRs) completed and first fork batch implemented. Ported bug fixes:
+  body-less POST chunked encoding (#270), final assign reconciliation (#263),
+  typed `capacity_unavailable` for assign 503 (#282/#273/#236), `exec` exit-code
+  semantics (#278/#280), and server-shape overlay in `status` (#47). Ported
+  features: `.ipynb` input for `run` (#74/#200), `stop --verify` (#47), bounded
+  kernel WS reconnect (#261/#220) and a Go-specific Termux guide (#131). All
+  changes are covered by test-first fake-server tests; `go vet`, full
+  `go test -count=1 ./...`, golangci-lint v2.15.0 and both safety scripts pass
+  locally. Live billable/OAuth/TTY proofs remain human-only. Deferred by design:
+  full output recovery + `resume` (#220, needs a journal design spike),
+  `exec --json` (#237, must follow the new exit semantics), `--scopes full|minimal`
+  (#71, needs human re-consent), a local secrets bridge (#157, security review),
+  click-free Drive mount (#258, Google consent is interactive), and
+  maintainer-pushed notices (PR #276, needs a signed feed). Windows/PR #100 and
+  Python packaging issues #81/#100 are not applicable to a static Go binary.
+  The next release containing these additions is MINOR (0.2.0); no tag was cut.
 - 2026-11-24 — Small user-visible fix: the routine OS-keyring fallback no longer
   prints `[colab] OS keyring unavailable; using owner-only token file …` on
   stderr for every command. `internal/auth/tokenstore.go` `tieredStore.notice`

@@ -94,6 +94,8 @@ Additional environment overrides: `COLAB_CONFIG_DIR`, `COLAB_CLI_REQUEST_TIMEOUT
 
 Inside it: `sessions.json` (active runtimes and proxy tokens), `settings.json` (update throttle and API probes), `history/` (per-session JSONL event logs). Override the base with `COLAB_CONFIG_DIR`, or just the session file with `--config` / `COLAB_SESSIONS_FILE`. Temporary files prefer `$TMPDIR` (Termux: `$PREFIX/tmp`); caches live in `~/.cache/colab-cli` or `$XDG_CACHE_HOME/colab-cli`.
 
+On Termux, install the static `linux/arm64` binary with [docs/INSTALL-TERMUX.md](docs/INSTALL-TERMUX.md) (checksum + cosign verification, keyring fallback and runtime notes).
+
 ## Compatibility with the Python CLI
 
 - **Same state schema.** `sessions.json`, `settings.json` and the per-session history are read and written in the Python CLI's format, with a few added fields for the Public API. Existing sessions survive the switch; see [docs/MIGRATION.md](docs/MIGRATION.md).

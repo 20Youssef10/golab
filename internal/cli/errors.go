@@ -81,6 +81,13 @@ func mapError(err error) error {
 			"and retry, or try a different accelerator.")
 	case errors.Is(err, colabapi.ErrNoQuota):
 		return exitf(1, "[colab] %s", logx.Redact(err.Error()))
+	case errors.Is(err, colabapi.ErrCapacity):
+		// A stable reason code keeps this actionable in text and structured
+		// output; both modes print this same message on stderr.
+		return exitf(1, "[colab] %s: Colab has no spare capacity for the requested runtime. "+
+			"Wait a few minutes and retry, or try a different runtime or accelerator. "+
+			"Run `colab sessions` first if an allocation may have succeeded anyway.",
+			colabapi.ReasonOf(err))
 	case errors.Is(err, runtime.ErrSessionLost):
 		return exitf(1, "[colab] Session appears to be lost (404/401). Run `colab sessions` to check its state.")
 	case errors.Is(err, runtime.ErrTimeout):
