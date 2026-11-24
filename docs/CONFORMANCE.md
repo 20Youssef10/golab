@@ -63,36 +63,59 @@ CI floors the gate at 70% via `vars.COVERAGE_MIN` until the three under-target
 packages are raised. A 100% gate for the error-mapping table is still TODO
 (the profile cannot isolate that table).
 
-## 4. Release pipeline and the identity mismatch (ACTION REQUIRED)
+## 4. Release pipeline and updater identity
 
 `.goreleaser.yaml` + `.github/workflows/release.yml` now produce, for every
 Tier-1 archive:
 
 | Asset class | Example name | Updater recogniser |
 |---|---|---|
-| Archive | `golab_0.1.0-alpha.1_linux_amd64.tar.gz` | `AssetPattern` = `golab_*_<GOOS>_<GOARCH>.tar.gz` |
+| Archive | `golab_0.1.0-alpha.1_linux_amd64.tar.gz` | `AssetPattern` = anchored, version-agnostic `^golab_v?\d+\.\d+\.\d+.*_<GOOS>_<GOARCH>\.tar\.gz$` |
 | Checksums | `checksums.txt` | `isChecksumAsset` |
 | Signature | `golab_…_linux_amd64.tar.gz.sigstore.json` | `isSignatureAsset` ("sigstore", not "sbom") |
 | Signed SBOM | `golab_….sbom.sigstore.json` | `isSBOMAsset` ("sbom" + "sigstore"); predicate `--type cyclonedx` |
 
-- **MISMATCH to resolve by the owner / updater agent (do not edit
-  `internal/update` here):** `internal/app/app.go` defaults `Owner=golab-cli`,
-  `Repo=golab`, so `verify.go` pins the Fulcio SAN to
-  `https://github.com/golab-cli/golab/.github/workflows/release.yml@…`. This
-  repository is `20Youssef10/golab`; its OIDC SAN is
-  `https://github.com/20Youssef10/golab/.github/workflows/release.yml@…`.
-  **`colab update` will reject our own signed releases** until either the
-  defaults are changed to `20Youssef10`/`golab` or the repo is transferred/
-  renamed to `golab-cli/golab`. The workflow filename already matches
-  (`release.yml`) — that part is correct.
-- **Second mismatch (updater logic):** `check.go` picks the *first* signature
-  and *first* SBOM asset globally, but a multi-platform release has one of each
-  per archive with different subject digests. Per-artifact selection must be
-  implemented in `internal/update` (owned by another agent) for non-matching
-  platforms to verify. Bundles are currently produced per archive.
-- No release has been cut. `goreleaser check` / a snapshot dry-run and a real
-  signed tag are **human/CI external steps** (GoReleaser, cosign and syft are
-  not installed in this sandbox).
+- **Identity pin matches this repository:** `internal/app/app.go` defaults
+  `Owner=20Youssef10`, `Repo=golab`, and `internal/update/verify.go` builds the
+  Fulcio SAN from those values. `git remote` and `GITHUB_REPOSITORY` are also
+  `20Youssef10/golab`, and the workflow filename matches (`release.yml`).
+  A repository transfer/rename requires updating that pin in `internal/app`.
+- **Per-platform bundle selection is implemented:**
+  `internal/update/check.go:selectPlatformBundles` matches the signature and
+  SBOM bundles to the chosen archive by name, with no "first bundle globally"
+  fallback, so each platform verifies against its own subject digest.
+- **Archive asset selection is version-agnostic (2026-11-24 fix):**
+  `internal/app.UpdateConfig` no longer embeds `version.Number` in
+  `AssetPattern` — doing so made a user on vX look for a vX-named asset in a
+  newer release and always fail with `ErrNoRelease`. The pattern is now anchored
+  to `^golab_v?\d+\.\d+\.\d+.*_<GOOS>_<GOARCH>\.tar\.gz$`; `CurrentVersion`
+  stays `version.Number`, so `update.IsNewer` alone gates offers (no downgrade
+  or weakening of checksum/signature/SBOM verification). Covered by
+  `TestUpdateConfigOffersNewerRelease` against a fake newer release.
+- **Post-release proof now covers every artifact class.** The proof step runs
+  `sha256sum -c` over all of `checksums.txt`, `cosign verify-blob` for every
+  `*.tar.gz.sigstore.json` bundle and `cosign verify-blob-attestation --type
+  cyclonedx` for every SBOM bundle, each against its exact archive with the
+  pinned identity/issuer; any failure fails the job. cosign v2.6.5's
+  `verify-attestation` accepts only an OCI `<IMAGE>` and exposes no `--bundle`
+  flag, so blob attestations made by `attest-blob` must be verified with
+  `verify-blob-attestation` (whose `--check-claims` defaults to true and checks
+  the in-toto subject digest against the archive).
+- **Release job is gated by the `release` GitHub environment.** GitHub
+  auto-creates it on first use, but repo admins must add required reviewers for
+  it to actually gate publishing; until then it is bookkeeping only. Reducing
+  the keyless-signing path to a separate `id-token: write`-only job is deferred
+  until a live signed release can prove the artifact hand-off and ordering.
+- GoReleaser is pinned to **v2.20.3** in all three action steps (was the
+  floating `~> v2`), and the proof step asserts `GITHUB_REPOSITORY` equals the
+  updater pin `20Youssef10/golab` so a rename/transfer cannot silently publish
+  un-installable signed releases. Published signature assets are immutable:
+  `gh release upload` no longer passes `--clobber`.
+- No signed release has been cut from this pipeline yet. `goreleaser check`, a
+  snapshot dry-run and a real signed tag are **human/CI external steps**;
+  end-to-end proof that `colab update --install` accepts a signed release is
+  still pending. The new proof-step commands have only been shell-syntax and
+  local stub checked, not run against real cosign bundling material.
 
 ## 5. WSL / Termux URL-launcher expectations (docs/04 §2)
 
@@ -114,8 +137,8 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
    `bash scripts/golden.sh --scenario wire`.
 3. Chunked upload of >75 MiB with SHA-256 comparison (S6 / P0-3, HIGH).
 4. One CPU `new`/`run`, then `colab sessions` shows nothing (live-e2e manual run).
-5. Resolve the release identity mismatch (§4) and cut a signed tag; verify
-   `colab update --install` accepts it.
+5. Cut a signed tag and verify `colab update --install` accepts it end-to-end
+   (§4: identity pin and per-platform bundle selection are already in place).
 6. Wire goleak `TestMain` + dependency (another agent), then drop `ADVISORY=1`
    from `ci.yml` and raise `COVERAGE_MIN` to 80.
 7. Termux device matrix, Windows console/ACL/`.old` cleanup, macOS keychain
@@ -123,7 +146,28 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — Self-update could never offer a newer release: `app.UpdateConfig`
+  embedded the running version in `AssetPattern`, so a v0.1.4 binary scanning a
+  v0.1.5 tag looked for a `golab_0.1.4_…` asset that does not exist and failed
+  with `ErrNoRelease`. The pattern is now version-agnostic but anchored and
+  platform-specific; `CurrentVersion` (and therefore `IsNewer`) remains the
+  no-downgrade guard, and signature/SBOM/checksum verification is untouched.
+  `TestUpdateConfigOffersNewerRelease` fails on the old pattern and passes on
+  the new one; `go vet ./...` and `go test -count=1 ./...` pass locally. Live
+  `colab update` against a real signed tag is still pending (human-only).
+- 2026-11-24 — Release proof hardened: every archive signature, every CycloneDX
+  SBOM attestation and every checksum line is now verified; GoReleaser pinned to
+  v2.20.3; repository-identity and `release`-environment gates added; syft output
+  moved to an env var and signature uploads made immutable. `check-redaction.sh`
+  now also scans YAML/shell/JSON. Shell syntax, PyYAML parse and local stub runs
+  pass; no live signed release was cut, so cosign verification is unproven here.
+- 2026-11-24 — Release SBOM step repaired: `download-syft` now pins syft
+  v1.57.2 and the scan uses the root-command form (v0.42.2 had no `scan`
+  subcommand and could not parse `go 1.27.4`). Verified locally that the
+  CycloneDX JSON contains the Go module dependencies (v0.42.2 produced 0
+  components). Release not cut; end-to-end signed-tag verification is pending.
 - 2026-11-23 — Initial ledger created. Added CI truthfulness gates, release
   pipeline, live-e2e/QEMU/Termux skeletons, conformance scripts and testdata
   skeletons (remediation of AUDIT-02 S-9 and AUDIT-03 P0/P1 findings). No live
-  proof; identity mismatch recorded for the owner.
+  proof; an identity mismatch was recorded at the time, later verified stale and
+  corrected on 2026-11-24 (see §4).

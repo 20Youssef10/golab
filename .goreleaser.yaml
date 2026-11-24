@@ -64,9 +64,9 @@ checksum:
   algorithm: sha256
 
 release:
-  # Keep in sync with the up-to-date repo identity. NOTE: internal/update pins
-  # Owner/Repo to 20Youssef10/golab by default; see docs/CONFORMANCE.md for the
-  # identity mismatch that must be resolved by the owner / updater agent.
+  # Keep in sync with the up-to-date repo identity. internal/app pins
+  # Owner/Repo to 20Youssef10/golab by default, which matches this repository;
+  # update that pin and the verifier SAN if the repo is transferred/renamed.
   github:
     owner: 20Youssef10
     name: golab

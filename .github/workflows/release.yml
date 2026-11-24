@@ -20,9 +20,18 @@ concurrency:
 jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
+    # Environment gate for the keyless-signing path. GitHub auto-creates the
+    # `release` environment on first use, but it gates nothing until a repo
+    # admin adds required reviewers there. Splitting signing into a separate
+    # job with only `id-token: write` is deferred until a live signed release
+    # can prove the artifact hand-off (see docs/CONFORMANCE.md §4).
+    environment: release
     runs-on: ubuntu-latest
     env:
       COSIGN_VERSION: v2.6.5
+      # Exact stable version resolved by the old floating `~> v2` constraint
+      # (goreleaser/goreleaser v2.20.3, published 2026-11-20). No floating refs.
+      GORELEASER_VERSION: v2.20.3
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -53,20 +62,20 @@ jobs:
       - name: Validate GoReleaser config
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: '~> v2'
+          version: ${{ env.GORELEASER_VERSION }}
           args: check
 
       - name: Dry-run build (snapshot, no publish)
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: '~> v2'
+          version: ${{ env.GORELEASER_VERSION }}
           args: release --snapshot --clean
 
       # --- Real release (archives + checksums.txt) --------------------------
       - name: Release archives and checksums
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: '~> v2'
+          version: ${{ env.GORELEASER_VERSION }}
           args: release --clean
         env:
           # GoReleaser v2 requires GITHUB_TOKEN for GitHub publishing.
@@ -76,12 +85,22 @@ jobs:
       # --- Signed artifacts + signed CycloneDX SBOM -------------------------
       # The pinned sbom-action version has no output-file input and its artifact
       # upload is unreliable; install syft and write the file ourselves.
+      # Its default syft v0.42.2 cannot parse `go 1.27.4` in go.mod and emits a
+      # zero-component SBOM, so pin a release that catalogs Go modules.
       - name: Install syft
         uses: anchore/sbom-action/download-syft@f6c3d0fe42c3cf876e3462574e4c9416b5e0f07a # v0.9.0
+        with:
+          syft-version: v1.57.2
         id: syft
 
       - name: Generate CycloneDX SBOM
-        run: ${{ steps.syft.outputs.cmd }} scan . -o cyclonedx-json=dist/sbom.cdx.json
+        # Root-command form works across syft versions; v0.42.2 has no `scan`
+        # subcommand ("accepts at most 1 arg(s), received 2"). Pass the action
+        # output via env (never interpolate untrusted text into `run:`).
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |-
+          "$SYFT" . -o cyclonedx-json=dist/sbom.cdx.json
 
       - name: Sign archives and attest the SBOM
         env:
@@ -107,7 +126,9 @@ jobs:
               --bundle "dist/${base}.sbom.sigstore.json" "$artifact"
           done
           # Upload every bundle to the release GoReleaser just created.
-          gh release upload "$TAG" dist/*.sigstore.json --clobber
+          # No --clobber: published signatures/attestations are immutable, so a
+          # re-run of this tag must fail here rather than overwrite them.
+          gh release upload "$TAG" dist/*.sigstore.json
 
       # --- Post-release proof ----------------------------------------------
       - name: Verify published asset classes and signing identity
@@ -116,6 +137,15 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # Prove the keyless material is valid under the *actual* repo identity.
+          # internal/update pins 20Youssef10/golab, which matches this repository;
+          # a repo transfer/rename requires updating that pin in internal/app.
+          # Assert the pin here so a rename/transfer cannot silently publish
+          # signed releases the updater would reject as un-installable.
+          test "$GITHUB_REPOSITORY" = "20Youssef10/golab" || {
+            echo "FAIL: repository is '$GITHUB_REPOSITORY', expected '20Youssef10/golab'" >&2
+            exit 1
+          }
           gh release view "$TAG" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
           for pattern in '^checksums\.txt$' '^golab_.*\.tar\.gz$' \
                          '^golab_.*\.tar\.gz\.sigstore\.json$' \
@@ -124,20 +154,46 @@ jobs:
               echo "FAIL: no release asset matches $pattern" >&2; exit 1;
             }
           done
-          # Prove the keyless material is valid under the *actual* repo identity.
-          # NOTE: internal/update pins 20Youssef10/golab by default. That is a
-          # different identity; see docs/CONFORMANCE.md (owner action required).
+
+          # Every checksum line must match the exact bytes uploaded. GoReleaser
+          # writes checksums.txt into dist before signing, and signing only adds
+          # sidecar bundles - it never rewrites the archives themselves.
+          ( cd dist && test -s checksums.txt && sha256sum -c checksums.txt )
+
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          issuer="https://token.actions.githubusercontent.com"
           shopt -s nullglob
+
+          # (a) Keyless signature bundle for EVERY archive, not just one sample.
           archive_bundles=(dist/golab_*.tar.gz.sigstore.json)
           if (( ${#archive_bundles[@]} == 0 )); then
             echo "FAIL: no archive signature bundles" >&2; exit 1
           fi
-          sample="${archive_bundles[0]}"
-          artifact="${sample%.sigstore.json}"
-          cosign verify-blob \
-            --certificate-identity "$identity" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --bundle "$sample" "$artifact"
-          echo "verified keyless signature for $(basename "$artifact")"
+          for bundle in "${archive_bundles[@]}"; do
+            artifact="${bundle%.sigstore.json}"
+            cosign verify-blob \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$issuer" \
+              --bundle "$bundle" "$artifact"
+            echo "verified keyless signature for $(basename "$artifact")"
+          done
+
+          # (b) CycloneDX attestation for EVERY SBOM bundle, bound to its exact
+          # archive. cosign v2.6.5: verify-attestation verifies <IMAGE> and has
+          # no --bundle flag; bundles made by attest-blob are verified with
+          # verify-blob-attestation. --check-claims defaults to true, so the
+          # in-toto subject digest is checked against the archive bytes.
+          sbom_bundles=(dist/golab_*.sbom.sigstore.json)
+          if (( ${#sbom_bundles[@]} == 0 )); then
+            echo "FAIL: no SBOM attestation bundles" >&2; exit 1
+          fi
+          for bundle in "${sbom_bundles[@]}"; do
+            artifact="${bundle%.sbom.sigstore.json}"
+            cosign verify-blob-attestation \
+              --type cyclonedx \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$issuer" \
+              --bundle "$bundle" "$artifact"
+            echo "verified cyclonedx SBOM attestation for $(basename "$artifact")"
+          done
           echo "release assets by class:"; cat /tmp/assets.txt

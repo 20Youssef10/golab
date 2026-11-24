@@ -208,6 +208,18 @@ func (d *Deps) History(name string) (*history.Logger, error) {
 	return history.NewAt(d.HistoryDir, name)
 }
 
+// updateAssetPattern returns the anchored, platform-specific regexp that
+// selects this platform's release archive. The version is deliberately NOT
+// embedded: the release being scanned is NEWER than the running binary, so its
+// archive name carries a different version. Embedding version.Number here made
+// every newer release invisible (ErrNoRelease) — version gating belongs to
+// update.IsNewer via Config.CurrentVersion instead. Verification bundles are
+// excluded by update.Check's !isBundleAsset guard, and the trailing
+// `_<os>_<arch>.tar.gz` anchor keeps selection platform-specific.
+func updateAssetPattern(osName, arch string) string {
+	return `^golab_v?\d+\.\d+\.\d+.*_` + regexp.QuoteMeta(osName) + `_` + regexp.QuoteMeta(arch) + `\.tar\.gz$`
+}
+
 // UpdateConfig returns the pinned, throttle-aware updater config.
 func (d *Deps) UpdateConfig(ctx context.Context) (update.Config, error) {
 	settings, err := d.SettingsStore.Load()
@@ -215,11 +227,9 @@ func (d *Deps) UpdateConfig(ctx context.Context) (update.Config, error) {
 		return update.Config{}, err
 	}
 	return update.Config{
-		Owner: d.Config.Owner,
-		Repo:  d.Config.Repo,
-		// Anchored regex: a bare `*` would quantify the preceding underscore
-		// and never match real GoReleaser asset names.
-		AssetPattern:   "^golab_" + regexp.QuoteMeta(version.Number) + "_" + platformOS() + "_" + platformArch() + `\.tar\.gz$`,
+		Owner:          d.Config.Owner,
+		Repo:           d.Config.Repo,
+		AssetPattern:   updateAssetPattern(platformOS(), platformArch()),
 		CurrentVersion: version.Number,
 		LastCheck:      settings.LastCheck,
 		Enabled:        settings.EnableUpdateCheck,

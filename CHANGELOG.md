@@ -10,6 +10,35 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Self-update: `UpdateConfig` no longer embeds the running version in the
+  release asset pattern, so a newer GitHub release can actually be offered.
+  Version gating stays with `IsNewer`; checksum, signature and SBOM checks are
+  unchanged. Verified by `TestUpdateConfigOffersNewerRelease` (red before, green
+  after) plus `go vet ./...` and `go test -count=1 ./...`; a live signed-tag
+  `colab update` is still human-pending.
+- Release workflow: pin syft to v1.57.2 and drop the unsupported `scan`
+  subcommand so the signed CycloneDX SBOM contains the Go dependencies
+  (v0.42.2 could not parse `go 1.27.4` and produced an empty SBOM).
+- CI: force `bash` for the matrix `go test` step so `TEST_FLAGS` expands on
+  Windows runners (PowerShell silently dropped `-race`/`-count=1`).
+- Docs: correct stale identity and per-platform bundle claims; the updater pin
+  matches this repository and bundle selection is implemented.
+- Release workflow: the post-release proof now verifies every archive signature
+  and every CycloneDX SBOM attestation against its own archive, and checks every
+  `checksums.txt` entry (it previously sampled one signature bundle and checked
+  neither SBOMs nor checksums).
+- Release workflow: pin GoReleaser to v2.20.3 instead of floating `~> v2`, assert
+  `GITHUB_REPOSITORY` matches the updater's `20Youssef10/golab` pin, and gate the
+  release job behind the `release` environment (admins must add required
+  reviewers for that gate to take effect).
+- Release workflow: pass the syft command through an env var instead of
+  interpolating it into `run:`, and drop `--clobber` from `gh release upload` so
+  re-runs cannot overwrite published signatures.
+- CI: extend `check-redaction.sh` to scan YAML/shell/JSON as well as Go for
+  obvious credential literals.
+
 ## [0.1.5] - 2026-11-23
 
 ### Fixed
