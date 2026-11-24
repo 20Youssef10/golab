@@ -111,11 +111,15 @@ Tier-1 archive:
   updater pin `20Youssef10/golab` so a rename/transfer cannot silently publish
   un-installable signed releases. Published signature assets are immutable:
   `gh release upload` no longer passes `--clobber`.
-- No signed release has been cut from this pipeline yet. `goreleaser check`, a
-  snapshot dry-run and a real signed tag are **human/CI external steps**;
-  end-to-end proof that `colab update --install` accepts a signed release is
-  still pending. The new proof-step commands have only been shell-syntax and
-  local stub checked, not run against real cosign bundling material.
+- **v0.1.6 was cut from this pipeline and verified (2026-11-24).** Release run
+  `45399682610` is green: `goreleaser check`, snapshot dry-run, signed tag,
+  syft SBOM, per-artifact cosign verification and the checksum gate all ran
+  against real material. The release carries 13 archives, 13 signature bundles,
+  13 CycloneDX attestation bundles and `checksums.txt`. A sampled attestation
+  is CycloneDX 1.7 with 1,627 components (including the Go modules) and is
+  bound to its exact archive. The read-only `golab update` check against the
+  published release succeeds. Only `colab update --install` of a newer release
+  remains human-only.
 
 ## 5. WSL / Termux URL-launcher expectations (docs/04 §2)
 
@@ -137,8 +141,9 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
    `bash scripts/golden.sh --scenario wire`.
 3. Chunked upload of >75 MiB with SHA-256 comparison (S6 / P0-3, HIGH).
 4. One CPU `new`/`run`, then `colab sessions` shows nothing (live-e2e manual run).
-5. Cut a signed tag and verify `colab update --install` accepts it end-to-end
-   (§4: identity pin and per-platform bundle selection are already in place).
+5. Verify `colab update --install` accepts a newer signed release end-to-end
+   (v0.1.6 was signed and its proof passed; the read-only check succeeded, but
+   installing an update still needs a newer tag and a human-pending run).
 6. Wire goleak `TestMain` + dependency (another agent), then drop `ADVISORY=1`
    from `ci.yml` and raise `COVERAGE_MIN` to 80.
 7. Termux device matrix, Windows console/ACL/`.old` cleanup, macOS keychain
@@ -146,10 +151,11 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
-- 2026-11-24 — v0.1.6 release prepared: CLI version bumped to match the
+- 2026-11-24 — v0.1.6 tagged and published: CLI version bumped to match the
   changelog, with `TestNumberMatchesLatestChangelogRelease` guarding against a
-  future tag carrying a stale binary version. Live signed-tag verification
-  pending.
+  future tag carrying a stale binary version. Signed release run
+  `45399682610` is green; verification evidence is recorded in §4 (completed
+  later the same day).
 - 2026-11-24 — Self-update could never offer a newer release: `app.UpdateConfig`
   embedded the running version in `AssetPattern`, so a v0.1.4 binary scanning a
   v0.1.5 tag looked for a `golab_0.1.4_…` asset that does not exist and failed
@@ -157,19 +163,22 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
   platform-specific; `CurrentVersion` (and therefore `IsNewer`) remains the
   no-downgrade guard, and signature/SBOM/checksum verification is untouched.
   `TestUpdateConfigOffersNewerRelease` fails on the old pattern and passes on
-  the new one; `go vet ./...` and `go test -count=1 ./...` pass locally. Live
-  `colab update` against a real signed tag is still pending (human-only).
+  the new one; `go vet ./...` and `go test -count=1 ./...` pass locally. The
+  read-only check was later exercised against v0.1.6 (see §4 and the verified
+  entry above); `--install` of a newer release remains human-only.
 - 2026-11-24 — Release proof hardened: every archive signature, every CycloneDX
   SBOM attestation and every checksum line is now verified; GoReleaser pinned to
   v2.20.3; repository-identity and `release`-environment gates added; syft output
   moved to an env var and signature uploads made immutable. `check-redaction.sh`
   now also scans YAML/shell/JSON. Shell syntax, PyYAML parse and local stub runs
-  pass; no live signed release was cut, so cosign verification is unproven here.
+  passed first; the real cosign proof then passed on v0.1.6 (see verified entry
+  above and §4).
 - 2026-11-24 — Release SBOM step repaired: `download-syft` now pins syft
   v1.57.2 and the scan uses the root-command form (v0.42.2 had no `scan`
   subcommand and could not parse `go 1.27.4`). Verified locally that the
   CycloneDX JSON contains the Go module dependencies (v0.42.2 produced 0
-  components). Release not cut; end-to-end signed-tag verification is pending.
+  components). The signed v0.1.6 release later proved this end-to-end (see
+  verified entry above and §4).
 - 2026-11-23 — Initial ledger created. Added CI truthfulness gates, release
   pipeline, live-e2e/QEMU/Termux skeletons, conformance scripts and testdata
   skeletons (remediation of AUDIT-02 S-9 and AUDIT-03 P0/P1 findings). No live

@@ -31,6 +31,10 @@ on-disk schema or persisted token format (per AGENTS.md).
   and every CycloneDX SBOM attestation against its own archive, and checks every
   `checksums.txt` entry (it previously sampled one signature bundle and checked
   neither SBOMs nor checksums).
+- Release: v0.1.6 signed release verified (workflow run `45399682610` green) —
+  13 archives, 13 signature bundles, 13 CycloneDX attestation bundles and
+  `checksums.txt`; a sampled attestation contains 1,627 components including the
+  Go modules. The read-only `golab update` check succeeds.
 - Release workflow: pin GoReleaser to v2.20.3 instead of floating `~> v2`, assert
   `GITHUB_REPOSITORY` matches the updater's `20Youssef10/golab` pin, and gate the
   release job behind the `release` environment (admins must add required
