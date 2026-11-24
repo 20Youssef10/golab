@@ -54,8 +54,8 @@ on-disk schema or persisted token format (per AGENTS.md).
   `https://cyclonedx.org/bom`, which the updater rejects. cosign copies a URI
   verbatim, and this URI is already accepted by the unmodified verifier in
   shipped v0.1.6/v0.1.7 binaries, so either can install the next release; no
-  verifier change was needed. Published assets are immutable, so a **new tag**
-  is required and no live install proof exists yet.
+  verifier change was needed. Published assets are immutable, so a new tag was
+  required; v0.1.9 supplied the live proof recorded below.
 - Docs: record the v0.1.7 SBOM predicate failure and the exact predicate-URI
   requirement in `docs/CONFORMANCE.md` §4/§6, `docs/FAQ.md` and
   `docs/RELEASING.md`.
@@ -64,8 +64,17 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 PyYAML parse and `bash -n` of the release workflow; local synthetic DSSE-bundle
 check of the jq predicate guard (positive and wrong-predicate negative);
-`bash scripts/check-redaction.sh` and `bash scripts/check-paths.sh`. No live
-signed release or `golab update --install` proof was performed.
+`bash scripts/check-redaction.sh` and `bash scripts/check-paths.sh`.
+
+**Live proof (2026-11-24):** v0.1.9 release run `45446096192` is green with all
+guards (13 archives, 13 signatures, 13 SBOM attestations, checksums). A
+v0.1.8-labelled binary ran `golab update --install --yes` against the real
+release: it discovered v0.1.9, verified signature + SBOM, extracted the binary
+from the signed archive and installed an executable ELF reporting
+`golab 0.1.9`; `golab doctor` also runs. The global `/usr/local/bin/golab` was
+rebuilt from this commit and reports 0.1.9. A temporary `/etc/hosts` pin for
+`github.com` was needed on this host because its Termux resolver selected an
+unreachable address; the file was restored immediately afterward.
 
 ## [0.1.7] - 2026-11-24
 

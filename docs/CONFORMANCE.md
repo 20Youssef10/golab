@@ -156,8 +156,8 @@ Tier-1 archive:
   uses the same URI, and a `jq` guard asserts the emitted predicateType. The
   verifier is deliberately unchanged: this exact URI is chosen because it is
   already accepted by the unmodified v0.1.6/v0.1.7 binaries, so either can
-  install the next release. Published assets are immutable, so a **new tag** is
-  required; no live install proof exists yet.
+  install the next release. Published assets are immutable, so a **new tag** was
+  required; v0.1.9 later supplied that proof (see the verified entry below).
 
 - **v0.1.8 was published with correct artifacts but its workflow FAILED at the
   post-release proof guard (2026-11-24).** Release run `45428451505` stopped at
@@ -176,8 +176,23 @@ Tier-1 archive:
   `(.dsseEnvelope.payload // .content.dsseEnvelope.payload) | @base64d |
   fromjson | .predicateType == $pt`, keeping `--arg pt`, the assertion and the
   loud FAIL message unchanged. The run did not go green and published assets
-  are immutable, so a **new tag** is required; no green v0.1.8 release is
+  are immutable, so a **new tag** was required; no green v0.1.8 release is
   claimed.
+
+- **v0.1.9 verified end-to-end (2026-11-24).** Release run `45446096192` is
+  green with all guards: 13 archives, 13 signature bundles, 13 signed SBOM
+  attestations and `checksums.txt`. `internal/update/install.go` now extracts
+  the single `golab` binary from the *verified* `.tar.gz` before replacing the
+  executable (path/type/size checks; signature remains bound to archive bytes).
+  A v0.1.8-labelled binary ran `golab update --install --yes` against the real
+  v0.1.9 release: it discovered the newer version, verified signature + SBOM,
+  installed, and the resulting file is a statically linked ELF (`7f 45 4c 46`)
+  that executes as `golab 0.1.9`; `golab doctor` also runs. No fixtures or fake
+  servers were used for this check. The host's Termux resolver picked an
+  unreachable GitHub address during two attempts; pinning `github.com` to a
+  reachable address in `/etc/hosts` (restored afterward) was required — an
+  environment workaround, not a product defect. The globally installed
+  `/usr/local/bin/golab` was rebuilt from this commit and reports 0.1.9.
 
 ## 5. WSL / Termux URL-launcher expectations (docs/04 §2)
 
@@ -199,21 +214,14 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
    `bash scripts/golden.sh --scenario wire`.
 3. Chunked upload of >75 MiB with SHA-256 comparison (S6 / P0-3, HIGH).
 4. One CPU `new`/`run`, then `colab sessions` shows nothing (live-e2e manual run).
-5. Verify `golab update --install` accepts a newer signed release end-to-end.
-   **v0.1.6 and v0.1.7 both FAILED this check** (v0.1.6: legacy cosign bundle
-   format; v0.1.7: SBOM predicateType `https://cyclonedx.org/bom`; see §4), even
-   though both cosign proofs passed and read-only discovery offered the upgrade.
-   The producer fixes (`--new-bundle-format` + format guard, and the exact
-   `--type https://cyclonedx.org/schema/bom-1.5` URI + predicate guard) are in
-   place, but a **new tag** is required to prove them: both releases' assets are
-   immutable and cannot be repaired in place. **v0.1.8 never reached this
-   check**: its workflow failed at the predicate guard (run `45428451505`), so
-   it is not a green release. A separate critical install-path defect (the
-   updater wrote the downloaded `.tar.gz` bytes as the executable) was found
-   alongside this guard bug and is being fixed by another agent; do not claim
-   a working self-update until that fix lands and a human completes this check
-   on a new tag. This item is non-waivable for a release that claims a working
-   updater.
+5. Verify `golab update --install` accepts a newer signed release end-to-end —
+   **CLOSED 2026-11-24 by v0.1.9** (release run `45446096192` green; see §4).
+   v0.1.6 and v0.1.7 both failed this check (legacy bundle format, then wrong
+   SBOM predicate URI), and v0.1.8 never reached it (proof-guard bug); those
+   failures are recorded in §4. The v0.1.9 proof used a v0.1.8-labelled binary
+   against the real release and confirmed the installed file executes as
+   `golab 0.1.9`. A future release must rerun this check; it remains
+   non-waivable.
 6. Wire goleak `TestMain` + dependency (another agent), then drop `ADVISORY=1`
    from `ci.yml` and raise `COVERAGE_MIN` to 80.
 7. Termux device matrix, Windows console/ACL/`.old` cleanup, macOS keychain
@@ -221,11 +229,11 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
-- 2026-11-24 — v0.1.9 prepared: CLI version bumped to match the changelog
-  (guarded by `TestNumberMatchesLatestChangelogRelease`) with the self-update
-  archive-extraction and proof-guard fixes. A signed tag and a real
-  `colab update --install` proof are pending; earlier live defects are recorded
-  below.
+- 2026-11-24 — v0.1.9 tagged and **verified end-to-end**: CLI version bumped to
+  match the changelog (guarded by `TestNumberMatchesLatestChangelogRelease`);
+  release run `45446096192` green; a real v0.1.8 → v0.1.9 signed self-update
+  installed an executable ELF that reports `golab 0.1.9` and runs `doctor`.
+  Earlier live defects and their fixes are recorded below.
 - 2026-11-24 — **v0.1.8's release workflow FAILED (run `45428451505`)** at the
   new post-release CycloneDX `predicateType` guard, with
   `jq: … Malformed BOM`, even though the published attestation was correct.
