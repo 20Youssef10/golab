@@ -10,7 +10,7 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
-<!-- Next release is MINOR (0.2.0): new CLI surface (notebook run, --verify, reconnect) plus bug fixes. -->
+## [0.2.0] - 2026-11-24
 
 ### Added
 

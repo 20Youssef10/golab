@@ -229,6 +229,10 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — v0.2.0 release prepared: CLI version bumped to match the
+  changelog (guarded by `TestNumberMatchesLatestChangelogRelease`); MINOR bump
+  for the new CLI surface from both upstream batches. Signed tag, release
+  workflow and live e2e proof are pending; earlier batch records are below.
 - 2026-11-24 — Second upstream batch implemented: `exec --json` (PR #237),
   local-only `--secret`/`--env-file` bridge (issue #157), `--scopes full|minimal`
   with forced re-consent (issue #71), `drivemount --wait-for-consent` (issue #258),
