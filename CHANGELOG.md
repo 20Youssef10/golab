@@ -10,6 +10,31 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Release workflow: `cosign attest-blob` now uses the exact predicate URI
+  `--type https://cyclonedx.org/schema/bom-1.5` instead of the `cyclonedx`
+  alias, and the post-release proof verifies with that same URI plus a `jq`
+  guard on the DSSE payload's `.predicateType`. v0.1.7 was signed (release run
+  `45414858634` green, correct v0.3 bundles and passing cosign signatures), but
+  `colab update --install` from a v0.1.6-labelled binary failed with `SBOM
+  attestation has an unsupported predicate type`: the alias emits
+  `https://cyclonedx.org/bom`, which the updater rejects. cosign copies a URI
+  verbatim, and this URI is already accepted by the unmodified verifier in
+  shipped v0.1.6/v0.1.7 binaries, so either can install the next release; no
+  verifier change was needed. Published assets are immutable, so a **new tag**
+  is required and no live install proof exists yet.
+- Docs: record the v0.1.7 SBOM predicate failure and the exact predicate-URI
+  requirement in `docs/CONFORMANCE.md` §4/§6, `docs/FAQ.md` and
+  `docs/RELEASING.md`.
+
+### Verification
+
+PyYAML parse and `bash -n` of the release workflow; local synthetic DSSE-bundle
+check of the jq predicate guard (positive and wrong-predicate negative);
+`bash scripts/check-redaction.sh` and `bash scripts/check-paths.sh`. No live
+signed release or `golab update --install` proof was performed.
+
 ## [0.1.7] - 2026-11-24
 
 ### Fixed
@@ -203,7 +228,9 @@ remote-path scans. **Live Colab e2e is still human-gated** per AGENTS.md.
 
 - Audit baseline: initial Go port, audit reports AUDIT-00…04, canonical module path.
 
-[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/20Youssef10/golab/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/20Youssef10/golab/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/20Youssef10/golab/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/20Youssef10/golab/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/20Youssef10/golab/compare/v0.1.2...v0.1.3

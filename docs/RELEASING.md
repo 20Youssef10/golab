@@ -22,7 +22,8 @@
       `HTTP_PROXY` probe. Record the waiver or evidence in the release PR.
       **Exception:** the real updater install test in §5 item 3 is
       **non-waivable** — a release that cannot be installed by its own updater
-      is not releasable (see the v0.1.6 legacy-bundle failure in
+      is not releasable (see the v0.1.6 legacy-bundle failure and the v0.1.7
+      SBOM predicate-type failure in
       [`CONFORMANCE.md` §4](CONFORMANCE.md#4-release-pipeline-and-updater-identity)).
 - [ ] Live probes never leave billable VMs allocated; `golab sessions` is empty.
 - [ ] Upstream compatibility target in `internal/version` is still accurate
@@ -65,15 +66,19 @@ part of the updater's pinned signing identity (§4). The job:
 3. runs `goreleaser release --clean` to publish archives + `checksums.txt`;
 4. generates a CycloneDX SBOM (`dist/sbom.cdx.json`) and, per archive, publishes
    a cosign keyless signature bundle and a signed SBOM attestation (both with
-   cosign v2.6.5's `--new-bundle-format`), then uploads all bundles with
+   cosign v2.6.5's `--new-bundle-format`; the attestation uses the exact predicate
+   URI `--type https://cyclonedx.org/schema/bom-1.5`, never the `cyclonedx`
+   alias), then uploads all bundles with
    `gh release upload` (no `--clobber`: published signatures are immutable);
 5. verifies every published asset class against the real repo identity — all
    checksums (`sha256sum -c`), every archive bundle with `cosign verify-blob`,
-   every SBOM bundle with `cosign verify-blob-attestation --type cyclonedx`,
-   and a `jq` format guard asserting each bundle is a v0.3 sigstore bundle
-   (`.mediaType` contains `v0.3`, tlog `inclusionProof` present). The format
-   guard is essential: cosign's verifiers accept legacy bundles that
-   `golab update --install` rejects.
+   every SBOM bundle with `cosign verify-blob-attestation --type https://cyclonedx.org/schema/bom-1.5`,
+   a `jq` format guard asserting each bundle is a v0.3 sigstore bundle
+   (`.mediaType` contains `v0.3`, tlog `inclusionProof` present), and a `jq`
+   guard decoding each SBOM bundle's DSSE payload and requiring `.predicateType`
+   to equal that exact URI. Both guards are essential: cosign's verifiers accept
+   legacy bundles and both SBOM predicate forms, while `golab update --install`
+   rejects the wrong ones.
 
 Monitor the workflow to completion; if any step fails, fix the cause and create a
 **new** patch version — never re-tag or force-update a published tag.
@@ -88,7 +93,7 @@ used for **all** targets, including Windows):
 | `checksums.txt` | SHA-256 digests of every archive (GoReleaser `checksum` config) |
 | `golab_<ver>_<os>_<arch>.tar.gz` | platform archive (CGO-free, `-trimpath`) |
 | `<archive>.sigstore.json` | cosign `sign-blob` keyless bundle for the archive |
-| `<archive>.sbom.sigstore.json` | cosign `attest-blob` DSSE bundle whose predicate is a signed CycloneDX/SPDX SBOM |
+| `<archive>.sbom.sigstore.json` | cosign `attest-blob` DSSE bundle whose predicate is a signed CycloneDX SBOM with in-toto `predicateType` exactly `https://cyclonedx.org/schema/bom-1.5` |
 
 The updater (`internal/update`) requires **all three classes**. A missing or
 invalid SBOM bundle fails with `ErrMissingSBOM`; missing/invalid signature or
@@ -98,7 +103,14 @@ classes must be **sigstore v0.3 protobuf bundles** — cosign v2.6.5 emits these
 only with `--new-bundle-format`. Legacy bundles (`base64Signature`, `cert`,
 `rekorBundle`) pass `cosign verify-*` but are rejected by
 `golab update --install`; the §2 step 5 format guard fails the job if one is
-produced.
+produced. The SBOM attestation's in-toto `predicateType` must likewise be the
+exact URI `https://cyclonedx.org/schema/bom-1.5`: the `cyclonedx` alias makes
+cosign emit `https://cyclonedx.org/bom`, which passes cosign verification but
+makes `golab update --install` fail with "unsupported predicate type". The
+producer uses the URI (cosign copies it verbatim) rather than the alias, and the
+§2 step 5 predicate guard fails the job on any other value. This is chosen so the
+unmodified verifier in already-shipped v0.1.6/v0.1.7 binaries accepts the new
+release.
 
 ## 4. Updater identity pin
 
@@ -134,8 +146,10 @@ signed under any other identity are rejected by `golab update --install`.
 3. **Real updater test (REQUIRED — NON-WAIVABLE)** — on a **test host** with the
    *previous* version installed, run `golab update --install`. A cosign-green
    workflow is **not** sufficient: v0.1.6 passed every cosign check but its
-   legacy bundles made this test fail, so a format failure here blocks the
-   release and requires a **new tag** (assets are immutable).
+   legacy bundles made this test fail, and v0.1.7 passed too but its SBOM
+   predicateType (`https://cyclonedx.org/bom`, from the `cyclonedx` alias) made
+   it fail with "unsupported predicate type". Either failure blocks the release
+   and requires a **new tag** (assets are immutable).
    Confirm it fetches the new release, validates the checksum, signature and
    signed SBOM, and installs the new binary. Then:
    - `golab version` reports the new number and the intended upstream target;
@@ -164,10 +178,13 @@ signed under any other identity are rejected by `golab update --install`.
   blocked from auto-updating to it, raise the updater's minimum accepted version
   or add a version denylist in `internal/update` — as a code change with a new
   patch release, never as a silent server-side switch.
-- **If the failure is in signing/SBOM** (wrong identity, missing bundle): correct
-  `.github/workflows/release.yml` / `.goreleaser.yaml`, verify with a fresh
-  `goreleaser check` + `goreleaser release --snapshot --clean`, and publish the
-  fix as a new version; do not re-sign or overwrite an existing release's assets
-  in place.
+- **If the failure is in signing/SBOM** (wrong identity, missing bundle, wrong
+  bundle format, or an SBOM `predicateType` the updater rejects): correct
+  `.github/workflows/release.yml` / `.goreleaser.yaml` — for the predicate case,
+  set `--type https://cyclonedx.org/schema/bom-1.5` on both `attest-blob` and
+  `verify-blob-attestation` rather than changing the verifier, so older shipped
+  binaries can install the fix — verify with a fresh `goreleaser check` +
+  `goreleaser release --snapshot --clean`, and publish the fix as a new version;
+  do not re-sign or overwrite an existing release's assets in place.
 - After any rollback, update `docs/REMEDIATION.md` / `docs/CONFORMANCE.md` with
   what failed and close the loop before the next release.

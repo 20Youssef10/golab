@@ -73,7 +73,7 @@ Tier-1 archive:
 | Archive | `golab_0.1.0-alpha.1_linux_amd64.tar.gz` | `AssetPattern` = anchored, version-agnostic `^golab_v?\d+\.\d+\.\d+.*_<GOOS>_<GOARCH>\.tar\.gz$` |
 | Checksums | `checksums.txt` | `isChecksumAsset` |
 | Signature | `golab_…_linux_amd64.tar.gz.sigstore.json` | `isSignatureAsset` ("sigstore", not "sbom") |
-| Signed SBOM | `golab_….sbom.sigstore.json` | `isSBOMAsset` ("sbom" + "sigstore"); predicate `--type cyclonedx` |
+| Signed SBOM | `golab_….sbom.sigstore.json` | `isSBOMAsset` ("sbom" + "sigstore"); predicate `--type https://cyclonedx.org/schema/bom-1.5` (exact URI, not the `cyclonedx` alias) |
 
 - **Identity pin matches this repository:** `internal/app/app.go` defaults
   `Owner=20Youssef10`, `Repo=golab`, and `internal/update/verify.go` builds the
@@ -95,15 +95,19 @@ Tier-1 archive:
 - **Post-release proof now covers every artifact class.** The proof step runs
   `sha256sum -c` over all of `checksums.txt`, `cosign verify-blob` for every
   `*.tar.gz.sigstore.json` bundle and `cosign verify-blob-attestation --type
-  cyclonedx` for every SBOM bundle, each against its exact archive with the
-  pinned identity/issuer; any failure fails the job. cosign v2.6.5's
-  `verify-attestation` accepts only an OCI `<IMAGE>` and exposes no `--bundle`
-  flag, so blob attestations made by `attest-blob` must be verified with
-  `verify-blob-attestation` (whose `--check-claims` defaults to true and checks
-  the in-toto subject digest against the archive). A format guard now also
-  asserts every bundle is v0.3 protobuf (`.mediaType` contains `v0.3` and
-  `.verificationMaterial.tlogEntries[0].inclusionProof` exists), because the
-  cosign commands accept legacy bundles that the updater rejects.
+  https://cyclonedx.org/schema/bom-1.5` for every SBOM bundle, each against its
+  exact archive with the pinned identity/issuer; any failure fails the job.
+  cosign v2.6.5's `verify-attestation` accepts only an OCI `<IMAGE>` and exposes
+  no `--bundle` flag, so blob attestations made by `attest-blob` must be
+  verified with `verify-blob-attestation` (whose `--check-claims` defaults to
+  true and checks the in-toto subject digest against the archive). A format
+  guard also asserts every bundle is v0.3 protobuf (`.mediaType` contains
+  `v0.3` and `.verificationMaterial.tlogEntries[0].inclusionProof` exists),
+  because the cosign commands accept legacy bundles that the updater rejects.
+  A `jq` guard decodes each SBOM bundle's v0.3 DSSE payload
+  (`.content.dsseEnvelope.payload | @base64d | fromjson`) and requires
+  `.predicateType` to equal the exact URI above, because cosign's verifier also
+  accepts the `cyclonedx` alias whose emitted predicate the updater rejects.
 - **Release job is gated by the `release` GitHub environment.** GitHub
   auto-creates it on first use, but repo admins must add required reviewers for
   it to actually gate publishing; until then it is bookkeeping only. Reducing
@@ -135,6 +139,24 @@ Tier-1 archive:
   so v0.1.6 cannot be repaired in place: a **new tag** is required to prove the
   updater end-to-end (§6 item 5). No `verify.go` change was needed or made.
 
+- **v0.1.7 was signed but STILL could not be installed (2026-11-24).** Release
+  run `45414858634` is green: the v0.3 bundle fix worked (every `.sigstore.json`
+  has mediaType `application/vnd.dev.sigstore.bundle.v0.3+json` plus a tlog
+  `inclusionProof`) and cosign signature verification passed. `colab update
+  --install`, tried from a v0.1.6-labelled binary, then failed with `SBOM
+  attestation has an unsupported predicate type: invalid signature`. Root cause:
+  `cosign attest-blob --type cyclonedx` (v2.6.5) emits in-toto predicateType
+  `https://cyclonedx.org/bom`, while `internal/update/sbom.go:18-28` accepts only
+  `https://cyclonedx.org/schema/bom` or the `https://cyclonedx.org/schema/bom-*`
+  family. **Fix (producer only):** `attest-blob` now uses
+  `--type https://cyclonedx.org/schema/bom-1.5` (cosign copies a URI verbatim
+  into the DSSE statement), the post-release `cosign verify-blob-attestation`
+  uses the same URI, and a `jq` guard asserts the emitted predicateType. The
+  verifier is deliberately unchanged: this exact URI is chosen because it is
+  already accepted by the unmodified v0.1.6/v0.1.7 binaries, so either can
+  install the next release. Published assets are immutable, so a **new tag** is
+  required; no live install proof exists yet.
+
 ## 5. WSL / Termux URL-launcher expectations (docs/04 §2)
 
 **Expected:** on WSL open with `wslview`, then `explorer.exe`, then print the
@@ -156,12 +178,14 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 3. Chunked upload of >75 MiB with SHA-256 comparison (S6 / P0-3, HIGH).
 4. One CPU `new`/`run`, then `colab sessions` shows nothing (live-e2e manual run).
 5. Verify `golab update --install` accepts a newer signed release end-to-end.
-   **v0.1.6 FAILED this check** (legacy cosign bundle format; see §4) even though
-   its cosign proof passed and read-only discovery offered the upgrade. The
-   producer fix (`--new-bundle-format` + jq format guard) is in place, but a
-   **new tag** is required to prove it: v0.1.6's assets are immutable and cannot
-   be repaired in place. This item is non-waivable for a release that claims a
-   working updater.
+   **v0.1.6 and v0.1.7 both FAILED this check** (v0.1.6: legacy cosign bundle
+   format; v0.1.7: SBOM predicateType `https://cyclonedx.org/bom`; see §4), even
+   though both cosign proofs passed and read-only discovery offered the upgrade.
+   The producer fixes (`--new-bundle-format` + format guard, and the exact
+   `--type https://cyclonedx.org/schema/bom-1.5` URI + predicate guard) are in
+   place, but a **new tag** is required to prove them: both releases' assets are
+   immutable and cannot be repaired in place. This item is non-waivable for a
+   release that claims a working updater.
 6. Wire goleak `TestMain` + dependency (another agent), then drop `ADVISORY=1`
    from `ci.yml` and raise `COVERAGE_MIN` to 80.
 7. Termux device matrix, Windows console/ACL/`.old` cleanup, macOS keychain
@@ -169,6 +193,24 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
 
 ## Change log
 
+- 2026-11-24 — **CONFIRMED DEFECT in v0.1.7, producer fixed in this change.**
+  v0.1.7 was signed (release run `45414858634` green) with the correct v0.3
+  bundles (`.mediaType` `application/vnd.dev.sigstore.bundle.v0.3+json` plus an
+  inclusionProof on every bundle) and cosign signature verification passed, but
+  `colab update --install` from a v0.1.6-labelled binary failed with `SBOM
+  attestation has an unsupported predicate type: invalid signature`. Root cause:
+  `cosign attest-blob --type cyclonedx` (v2.6.5) emits predicateType
+  `https://cyclonedx.org/bom`, while `internal/update/sbom.go:18-28` accepts only
+  `https://cyclonedx.org/schema/bom` or `https://cyclonedx.org/schema/bom-*`.
+  Fix (producer only): `attest-blob` now uses
+  `--type https://cyclonedx.org/schema/bom-1.5` — a URI cosign copies verbatim —
+  the post-release `cosign verify-blob-attestation` uses the same URI, and a
+  `jq` guard on the DSSE payload asserts `.predicateType` equals it. The exact
+  URI is chosen so the **unmodified** verifier in already-shipped v0.1.6/v0.1.7
+  binaries accepts the next release; no verifier change was needed or made.
+  Published assets are immutable, so a **new tag** is required. §4/§6 item 5,
+  `docs/FAQ.md`, `docs/RELEASING.md` and `CHANGELOG.md` updated accordingly; no
+  release was cut, tagged or live-proven in this change.
 - 2026-11-24 — v0.1.7 prepared: CLI version bumped to match the changelog
   (guarded by `TestNumberMatchesLatestChangelogRelease`), with the new-format
   cosign bundles and `whoami` fix. A signed tag and real `colab update --install`

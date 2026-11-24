@@ -128,7 +128,15 @@ jobs:
             # CycloneDX SBOM. Name matches `*.sbom.sigstore.json`, which is what
             # internal/update/check.go isSBOMAsset() requires. Same v0.3 bundle
             # requirement as sign-blob above.
-            cosign attest-blob --yes --new-bundle-format --type cyclonedx \
+            # --type must be the EXACT predicate URI the updater accepts, not the
+            # `cyclonedx` alias: cosign v2.6.5 maps that alias to in-toto
+            # `https://cyclonedx.org/bom`, which internal/update/sbom.go rejects
+            # ("SBOM attestation has an unsupported predicate type"). Passing the
+            # URI makes attest-blob copy it verbatim into the DSSE statement's
+            # predicateType, so already-shipped v0.1.6/v0.1.7 binaries can install
+            # this release with no verifier change. The proof step guards it.
+            cosign attest-blob --yes --new-bundle-format \
+              --type https://cyclonedx.org/schema/bom-1.5 \
               --predicate dist/sbom.cdx.json \
               --bundle "dist/${base}.sbom.sigstore.json" "$artifact"
           done
@@ -214,14 +222,29 @@ jobs:
           # no --bundle flag; bundles made by attest-blob are verified with
           # verify-blob-attestation. --check-claims defaults to true, so the
           # in-toto subject digest is checked against the archive bytes.
+          #
+          # --type is the exact predicate URI the updater accepts, NOT the
+          # `cyclonedx` alias (which makes attest-blob emit
+          # `https://cyclonedx.org/bom`, rejected by internal/update/sbom.go).
+          # cosign's verifier accepts both forms, so also assert the predicate
+          # on disk with jq: decode the v0.3 DSSE envelope payload (base64
+          # in-toto statement) and require the exact URI. `jq -e` fails on false
+          # or null, so a missing field, wrong predicate or malformed payload
+          # fails the release loudly instead of shipping an un-installable bundle.
           sbom_bundles=(dist/golab_*.sbom.sigstore.json)
           if (( ${#sbom_bundles[@]} == 0 )); then
             echo "FAIL: no SBOM attestation bundles" >&2; exit 1
           fi
           for bundle in "${sbom_bundles[@]}"; do
             artifact="${bundle%.sbom.sigstore.json}"
+            if ! jq -e --arg pt "https://cyclonedx.org/schema/bom-1.5" \
+              '.content.dsseEnvelope.payload | @base64d | fromjson | .predicateType == $pt' \
+              "$bundle" >/dev/null; then
+              echo "FAIL: $bundle DSSE predicateType is not https://cyclonedx.org/schema/bom-1.5 - v0.1.6/v0.1.7 updater would reject it" >&2
+              exit 1
+            fi
             cosign verify-blob-attestation \
-              --type cyclonedx \
+              --type https://cyclonedx.org/schema/bom-1.5 \
               --certificate-identity "$identity" \
               --certificate-oidc-issuer "$issuer" \
               --bundle "$bundle" "$artifact"
