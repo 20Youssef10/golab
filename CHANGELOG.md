@@ -40,6 +40,16 @@ on-disk schema or persisted token format (per AGENTS.md).
   create is reused rather than duplicated; `requestId` is stable across retries;
   and `ALREADY_EXISTS` reattachment now verifies variant/accelerator/shape.
 
+- Silent-false-success fixes from the same audit: notebook saves no longer
+  announce success before the write succeeds, and a failed pending-execution
+  record aborts before the cell is submitted (non-critical record writes are
+  debug-logged instead of discarded); `[colab] …` diagnostics in `logout` and
+  `update` now go to stderr, keeping `--output json` clean; typed prompt
+  replies are redacted before being written to history (the kernel still gets
+  the real value); upload verification fails loudly on a failed/mismatched
+  size check, including non-seekable streams; and `--budget-profile` /
+  `GOLAB_BUDGET_PROFILE` select a named budget profile for the guard.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even

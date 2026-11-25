@@ -289,7 +289,7 @@ It currently applies to `new`, `run` and `ssh`. The output contains no token, UR
 
 ### `--yes`
 
-`--yes` (or `COLAB_ASSUME_YES=1`) suppresses non-destructive confirmations such as `stop --all`. It **never** bypasses a budget guard; enforcement is controlled only by an optional `golab.yaml` profile (see `GOLAB_BUDGET_FILE` below), which accepts `defaults.budget.enforce: true` and per-profile overrides.
+`--yes` (or `COLAB_ASSUME_YES=1`) suppresses non-destructive confirmations such as `stop --all`. It **never** bypasses a budget guard; enforcement is controlled only by an optional `golab.yaml` profile (see `GOLAB_BUDGET_FILE` below), which accepts `defaults.budget.enforce: true` and per-profile overrides. The persistent `--budget-profile NAME` flag (or `GOLAB_BUDGET_PROFILE`) selects which named profile the guard loads; it defaults to `default`.
 
 ## 8. Exit codes and piping
 
@@ -320,6 +320,7 @@ TTY behaviour matters in exactly three places: `exec` with no input errors when 
 | `COLAB_CLI_PUBLIC_API` | `0` | Use the Public API control plane; `--public-api` / `--no-public-api` override it. |
 | `COLAB_OUTPUT` | `text` | Default for `--output`. |
 | `COLAB_ASSUME_YES` | unset | Default for `--yes`. |
+| `GOLAB_BUDGET_PROFILE` | `default` | Named `golab.yaml` profile used by the budget guard on `new`/`run`/`ssh`; the persistent `--budget-profile` flag overrides it. |
 | `COLAB_CONFIG_DIR` | OS-specific | Override the `colab-cli` configuration directory. |
 | `COLAB_SESSIONS_FILE` | `<config dir>/sessions.json` | Override the session-state file. |
 | `COLAB_CLI_REQUEST_TIMEOUT` | `60` (seconds) | Per-request timeout, clamped to `[1, 86400]`. |
