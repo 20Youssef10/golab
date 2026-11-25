@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/20Youssef10/golab/internal/logx"
@@ -14,6 +16,9 @@ const (
 	defaultAgent      = "golab"
 	defaultGraceful   = 2 * time.Second
 	firstRetryBackoff = 2 * time.Second
+	// createKernelName must match the name restClient.createKernel posts. A
+	// reconciled kernel is only reusable when it is the same kind we asked for.
+	createKernelName = "python3"
 )
 
 type runtimeImpl struct{ cfg Config }
@@ -86,37 +91,121 @@ func (r *runtimeImpl) Attach(ctx context.Context, target Target, opts AttachOpti
 
 // resolve applies the stale-id recovery of docs/02 §3.2. A 404 from GET is a
 // normal "gone" answer: create a new kernel and always return its id.
+//
+// Creation is deliberately kept out of the generic retry: a create POST that
+// times out client-side may already have landed server-side. Blindly replaying
+// it leaves an orphan and allocates a second billable runtime (defect §3.17).
+// The idempotent GET inspect still uses retry unchanged.
 func (r *runtimeImpl) resolve(ctx context.Context, rest *restClient, cachedID string) (string, error) {
-	var id string
-	err := r.retry(ctx, func() error {
-		if cachedID == "" {
-			newID, err := rest.createKernel(ctx)
+	if cachedID != "" {
+		var id string
+		err := r.retry(ctx, func() error {
+			exists, err := rest.inspectKernel(ctx, cachedID)
 			if err != nil {
 				return err
 			}
-			id = newID
+			if exists {
+				id = cachedID
+			}
 			return nil
-		}
-		exists, err := rest.inspectKernel(ctx, cachedID)
+		})
 		if err != nil {
-			return err
+			return "", err
 		}
-		if !exists {
-			newID, err := rest.createKernel(ctx)
-			if err != nil {
-				return err
-			}
-			id = newID
-			return nil
+		if id != "" {
+			return id, nil
 		}
-		id = cachedID
-		return nil
-	})
+		// The cached id is gone (404); fall through and create a replacement.
+	}
+
+	id, err := r.createWithReconcile(ctx, rest)
 	if err != nil {
 		return "", err
 	}
 	if id == "" {
 		return "", fmt.Errorf("attach: no kernel id resolved")
+	}
+	return id, nil
+}
+
+// createWithReconcile creates a kernel, retrying timeouts only after checking
+// the server for a kernel the timed-out POST may already have created. A
+// matching kernel is reused so the retry budget never double-allocates.
+func (r *runtimeImpl) createWithReconcile(ctx context.Context, rest *restClient) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		id, err := rest.createKernel(ctx)
+		if err == nil {
+			return id, nil
+		}
+		lastErr = err
+		if !isTimeout(err) {
+			return "", err
+		}
+
+		// Reconcile even on the final timeout: a create that landed just after
+		// the deadline would otherwise be orphaned with no owner.
+		reused, rerr := r.reconcileKernel(ctx, rest)
+		if rerr != nil {
+			return "", rerr
+		}
+		if reused != "" {
+			return reused, nil
+		}
+		if attempt == maxAttempts-1 {
+			return "", err
+		}
+
+		delay := r.cfg.RetryBackoff(attempt)
+		if delay <= 0 {
+			continue
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return "", lastErr
+}
+
+// reconcileKernel lists the kernels on the proxy and returns the id of a live
+// kernel matching the one createKernel posts. GET is idempotent, so it keeps
+// the same timeout-retry semantics as the other inspect path. An empty result
+// means the timed-out create genuinely did not land and a retry is safe.
+func (r *runtimeImpl) reconcileKernel(ctx context.Context, rest *restClient) (string, error) {
+	var id string
+	err := r.retry(ctx, func() error {
+		data, status, err := rest.do(ctx, http.MethodGet, "/api/kernels", nil)
+		if err != nil {
+			return fmt.Errorf("reconcile kernels: %w", err)
+		}
+		switch status {
+		case http.StatusOK:
+		case http.StatusUnauthorized:
+			return &SessionLostError{Op: "reconcile kernels", StatusCode: status}
+		default:
+			return &HTTPStatusError{Op: "reconcile kernels", Code: status}
+		}
+		var models []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(data, &models); err != nil {
+			return fmt.Errorf("reconcile kernels: malformed response: %w", err)
+		}
+		for _, m := range models {
+			if m.ID != "" && m.Name == createKernelName {
+				id = m.ID
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 	return id, nil
 }

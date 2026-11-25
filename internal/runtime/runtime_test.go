@@ -1,10 +1,15 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -261,5 +266,131 @@ func TestRestartInterruptShutdown(t *testing.T) {
 		if !seen[op] {
 			t.Fatalf("missing %s REST call", op)
 		}
+	}
+}
+
+// --- create/reconcile fake transport (defect §3.17) ------------------------
+
+// fakeTimeoutError satisfies net.Error so isTimeout() classifies the create
+// POST as retryable exactly as a real client-side deadline would.
+type fakeTimeoutError struct{}
+
+func (fakeTimeoutError) Error() string   { return "fake client timeout" }
+func (fakeTimeoutError) Timeout() bool   { return true }
+func (fakeTimeoutError) Temporary() bool { return true }
+
+// reconcilingTransport implements only the two REST calls involved in create
+// reconciliation: POST /api/kernels (create) and GET /api/kernels (list). It
+// keeps its own server-side kernel store so a create that "times out" can
+// still land, reproducing the orphan-runtime hazard of §3.17.
+type reconcilingTransport struct {
+	mu          sync.Mutex
+	createCalls int
+	listCalls   int
+	kernels     map[string]bool
+	// orphanFirst makes the first create land server-side but report a
+	// client-side timeout. When false, the first create times out without
+	// landing, so a genuine retry is still expected.
+	orphanFirst bool
+}
+
+func (t *reconcilingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch {
+	case req.Method == http.MethodPost && req.URL.Path == "/api/kernels":
+		t.createCalls++
+		if t.createCalls == 1 {
+			if t.orphanFirst {
+				t.kernels["kernel-orphan-1"] = true
+			}
+			// In both modes the client observes a timeout on the first create.
+			return nil, fakeTimeoutError{}
+		}
+		id := fmt.Sprintf("kernel-created-%d", t.createCalls)
+		t.kernels[id] = true
+		return reconcileJSON(http.StatusCreated, map[string]any{"id": id})
+	case req.Method == http.MethodGet && req.URL.Path == "/api/kernels":
+		t.listCalls++
+		models := make([]map[string]any, 0, len(t.kernels))
+		for id := range t.kernels {
+			models = append(models, map[string]any{"id": id, "name": "python3"})
+		}
+		return reconcileJSON(http.StatusOK, models)
+	default:
+		return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+	}
+}
+
+func reconcileJSON(status int, v any) (*http.Response, error) {
+	b, _ := json.Marshal(v)
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(b)),
+	}, nil
+}
+
+func newReconcileRuntime(t *testing.T, tr http.RoundTripper) (*runtimeImpl, *restClient) {
+	t.Helper()
+	rt, err := New(Config{
+		HTTPClient:   &http.Client{Transport: tr},
+		RetryBackoff: func(int) time.Duration { return 0 },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r := rt.(*runtimeImpl)
+	return r, newREST(Target{URL: "http://fake", Token: logx.NewSecret("tok")}, r.cfg)
+}
+
+func TestResolveReconcilesTimedOutCreateBeforeRetry(t *testing.T) {
+	// Regression for defect §3.17: a create that landed server-side but timed
+	// out client-side must be reconciled via GET /api/kernels and reused, never
+	// allocated a second (billable) runtime. Upstream has no idempotency key.
+	tr := &reconcilingTransport{kernels: map[string]bool{}, orphanFirst: true}
+	r, rest := newReconcileRuntime(t, tr)
+
+	id, err := r.resolve(context.Background(), rest, "")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if id != "kernel-orphan-1" {
+		t.Fatalf("reused kernel id = %q, want %q", id, "kernel-orphan-1")
+	}
+
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.listCalls == 0 {
+		t.Fatal("timed-out create was not reconciled: no GET /api/kernels")
+	}
+	if tr.createCalls != 1 {
+		t.Fatalf("create POSTs = %d, want 1 (zero additional allocations)", tr.createCalls)
+	}
+	if len(tr.kernels) != 1 {
+		t.Fatalf("server has %d kernels, want exactly 1 runtime", len(tr.kernels))
+	}
+}
+
+func TestResolveStillRetriesCreateWhenReconcileFindsNothing(t *testing.T) {
+	// Guardrail: reconciliation must not suppress a legitimate retry when the
+	// timed-out create truly did not land server-side.
+	tr := &reconcilingTransport{kernels: map[string]bool{}, orphanFirst: false}
+	r, rest := newReconcileRuntime(t, tr)
+
+	id, err := r.resolve(context.Background(), rest, "")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if id != "kernel-created-2" {
+		t.Fatalf("kernel id = %q, want %q from the retried create", id, "kernel-created-2")
+	}
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.createCalls != 2 {
+		t.Fatalf("create POSTs = %d, want 2 (one genuine retry)", tr.createCalls)
+	}
+	if len(tr.kernels) != 1 {
+		t.Fatalf("server has %d kernels, want exactly 1", len(tr.kernels))
 	}
 }
