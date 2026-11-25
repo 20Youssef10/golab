@@ -25,6 +25,9 @@ var (
 	// ErrCorrupt means the state file exists but cannot be parsed. It must
 	// never be treated as an empty store.
 	ErrCorrupt = errors.New("corrupt state file")
+	// ErrUnsafeFile means the state path is not a regular, owner-only file
+	// (e.g. a symbolic link or a directory). It must be refused, never read.
+	ErrUnsafeFile = errors.New("unsafe state file")
 	// ErrNotFound means the requested session does not exist.
 	ErrNotFound = errors.New("session not found")
 )
@@ -251,12 +254,23 @@ func (s *SettingsStore) Load() (Settings, error) {
 	defer cancel()
 	var out Settings
 	err := s.locked(ctx, func() error {
+		fi, err := statStateFile(s.path)
+		if errors.Is(err, os.ErrNotExist) {
+			out = DefaultSettings()
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 		b, err := os.ReadFile(s.path)
 		if errors.Is(err, os.ErrNotExist) {
 			out = DefaultSettings()
 			return nil
 		}
 		if err != nil {
+			return err
+		}
+		if err := checkStateFileUnchanged(s.path, fi); err != nil {
 			return err
 		}
 		if len(strings.TrimSpace(string(b))) == 0 {
@@ -278,12 +292,68 @@ func (s *SettingsStore) Save(v Settings) error {
 	return s.locked(ctx, func() error { return writeJSON(s.path, v) })
 }
 
+// statStateFile validates a state file before it is read. A missing file is
+// reported as os.ErrNotExist so callers keep their empty/default semantics;
+// anything other than a regular, owner-only file is refused with
+// ErrUnsafeFile. Lstat (not Stat) is required so symlinks are rejected instead
+// of followed. All callers hold the corresponding store's flock.
+func statStateFile(p string) (os.FileInfo, error) {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s: symbolic link", ErrUnsafeFile, p)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s: not a regular file", ErrUnsafeFile, p)
+	}
+	// Self-heal legacy or hand-created files with group/other bits.
+	if fi.Mode().Perm()&0o077 != 0 {
+		if err := platform.MakePrivate(p); err != nil {
+			return nil, err
+		}
+	}
+	return fi, nil
+}
+
+// checkStateFileUnchanged closes the gap between Lstat and ReadFile: the path
+// must still resolve to the same inode, and still be a private regular file,
+// after the bytes have been read. Refuse before self-healing — never chmod a
+// path that has not just been re-validated.
+func checkStateFileUnchanged(p string, before os.FileInfo) error {
+	after, err := os.Lstat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %s: changed during read", ErrUnsafeFile, p)
+	}
+	if err != nil {
+		return err
+	}
+	if after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return fmt.Errorf("%w: %s: changed during read", ErrUnsafeFile, p)
+	}
+	if after.Mode().Perm()&0o077 != 0 {
+		return platform.MakePrivate(p)
+	}
+	return nil
+}
+
 func readSessions(p string) (map[string]Session, error) {
+	fi, err := statStateFile(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]Session{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]Session{}, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := checkStateFileUnchanged(p, fi); err != nil {
 		return nil, err
 	}
 	if len(strings.TrimSpace(string(b))) == 0 {
@@ -299,9 +369,27 @@ func readSessions(p string) (map[string]Session, error) {
 	return out, nil
 }
 
+// syncParentDir flushes the directory entry created by os.Rename. Without it
+// the data file can survive a crash while the rename that published it does
+// not, leaving the old file (or nothing) at p.
+func syncParentDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
+}
+
 // writeJSON writes to a temp file in the same directory, fsyncs, keeps a .bak
 // of the previous good file and renames into place.
 func writeJSON(p string, v any) error {
+	return writeJSONWithDirSync(p, v, syncParentDir)
+}
+
+// writeJSONWithDirSync is writeJSON with an injectable parent-dir sync, used
+// by tests to observe the rename durability step.
+func writeJSONWithDirSync(p string, v any, syncDir func(string) error) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
@@ -337,6 +425,12 @@ func writeJSON(p string, v any) error {
 		return err
 	}
 	_ = platform.MakePrivate(p)
+	// Best effort: the data file is already durable, and some filesystems
+	// (notably on Windows) refuse to fsync a directory handle. A failure here
+	// must not turn an otherwise successful write into an error.
+	if syncDir != nil {
+		_ = syncDir(dir)
+	}
 	return nil
 }
 
