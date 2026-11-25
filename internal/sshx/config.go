@@ -49,6 +49,11 @@ type Config struct {
 
 	// Logger defaults to logx.Logger().
 	Logger *slog.Logger
+
+	// HostKeyStore supplies TOFU host-key persistence for the embedded SSH
+	// client. When nil, a file store in the config dir is used. It is an
+	// interface of plain values so sshx stays free of state/CLI dependencies.
+	HostKeyStore HostKeyStore
 }
 
 // Runner executes one SSH connection. Construct a fresh Runner per command.

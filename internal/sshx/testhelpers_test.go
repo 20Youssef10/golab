@@ -109,7 +109,9 @@ func parseWindowsCommandLine(cmd string) ([]string, error) {
 	return args, nil
 }
 
-func sshClientConfigForTest() *ssh.ClientConfig { return newSSHClientConfig(nil) }
+func sshClientConfigForTest() *ssh.ClientConfig {
+	return newSSHClientConfig(nil, tofuHostKeyCallback(newMemHostKeyStore(), "colab-runtime:22"))
+}
 
 func ed25519SignerForTest() (ssh.Signer, error) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)

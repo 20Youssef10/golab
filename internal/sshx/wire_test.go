@@ -234,6 +234,11 @@ func writeKey(t *testing.T) string {
 
 func newRunner(t *testing.T, cfg Config) *Runner {
 	t.Helper()
+	// Keep TOFU tests off the real config dir: each runner gets a fresh,
+	// in-memory pin store unless the test injects one explicitly.
+	if cfg.HostKeyStore == nil {
+		cfg.HostKeyStore = newMemHostKeyStore()
+	}
 	r, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)

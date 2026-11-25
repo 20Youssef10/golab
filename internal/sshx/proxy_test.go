@@ -109,20 +109,19 @@ func TestProxyBridgeTextFramesAndClose(t *testing.T) {
 	}
 }
 
-// Ports upstream tests/test_windows_ssh.py::test_ssh_uses_local_null_device
-// and doc 05/ssh: host-key checking is disabled with a null known-hosts file
-// because VM host keys are ephemeral (ADR-005).
-func TestHostKeyPolicyIsAcceptAny(t *testing.T) {
+// No upstream equivalent: upstream disables host-key checking (ADR-005).
+// §4.12 replaces accept-any with TOFU: an unpinned host is trusted on first
+// use and recorded, so a fresh runtime still connects.
+func TestHostKeyPolicyTrustsFirstUse(t *testing.T) {
 	cfg := sshClientConfigForTest()
 	if cfg.HostKeyCallback == nil {
 		t.Fatal("HostKeyCallback must be set")
 	}
-	// Accept any host key: a randomly generated key must not produce an error.
 	_, pub, err := ed25519KeyForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := cfg.HostKeyCallback("colab-runtime:22", &net.TCPAddr{}, pub); err != nil {
-		t.Fatalf("ephemeral host key rejected: %v", err)
+		t.Fatalf("first-use host key rejected: %v", err)
 	}
 }

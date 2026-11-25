@@ -12,17 +12,21 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// newSSHClientConfig builds the embedded client's config. Host keys are
-// ephemeral per Colab runtime, so accept-any is intentional (ADR-005). The
-// channel is already TLS-authenticated to Google with a bearer token and we
-// ship no known_hosts file.
-func newSSHClientConfig(signers []ssh.Signer) *ssh.ClientConfig {
+// newSSHClientConfig builds the embedded client's config. Host keys are pinned
+// with TOFU (see hostkey.go): the accept-any callback of ADR-005 silently lost
+// its TLS guarantee for a user-supplied plaintext ProxyURL (defect §4.12). A
+// nil callback is refused rather than falling back to x/crypto/ssh's
+// InsecureIgnoreHostKey default.
+func newSSHClientConfig(signers []ssh.Signer, hostKey ssh.HostKeyCallback) *ssh.ClientConfig {
+	if hostKey == nil {
+		hostKey = func(string, net.Addr, ssh.PublicKey) error {
+			return errors.New("SSH host-key callback is not configured")
+		}
+	}
 	return &ssh.ClientConfig{
-		User: "root",
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)},
-		// #nosec G106 -- ephemeral VM host keys; documented in ADR-005.
-		//nolint:gosec // Colab runtime host keys are regenerated per runtime.
-		HostKeyCallback: func(string, net.Addr, ssh.PublicKey) error { return nil },
+		User:            "root",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signers...)},
+		HostKeyCallback: hostKey,
 		ClientVersion:   "SSH-2.0-golab",
 		Timeout:         15 * time.Second,
 	}
@@ -64,7 +68,17 @@ func runInteractive(ctx context.Context, nc net.Conn, key KeyMaterial, cfg Confi
 func runSSH(ctx context.Context, nc net.Conn, key KeyMaterial, cfg Config,
 	command string, wantPTY bool, fd uintptr) (int, error) {
 
-	cc, chans, reqs, err := ssh.NewClientConn(nc, "colab-runtime:22", newSSHClientConfig(key.Signers))
+	store := cfg.HostKeyStore
+	if store == nil {
+		var err error
+		store, err = NewFileHostKeyStore("")
+		if err != nil {
+			return 255, fmt.Errorf("host-key store: %w", err)
+		}
+	}
+	host := hostIdentity(cfg.ProxyURL)
+	cc, chans, reqs, err := ssh.NewClientConn(nc, host,
+		newSSHClientConfig(key.Signers, tofuHostKeyCallback(store, host)))
 	if err != nil {
 		return 255, fmt.Errorf("SSH handshake failed: %w", err)
 	}
