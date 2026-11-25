@@ -6,6 +6,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"flag"
 	"net"
 	"os"
 	"path"
@@ -113,7 +114,7 @@ func IsTermux() bool {
 }
 
 // IsStdinTTY reports whether stdin is a terminal. Mockable in tests via the
-// COLAB_TEST_TTY environment variable ("1"/"0").
+// COLAB_TEST_STDIN_TTY environment variable ("1"/"0").
 func IsStdinTTY() bool { return tty(os.Stdin.Fd(), "COLAB_TEST_STDIN_TTY") }
 
 // IsStdoutTTY reports whether stdout is a terminal.
@@ -123,8 +124,13 @@ func IsStdoutTTY() bool { return tty(os.Stdout.Fd(), "COLAB_TEST_TTY") }
 func IsStderrTTY() bool { return tty(os.Stderr.Fd(), "COLAB_TEST_STDERR_TTY") }
 
 func tty(fd uintptr, env string) bool {
-	if v := os.Getenv(env); v != "" {
-		return v == "1" || strings.EqualFold(v, "true")
+	// The COLAB_TEST_*_TTY overrides are a test-only escape hatch. A release
+	// binary has no "test.v" flag, so an untrusted environment variable must
+	// never be able to flip PTY/piped behaviour there.
+	if flag.CommandLine.Lookup("test.v") != nil {
+		if v := os.Getenv(env); v != "" {
+			return v == "1" || strings.EqualFold(v, "true")
+		}
 	}
 	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }

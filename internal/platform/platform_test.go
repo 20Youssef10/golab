@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -40,6 +41,53 @@ func TestTTYMockable(t *testing.T) {
 	t.Setenv("COLAB_TEST_TTY", "1")
 	if !IsStdoutTTY() {
 		t.Fatal("stdout not reported as TTY")
+	}
+}
+
+// The COLAB_TEST_*_TTY overrides are a test-only escape hatch. Swap in a
+// FlagSet without "test.v" to simulate a release binary: there the overrides
+// must have no effect and real isatty detection must decide. Compare against
+// the natural (unset) result so the assertion holds whether or not the test
+// harness happens to attach a TTY to any stream.
+func TestTTYOverridesOnlyInTestBinary(t *testing.T) {
+	checks := []struct {
+		name string
+		set  func(string)
+		read func() bool
+	}{
+		{"stdin", func(v string) { t.Setenv("COLAB_TEST_STDIN_TTY", v) }, IsStdinTTY},
+		{"stdout", func(v string) { t.Setenv("COLAB_TEST_TTY", v) }, IsStdoutTTY},
+		{"stderr", func(v string) { t.Setenv("COLAB_TEST_STDERR_TTY", v) }, IsStderrTTY},
+	}
+
+	// In the test binary the overrides are honoured.
+	for _, c := range checks {
+		c.set("1")
+		if !c.read() {
+			t.Errorf("%s override %q ignored in test binary", c.name, "1")
+		}
+		c.set("0")
+		if c.read() {
+			t.Errorf("%s override %q ignored in test binary", c.name, "0")
+		}
+	}
+
+	// A release binary has no "test.v" flag; the overrides must be ignored.
+	original := flag.CommandLine
+	flag.CommandLine = flag.NewFlagSet("release", flag.ContinueOnError)
+	t.Cleanup(func() { flag.CommandLine = original })
+
+	for _, c := range checks {
+		c.set("")
+		natural := c.read()
+		c.set("1")
+		if got := c.read(); got != natural {
+			t.Errorf("%s override %q used in release-like binary: got %v, want natural %v", c.name, "1", got, natural)
+		}
+		c.set("0")
+		if got := c.read(); got != natural {
+			t.Errorf("%s override %q used in release-like binary: got %v, want natural %v", c.name, "0", got, natural)
+		}
 	}
 }
 
