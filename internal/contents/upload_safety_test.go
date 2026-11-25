@@ -280,6 +280,131 @@ func mustReadAll(r *http.Request) []byte {
 	return b
 }
 
+// nonSeekableReader intentionally exposes only io.Reader so sourceSize() cannot
+// learn the source length and WriteStream takes the prefix/streaming path.
+type nonSeekableReader struct{ io.Reader }
+
+// TestWriteChunkedVerifyGETFailureIsTyped covers audit §3.14: a failure of the
+// post-upload verification GET must not be reported as upload success. The body
+// carries the token to prove the typed detail stays redacted.
+func TestWriteChunkedVerifyGETFailureIsTyped(t *testing.T) {
+	srv := newFakeContents(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"message": "verify boom " + testToken,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"type": "file"})
+	})
+	c := smallBudgetClient(t, testConfig(srv.URL), "content/blob.bin", 9)
+
+	err := c.Write(context.Background(), "content/blob.bin", []byte("0123456789"), 4)
+	var incomplete *IncompleteUploadError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("err = %v (%T), want *IncompleteUploadError when verification GET fails", err, err)
+	}
+	if !errors.Is(err, ErrIncompleteUpload) {
+		t.Fatal("errors.Is(err, ErrIncompleteUpload) failed")
+	}
+	if !strings.HasPrefix(incomplete.Detail, "verify: ") {
+		t.Errorf("Detail = %q, want verify: prefix", incomplete.Detail)
+	}
+	if incomplete.ChunksSent != 3 {
+		t.Errorf("ChunksSent = %d, want 3", incomplete.ChunksSent)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Errorf("error leaked the token: %q", err.Error())
+	}
+}
+
+// TestWriteChunkedVerifyMismatchDetail covers audit §3.14's mismatch branch:
+// a server-reported size that disagrees with the local size is a typed
+// incomplete upload whose detail names both sizes.
+func TestWriteChunkedVerifyMismatchDetail(t *testing.T) {
+	srv := newFakeContents(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"name": "blob.bin", "type": "file", "size": 12,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"type": "file"})
+	})
+	c := smallBudgetClient(t, testConfig(srv.URL), "content/blob.bin", 9)
+
+	err := c.Write(context.Background(), "content/blob.bin", []byte("0123456789"), 4)
+	var incomplete *IncompleteUploadError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("err = %v (%T), want *IncompleteUploadError on size mismatch", err, err)
+	}
+	if !strings.HasPrefix(incomplete.Detail, "verify: ") ||
+		!strings.Contains(incomplete.Detail, "remote size 12") ||
+		!strings.Contains(incomplete.Detail, "local size 10") {
+		t.Errorf("Detail = %q, want verify: ... remote size 12 ... local size 10", incomplete.Detail)
+	}
+}
+
+// TestWriteChunkedVerifyMatchingSizeSucceeds guards the happy path: a reported
+// size equal to the local length must not be reported as incomplete.
+func TestWriteChunkedVerifyMatchingSizeSucceeds(t *testing.T) {
+	srv := newFakeContents(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"name": "blob.bin", "type": "file", "size": 10,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"type": "file"})
+	})
+	c := smallBudgetClient(t, testConfig(srv.URL), "content/blob.bin", 9)
+	if err := c.Write(context.Background(), "content/blob.bin", []byte("0123456789"), 4); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+}
+
+// TestWriteStreamNonSeekableVerifiesSentBytes covers audit §3.15: for a source
+// of unknown length (size = -1) verification must still run, comparing the
+// server-reported size to the number of bytes actually PUT. A stream that was
+// truncated remotely must fail loudly instead of silently succeeding.
+func TestWriteStreamNonSeekableVerifiesSentBytes(t *testing.T) {
+	payload := bytes.Repeat([]byte("s"), 50)
+	srv := newFakeContents(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"name": "blob.bin", "type": "file", "size": 10, // only 10 of 50 bytes stored
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"type": "file"})
+	})
+	c := smallBudgetClient(t, testConfig(srv.URL), "content/blob.bin", 40)
+
+	err := c.WriteStream(context.Background(), "content/blob.bin",
+		&nonSeekableReader{bytes.NewReader(payload)}, 20)
+	var incomplete *IncompleteUploadError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("err = %v (%T), want *IncompleteUploadError when non-seekable upload size mismatches", err, err)
+	}
+	if !strings.HasPrefix(incomplete.Detail, "verify: ") ||
+		!strings.Contains(incomplete.Detail, "remote size 10") ||
+		!strings.Contains(incomplete.Detail, "local size 50") {
+		t.Errorf("Detail = %q, want verify mismatch against 50 sent bytes", incomplete.Detail)
+	}
+	if incomplete.ChunksSent != 3 {
+		t.Errorf("ChunksSent = %d, want 3", incomplete.ChunksSent)
+	}
+	gets := 0
+	for _, req := range srv.requests() {
+		if req.method == http.MethodGet {
+			gets++
+		}
+	}
+	if gets != 1 {
+		t.Errorf("verification GETs = %d, want 1", gets)
+	}
+}
+
 // TestStoredErrorDetailNeverCarriesCause guards the token-safety contract of
 // IncompleteUploadError: only a redacted string is retained, not the error
 // that may embed the proxy-token URL.

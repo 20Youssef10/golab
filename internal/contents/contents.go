@@ -315,8 +315,10 @@ func (c *client) Write(ctx context.Context, remotePath string, data []byte, chun
 //   - A larger file streams chunk:1, chunk:2, … with the last DATA chunk
 //     marked -1 (no empty trailing PUT). Failed chunks after data was sent
 //     produce *IncompleteUploadError, never a silent truncation.
-//   - If the server reports a final `size`, a chunked upload verifies it and
-//     reports a mismatch as an incomplete upload.
+//   - Every chunked upload ends with a verification GET: a failed GET or a
+//     reported size that disagrees with the local length (or, for a source of
+//     unknown length, with the bytes actually PUT) is a typed incomplete
+//     upload. A server that reports no size cannot be verified from metadata.
 //   - `Config.RefreshToken` is called before every chunk after the first so a
 //     long upload survives proxy-token expiry.
 func (c *client) WriteStream(ctx context.Context, remotePath string, src io.Reader, chunkSize int) error {
@@ -400,6 +402,7 @@ func (c *client) writeChunks(ctx context.Context, remotePath string, src io.Read
 		next, nextErr = read()
 	}
 	sent := 0
+	var bytesSent int64
 	for {
 		readFailed := hardError(nextErr)
 		// A hard read error means we cannot know whether more data followed,
@@ -418,6 +421,7 @@ func (c *client) writeChunks(ctx context.Context, remotePath string, src io.Read
 			return c.chunkFailure(remotePath, sent, err)
 		}
 		sent++
+		bytesSent += int64(len(current))
 		if final {
 			break
 		}
@@ -431,7 +435,13 @@ func (c *client) writeChunks(ctx context.Context, remotePath string, src io.Read
 			next, nextErr = read()
 		}
 	}
-	if err := c.verifyRemoteSize(ctx, remotePath, size, sent); err != nil {
+	// A source of unknown length carries size = -1; the bytes actually PUT are
+	// the only local measurement available for the final verification.
+	expected := size
+	if expected < 0 {
+		expected = bytesSent
+	}
+	if err := c.verifyRemoteSize(ctx, remotePath, expected, sent); err != nil {
 		return err
 	}
 	return nil
@@ -475,25 +485,35 @@ func (c *client) incomplete(remotePath string, sent int, op string, err error) e
 	}
 }
 
-// verifyRemoteSize compares the server-reported model size with the local
-// length when — and only when — the server actually reports one. Caveat (also
-// noted in upstream PR #272): Jupyter reports os.lstat sizes, so an upload
-// through a symlinked remote destination can look short. We prefer a loud
-// incomplete-upload error over silent truncation; a live GET/SHA-256 probe
-// (AUDIT-02 §2 item 4) remains HUMAN REQUIRED before declaring D-4 proven.
-func (c *client) verifyRemoteSize(ctx context.Context, remotePath string, size int64, sent int) error {
-	if size < 0 {
-		return nil
-	}
+// verifyRemoteSize compares the server-reported model size with the expected
+// local length (known from the source, or the bytes actually PUT for a source
+// of unknown length). A failed verification GET or a reported size that
+// disagrees with the expected length is a loud incomplete upload; only a
+// server that reports no size stays optimistic, because it cannot be verified
+// from metadata. A live GET/SHA-256 probe (AUDIT-02 §2 item 4) remains HUMAN
+// REQUIRED before declaring D-4 proven. Caveat (also noted in upstream PR
+// #272): Jupyter reports os.lstat sizes, so an upload through a symlinked
+// remote destination can look short.
+func (c *client) verifyRemoteSize(ctx context.Context, remotePath string, expected int64, sent int) error {
 	m, err := c.getModel(ctx, remotePath, false)
-	if err != nil || m.Size == nil || *m.Size == size {
+	if err != nil {
+		return &IncompleteUploadError{
+			RemotePath: remotePath,
+			ChunksSent: sent,
+			Detail:     "verify: " + describeUploadError(err),
+		}
+	}
+	if m.Size == nil {
 		return nil // no size reported: cannot verify; the live probe is HUMAN REQUIRED
 	}
-	return &IncompleteUploadError{
-		RemotePath: remotePath,
-		ChunksSent: sent,
-		Detail:     fmt.Sprintf("remote size %d does not match local size %d", *m.Size, size),
+	if *m.Size != expected {
+		return &IncompleteUploadError{
+			RemotePath: remotePath,
+			ChunksSent: sent,
+			Detail:     fmt.Sprintf("verify: remote size %d does not match local size %d", *m.Size, expected),
+		}
 	}
+	return nil
 }
 
 // sourceSize reports the remaining length of a seekable reader without moving
