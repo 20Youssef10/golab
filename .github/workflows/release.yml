@@ -7,8 +7,9 @@ on:
 
 # Keyless cosign needs the OIDC token. The workflow filename is part of the
 # pinned certificate identity in internal/update/verify.go: the SAN regex is
-#   ^https://github.com/<Owner>/<Repo>/.github/workflows/release\.yml@
-# It must therefore stay exactly `.github/workflows/release.yml`.
+#   ^https://github.com/<Owner>/<Repo>/.github/workflows/release\.yml@refs/tags/v
+# It must therefore stay exactly `.github/workflows/release.yml` and only run
+# from v* tags; a run on any other ref is not a signed release.
 permissions:
   contents: write
   id-token: write

@@ -166,7 +166,13 @@ func verifyBundle(ctx context.Context, cfg Config, artifact []byte, entity verif
 		return nil, fmt.Errorf("%w: configure verifier: %w", ErrInvalidSignature, err)
 	}
 
-	sanRegex := fmt.Sprintf(`^https://github\.com/%s/%s/\.github/workflows/release\.yml@`,
+	// AUDIT gap 2.7 (docs/gap-report.md §2.7): pin the ref as well as the
+	// workflow path. sigstore-go matches this pattern unanchored at the end, so
+	// a bare ".yml@" accepts a certificate minted by *any* run of release.yml
+	// (branch push, workflow_dispatch, ...), not just an official tag release.
+	// The regex deliberately stops at "refs/tags/v" rather than ending in "$":
+	// legitimate SANs may carry a version and trailing segments after it.
+	sanRegex := fmt.Sprintf(`^https://github\.com/%s/%s/\.github/workflows/release\.yml@refs/tags/v`,
 		regexp.QuoteMeta(cfg.Owner), regexp.QuoteMeta(cfg.Repo))
 	certID, err := verify.NewShortCertificateIdentity(githubIssuer, "", "", sanRegex)
 	if err != nil {

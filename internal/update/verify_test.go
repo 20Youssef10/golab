@@ -182,6 +182,39 @@ func TestVerifyAndInstallIdentityMismatch(t *testing.T) {
 	}
 }
 
+// AUDIT gap 2.7 (docs/gap-report.md §2.7): the identity policy must pin the
+// ref, not just the workflow path. A certificate minted by a branch push (or
+// workflow_dispatch on main) satisfies the old ".yml@" regex even though it is
+// not an official release, so it must be rejected as an identity mismatch.
+func TestVerifySignatureRejectsBranchWorkflowSAN(t *testing.T) {
+	artifact := []byte("fake binary contents")
+	branchSAN := fmt.Sprintf("https://github.com/%s/%s/.github/workflows/release.yml@refs/heads/main", testOwner, testRepo)
+	bundle := makeBundle(t, artifact, bundleOptions{goodSig: true, subject: branchSAN})
+	s, _ := newReleaseServer(t, releaseFixture{artifact: artifact, bundle: bundle})
+	defer s.Close()
+
+	err := verifyArtifact(context.Background(), fakeConfig(s), artifact, releaseFromFixture(t, artifact, ""))
+	if !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("branch-run identity accepted as a release: %v", err)
+	}
+}
+
+// AUDIT gap 2.7: a genuine annotated-tag run must still verify. The pin stops
+// at "refs/tags/v" (no trailing "$") because the SAN continues with the
+// version and may carry extra segments, so this guard also catches
+// over-anchoring while rejecting branch refs.
+func TestVerifySignatureAcceptsReleaseTagWorkflowSAN(t *testing.T) {
+	artifact := []byte("fake binary contents")
+	tagSAN := fmt.Sprintf("https://github.com/%s/%s/.github/workflows/release.yml@refs/tags/v0.2.0", testOwner, testRepo)
+	bundle := makeBundle(t, artifact, bundleOptions{goodSig: true, subject: tagSAN})
+	s, _ := newReleaseServer(t, releaseFixture{artifact: artifact, bundle: bundle})
+	defer s.Close()
+
+	if err := verifyArtifact(context.Background(), fakeConfig(s), artifact, releaseFromFixture(t, artifact, "")); err != nil {
+		t.Fatalf("release tag identity rejected: %v", err)
+	}
+}
+
 func TestVerifyAndInstallIssuerMismatch(t *testing.T) {
 	artifact := []byte("fake binary contents")
 	bundle := makeBundle(t, artifact, bundleOptions{
