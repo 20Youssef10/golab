@@ -9,9 +9,16 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
+
+// ErrResponseTooLarge means a kernel REST response exceeded maxFrameSize. The
+// body is discarded rather than decoded: reading only the first maxFrameSize
+// bytes could otherwise turn a truncated document into a valid-looking but
+// partial JSON result. Callers may match it with errors.Is.
+var ErrResponseTooLarge = errors.New("kernel REST response too large")
 
 // restClient implements the kernel REST lifecycle of docs/02 §3.2.
 type restClient struct {
@@ -91,9 +98,16 @@ func (c *restClient) do(ctx context.Context, method, path string, body any) ([]b
 		return nil, 0, safeError(err, c.token)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFrameSize))
+	// Read one byte past the limit so an oversized body is distinguishable from
+	// one that merely fills the limit. Never hand a truncated body to json.Unmarshal:
+	// a prefix of a larger document can itself be valid JSON, which would silently
+	// decode into a partial result.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFrameSize+1))
 	if err != nil {
 		return nil, resp.StatusCode, err
+	}
+	if len(data) > maxFrameSize {
+		return nil, resp.StatusCode, ErrResponseTooLarge
 	}
 	return data, resp.StatusCode, nil
 }
@@ -127,7 +141,7 @@ func (c *restClient) createKernel(ctx context.Context) (string, error) {
 // inspectKernel reports whether a cached kernel still exists. A 404 is a
 // normal "gone" answer; a 401 proves the session itself was lost.
 func (c *restClient) inspectKernel(ctx context.Context, id string) (bool, error) {
-	_, status, err := c.do(ctx, http.MethodGet, "/api/kernels/"+id, nil)
+	_, status, err := c.do(ctx, http.MethodGet, "/api/kernels/"+url.PathEscape(id), nil)
 	if err != nil {
 		return false, fmt.Errorf("inspect kernel: %w", err)
 	}
@@ -145,10 +159,11 @@ func (c *restClient) inspectKernel(ctx context.Context, id string) (bool, error)
 
 func (c *restClient) lifecycle(ctx context.Context, op, id string) error {
 	method := http.MethodPost
-	path := "/api/kernels/" + id + "/" + op
+	escapedID := url.PathEscape(id)
+	path := "/api/kernels/" + escapedID + "/" + op
 	if op == "shutdown" {
 		method = http.MethodDelete
-		path = "/api/kernels/" + id
+		path = "/api/kernels/" + escapedID
 	}
 	_, status, err := c.do(ctx, method, path, map[string]any{})
 	if err != nil {
