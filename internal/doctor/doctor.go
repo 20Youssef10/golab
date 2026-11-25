@@ -183,6 +183,17 @@ func fixtureCheck(dir string) Check {
 			n++
 		}
 	}
+	if n == 0 {
+		// An empty inventory (e.g. testdata/wire holding only a README) gives
+		// no differential proof. Use "skip" rather than "pass": the report
+		// schema is pass|fail|skip, and the CLI fails only on "fail", so a
+		// skipped check stays non-fatal while its remediation is still shown.
+		return Check{
+			Name: "wire.fixtures", Status: "skip",
+			Detail:      "0 captured wire fixture(s); no differential proof available; fakes are not live proof",
+			Remediation: "capture redacted wire fixtures from the official Python CLI (scripts/live-capture.sh, GET-only) before treating this section as verified",
+		}
+	}
 	return Check{
 		Name: "wire.fixtures", Status: "pass",
 		Detail: fmt.Sprintf("%d captured wire fixture(s); fakes are not live proof", n),

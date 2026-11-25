@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -163,21 +165,60 @@ func TestDoctorHardTimeout(t *testing.T) {
 	}
 }
 
-// TestDoctorFixtureInventory makes the "fakes are not proof" limitation
-// visible: with an empty directory the report must say zero captured fixtures.
+// TestDoctorFixtureInventory is a golab-specific regression test for
+// CONFIRMED DEFECT §4.21 (no upstream Python equivalent): a fixture directory
+// holding only a README is not proof of anything, so the check must say skip
+// (or warning) and explain that no differential proof is available. It must
+// not report a healthy pass on an empty inventory.
 func TestDoctorFixtureInventory(t *testing.T) {
-	rep, err := Probe(context.Background(), Config{FixtureDir: t.TempDir()}, nil)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# no captures yet\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Probe(context.Background(), Config{FixtureDir: dir}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var checks []string
+	check := findFixtureCheck(t, rep)
+	if check.Status != "skip" && check.Status != "warning" {
+		t.Errorf("empty fixture inventory status = %q, detail = %q; want skip or warning", check.Status, check.Detail)
+	}
+	if !strings.Contains(check.Detail, "no differential proof") {
+		t.Errorf("empty fixture inventory detail = %q; want an explicit no-differential-proof note", check.Detail)
+	}
+	if check.Remediation == "" {
+		t.Error("skipped fixture check has no remediation")
+	}
+}
+
+// TestDoctorFixtureInventoryWithFixturePasses pins the other half of the
+// contract: a non-empty inventory still earns a pass. golab-specific (no
+// upstream Python equivalent).
+func TestDoctorFixtureInventoryWithFixturePasses(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "capture.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Probe(context.Background(), Config{FixtureDir: dir}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := findFixtureCheck(t, rep)
+	if check.Status != "pass" {
+		t.Errorf("one captured fixture: status = %q, detail = %q; want pass", check.Status, check.Detail)
+	}
+	if !strings.Contains(check.Detail, "1 captured wire fixture(s)") {
+		t.Errorf("one captured fixture: detail = %q; want the inventory count", check.Detail)
+	}
+}
+
+func findFixtureCheck(t *testing.T, rep Report) Check {
+	t.Helper()
 	for _, c := range rep.Checks {
-		checks = append(checks, c.Name)
-		if c.Name == "wire.fixtures" && c.Status != "pass" {
-			t.Errorf("fixture check status = %q, detail = %q", c.Status, c.Detail)
+		if c.Name == "wire.fixtures" {
+			return c
 		}
 	}
-	if !strings.Contains(strings.Join(checks, ","), "wire.fixtures") {
-		t.Fatalf("no fixture inventory check: %v", checks)
-	}
+	t.Fatalf("no wire.fixtures check in report: %+v", rep.Checks)
+	return Check{}
 }
