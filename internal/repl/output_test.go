@@ -7,6 +7,7 @@ package repl
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +112,45 @@ func TestWriteOutputImageTempFallback(t *testing.T) {
 	pf.writeOutput(Output{OutputType: "display_data", Data: map[string]string{"image/jpeg": jpeg}})
 	if !strings.Contains(out.String(), "[Image saved to: ") {
 		t.Errorf("stdout = %q, want temp save notice", out.String())
+	}
+}
+
+// Regression: the fallback temp image is an internal artifact. The save notice
+// is still printed, but no file may be left behind. A user-requested
+// --output-image save is covered by TestWriteOutputImageToFile and stays.
+func TestWriteOutputImageTempFallbackCleanedUp(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	pf, out, errOut := newTestPiped(t)
+	png := base64.StdEncoding.EncodeToString([]byte("PNGDATA"))
+	pf.writeOutput(Output{OutputType: "display_data", Data: map[string]string{"image/png": png}})
+
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errOut.String())
+	}
+	const prefix = "[Image saved to: "
+	i := strings.Index(out.String(), prefix)
+	if i < 0 {
+		t.Fatalf("save notice missing: %q", out.String())
+	}
+	rest := out.String()[i+len(prefix):]
+	j := strings.LastIndexByte(rest, ']')
+	if j < 0 {
+		t.Fatalf("malformed save notice: %q", out.String())
+	}
+	reported := rest[:j]
+	if filepath.Dir(reported) != dir {
+		t.Fatalf("reported path %q outside TMPDIR %q", reported, dir)
+	}
+	if _, err := os.Stat(reported); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temp image left behind at %q (stat err %v)", reported, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temp dir not empty after render: %v", entries)
 	}
 }
 

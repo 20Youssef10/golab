@@ -68,10 +68,10 @@ func exportMarkdown(events []Event, session string) []byte {
 		switch e.EventType {
 		case EventExecution:
 			code := e.stringField("code")
-			fmt.Fprintf(&b, "### Execution (%s)\n```python\n%s\n```\n\n", ts, code)
+			fmt.Fprintf(&b, "### Execution (%s)\n%s\n", ts, fencedBlock(code, "python"))
 			for _, out := range e.outputs() {
 				if text, ok := out["text"]; ok {
-					fmt.Fprintf(&b, "**Output**:\n```\n%v```\n\n", text)
+					fmt.Fprintf(&b, "**Output**:\n%s\n", fencedBlock(fmt.Sprint(text), ""))
 				}
 			}
 		case EventSessionCreated:
@@ -82,6 +82,39 @@ func exportMarkdown(events []Event, session string) []byte {
 		}
 	}
 	return []byte(b.String())
+}
+
+const minMarkdownFence = 3
+
+// fencedBlock wraps content in a backtick fence that cannot be closed early by
+// a backtick run inside the content, and guarantees the closing fence starts
+// on its own line even when the content has no trailing newline. The content
+// itself is emitted verbatim.
+func fencedBlock(content, lang string) string {
+	fenceLen := minMarkdownFence
+	run := 0
+	for i := 0; i < len(content); i++ {
+		if content[i] == '`' {
+			run++
+			if run >= fenceLen {
+				fenceLen = run + 1
+			}
+		} else {
+			run = 0
+		}
+	}
+	fence := strings.Repeat("`", fenceLen)
+	var b strings.Builder
+	b.WriteString(fence)
+	b.WriteString(lang)
+	b.WriteByte('\n')
+	b.WriteString(content)
+	if !strings.HasSuffix(content, "\n") {
+		b.WriteByte('\n')
+	}
+	b.WriteString(fence)
+	b.WriteByte('\n')
+	return b.String()
 }
 
 func exportText(events []Event, session string) ([]byte, error) {

@@ -3,6 +3,7 @@ package render
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,4 +114,61 @@ func TestImageUnsupportedFormat(t *testing.T) {
 	if err := ImageWithConfig(&out, []byte("x"), "image/gif", ImageConfig{TargetPath: filepath.Join(t.TempDir(), "p.gif")}); err == nil {
 		t.Fatal("expected error for unsupported format")
 	}
+}
+
+// Regression: the temp image created when no --output-image is given is an
+// internal render artifact. The inline escape carries the displayed image, so
+// the file must be removed once its path has been reported; a user-requested
+// --output-image save must never be removed.
+func TestImageTempArtifactCleanup(t *testing.T) {
+	t.Run("temp file removed after inline display", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		var out, errOut bytes.Buffer
+		cfg := ImageConfig{
+			TempDir: tmpDir,
+			IsTTY:   func() bool { return true },
+			Env:     imageEnv(nil),
+			Stderr:  &errOut,
+		}
+		if err := ImageWithConfig(&out, []byte("png-data"), "image/png", cfg); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "_Ga=T,f=100;") {
+			t.Fatalf("inline image broken by cleanup: %q", out.String())
+		}
+		const prefix = "[Image saved to: "
+		i := strings.Index(out.String(), prefix)
+		if i < 0 {
+			t.Fatalf("image path not reported: %q", out.String())
+		}
+		rest := out.String()[i+len(prefix):]
+		j := strings.LastIndexByte(rest, ']')
+		if j < 0 {
+			t.Fatalf("malformed path report: %q", out.String())
+		}
+		reported := rest[:j]
+		if filepath.Dir(reported) != tmpDir {
+			t.Fatalf("reported path %q outside temp dir %q", reported, tmpDir)
+		}
+		if _, err := os.Stat(reported); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("temp image left behind at %q (stat err %v)", reported, err)
+		}
+		entries, err := os.ReadDir(tmpDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("temp dir not empty after render: %v", entries)
+		}
+	})
+	t.Run("output-image save is kept", func(t *testing.T) {
+		var out bytes.Buffer
+		target := filepath.Join(t.TempDir(), "plot.png")
+		if err := ImageWithConfig(&out, []byte("png-data"), "image/png", ImageConfig{TargetPath: target}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(target); err != nil {
+			t.Fatalf("--output-image save was removed: %v", err)
+		}
+	})
 }

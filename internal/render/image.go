@@ -139,7 +139,13 @@ func ImageWithConfig(w io.Writer, data []byte, format string, cfg ImageConfig) e
 		if err != nil {
 			return fmt.Errorf("render: create temp image: %w", err)
 		}
-		saved = f.Name()
+		tempPath := f.Name()
+		saved = tempPath
+		// The fallback file is a transient render artifact: the displayed
+		// image is carried inline by the escape sequence above, and the path
+		// is reported before this deferred removal runs. A user-requested
+		// --output-image save (TargetPath above) is never removed.
+		defer func() { _ = os.Remove(tempPath) }()
 		if _, err := f.Write(data); err != nil {
 			_ = f.Close()
 			return fmt.Errorf("render: write temp image: %w", err)

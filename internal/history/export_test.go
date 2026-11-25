@@ -281,3 +281,34 @@ func TestExportUnsupportedFormat(t *testing.T) {
 		t.Fatalf("expected ErrUnsupportedFormat, got %v", err)
 	}
 }
+
+// Regression: exportMarkdown glued the closing fence onto output text that
+// lacked a trailing newline, and a ``` inside cell content closed the fence
+// early. A fence longer than any backtick run in the content keeps every block
+// valid without altering the reported text.
+func TestExportMarkdownFencedBlocks(t *testing.T) {
+	events := []Event{
+		{Timestamp: mustTime(t, "2026-03-23T12:00:00Z"), EventType: EventExecution,
+			Payload: rawPayload(t, map[string]any{"code": "print(1)", "outputs": []any{
+				map[string]any{"text": "no trailing newline"},
+			}})},
+		{Timestamp: mustTime(t, "2026-03-23T12:01:00Z"), EventType: EventExecution,
+			Payload: rawPayload(t, map[string]any{"code": "print('```')", "outputs": []any{
+				map[string]any{"text": "before ``` inside\nafter\n"},
+			}})},
+	}
+	got, err := ExportWithSession(events, "md", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	for _, want := range []string{
+		"**Output**:\n```\nno trailing newline\n```\n\n",
+		"**Output**:\n````\nbefore ``` inside\nafter\n````\n\n",
+		"````python\nprint('```')\n````\n\n",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("md export missing %q in:\n%s", want, s)
+		}
+	}
+}

@@ -137,7 +137,12 @@ func (f *baseFrontend) saveImage(mime, b64 string) error {
 		if err != nil {
 			return err
 		}
-		path = tmp.Name()
+		tempPath := tmp.Name()
+		path = tempPath
+		// The fallback file is an internal render artifact: the save notice
+		// is printed before this deferred removal runs. A user-requested
+		// --output-image save (the other branch) is never removed.
+		defer func() { _ = os.Remove(tempPath) }()
 		if _, err := tmp.Write(raw); err != nil {
 			_ = tmp.Close()
 			return err

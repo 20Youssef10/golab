@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	goruntime "runtime"
 	"sync"
@@ -158,12 +159,10 @@ func platformOS() string { return goruntime.GOOS }
 
 func platformArch() string { return goruntime.GOARCH }
 
-func dirOf(p string) string {
-	for len(p) > 1 && p[len(p)-1] != '/' && p[len(p)-1] != '\\' {
-		p = p[:len(p)-1]
-	}
-	return p
-}
+// dirOf returns the directory portion of a local path. filepath.Dir keeps the
+// platform's separator rules and returns "." for a separator-less filename
+// (the hand-rolled dirname used to return just its first byte).
+func dirOf(p string) string { return filepath.Dir(p) }
 
 // SetStreams lets cobra inject its own writers (important for golden tests).
 func (d *Deps) SetStreams(in io.Reader, out, errOut io.Writer) {

@@ -265,3 +265,24 @@ func TestUpdateConfigOffersNewerRelease(t *testing.T) {
 		t.Fatalf("bundle URLs = %q / %q", rel.SignatureURL, rel.SBOMURL)
 	}
 }
+
+// Regression for a local helper (no upstream Python port): dirOf derives the
+// auth config directory from the sessions file path. The hand-rolled dirname
+// returned a single character for a separator-less path ("sessions.json" ->
+// "s"), so a bare filename resolved to a wrong config directory.
+func TestDirOf(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, want string
+	}{
+		{"absolute", filepath.FromSlash("/home/user/.config/golab/sessions.json"), filepath.FromSlash("/home/user/.config/golab")},
+		{"relative", filepath.FromSlash("data/sessions.json"), filepath.FromSlash("data")},
+		{"separator-less", "sessions.json", "."},
+		{"root", filepath.FromSlash("/sessions.json"), string(filepath.Separator)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dirOf(tc.path); got != tc.want {
+				t.Fatalf("dirOf(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
