@@ -57,6 +57,14 @@ on-disk schema or persisted token format (per AGENTS.md).
   a `uint32` cast; the dead journal `terminal` field was removed; `doctor --fixtures`
   reports `skip` on an empty inventory; and a recoverable `usage` warning exits 0.
 
+- File and release-chain hardening from the gap report: token and session/settings
+  files are read with `Lstat` symlink/non-regular checks and mode self-healing,
+  and token writes take a cross-process flock; installed binaries and state
+  renames fsync their files and parent directories; update downloads reject
+  off-host or https→http redirects; the release workflow now splits the
+  unprivileged `build` job from the `id-token: write` `sign` job while keeping
+  the pinned certificate identity unchanged.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even

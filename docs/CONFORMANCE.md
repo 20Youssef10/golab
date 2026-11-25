@@ -112,9 +112,13 @@ Tier-1 archive:
   v2.6.5 writes `dsseEnvelope` at the bundle root (see the v0.1.8 note below).
 - **Release job is gated by the `release` GitHub environment.** GitHub
   auto-creates it on first use, but repo admins must add required reviewers for
-  it to actually gate publishing; until then it is bookkeeping only. Reducing
-  the keyless-signing path to a separate `id-token: write`-only job is deferred
-  until a live signed release can prove the artifact hand-off and ordering.
+  it to actually gate publishing; until then it is bookkeeping only. The
+  keyless-signing path now runs in a separate `sign` job holding the only
+  `id-token: write` permission; the `build` job has no signing identity and
+  hands off `dist/` as an Actions artifact. Both jobs remain in the same
+  `release.yml` file so the pinned certificate SAN is unchanged. A live tagged
+  release is still required to prove the artifact hand-off and Fulcio identity
+  end to end (see the v0.2.0 note below).
 - GoReleaser is pinned to **v2.20.3** in all three action steps (was the
   floating `~> v2`), and the proof step asserts `GITHUB_REPOSITORY` equals the
   updater pin `20Youssef10/golab` so a rename/transfer cannot silently publish
