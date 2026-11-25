@@ -35,6 +35,12 @@ var (
 // so callers cannot redirect a real update.
 var executablePath = os.Executable
 
+// syncFile is the fsync seam used by replaceBinary. It is a variable so tests
+// can assert the durability ordering (temp file synced before the rename,
+// parent directory synced after) without relying on real disk behaviour.
+// Production always calls File.Sync, including on a directory handle.
+var syncFile = func(f *os.File) error { return f.Sync() }
+
 // VerifyAndInstall downloads, verifies and installs a release. Verification
 // (checksum AND cosign keyless signature bound to the pinned identity) is
 // mandatory and happens before any filesystem mutation. A downgrade and any
@@ -220,6 +226,10 @@ func replaceBinary(target string, data []byte, goos string, mode fs.FileMode) er
 		_ = tmp.Close()
 		return fmt.Errorf("chmod update temp file: %w", err)
 	}
+	if err := syncFile(tmp); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync update temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close update temp file: %w", err)
 	}
@@ -239,13 +249,31 @@ func replaceBinary(target string, data []byte, goos string, mode fs.FileMode) er
 			_ = os.Rename(old, target)
 			return fmt.Errorf("install new executable: %w", err)
 		}
+		// Best-effort: persist the new directory entry after a successful rename.
+		syncParentDir(dir)
 		return nil
 	}
 
 	if err := os.Rename(tmpName, target); err != nil {
 		return fmt.Errorf("install new executable: %w", err)
 	}
+	// Best-effort: persist the renamed directory entry so a crash cannot
+	// leave the binary missing even though its data blocks were synced.
+	syncParentDir(dir)
 	return nil
+}
+
+// syncParentDir fsyncs the directory holding a renamed executable so the
+// directory entry itself reaches stable storage. It is best-effort: some
+// platforms and filesystems reject Sync on a directory handle, and a failure
+// here must not turn a completed install into an error.
+func syncParentDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	_ = syncFile(d)
 }
 
 // CleanupOld removes the .old backup left by a Windows self-update. The CLI

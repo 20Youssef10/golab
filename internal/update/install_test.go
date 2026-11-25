@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -310,6 +311,102 @@ func TestReplaceBinaryWindows(t *testing.T) {
 	// The currently installed executable must never be deleted.
 	if _, err := os.Stat(target); err != nil {
 		t.Fatalf("running executable was removed: %v", err)
+	}
+}
+
+// Durability regression: a crash after replaceBinary must never leave a
+// zero-length or missing executable. The temp file must be fsynced while it
+// still holds the complete payload and before it is renamed over the target;
+// the parent directory must be fsynced after the rename so the new directory
+// entry survives a power loss. Both paths (Unix atomic rename and the Windows
+// rename-via-.old strategy) must honour this ordering.
+func TestReplaceBinarySyncsAroundRename(t *testing.T) {
+	payload := []byte("new executable bytes")
+	for _, goos := range []string{"linux", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "golab")
+			if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			var names []string
+			tmpSyncedBeforeRename := false
+			tmpHadFullPayload := false
+			dirSyncedAfterRename := false
+
+			prev := syncFile
+			syncFile = func(f *os.File) error {
+				name := f.Name()
+				names = append(names, name)
+				onDisk, _ := os.ReadFile(target)
+				if strings.Contains(name, ".golab-update-") {
+					tmpSyncedBeforeRename = string(onDisk) == "old"
+					if data, err := os.ReadFile(name); err == nil {
+						tmpHadFullPayload = bytes.Equal(data, payload)
+					}
+				} else if name == dir {
+					dirSyncedAfterRename = bytes.Equal(onDisk, payload)
+				}
+				return nil
+			}
+			t.Cleanup(func() { syncFile = prev })
+
+			if err := replaceBinary(target, payload, goos, 0o755); err != nil {
+				t.Fatalf("replaceBinary: %v", err)
+			}
+			if !tmpHadFullPayload {
+				t.Fatalf("temp file was never synced with the full payload; sync calls = %v", names)
+			}
+			if !tmpSyncedBeforeRename {
+				t.Fatalf("temp file was not synced before the rename; sync calls = %v", names)
+			}
+			if !dirSyncedAfterRename {
+				t.Fatalf("parent directory was not synced after the rename; sync calls = %v", names)
+			}
+			got, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("installed binary = %q, want %q", got, payload)
+			}
+		})
+	}
+}
+
+// A failed fsync on the temp file must be reported and must abort before the
+// rename, leaving the currently installed binary untouched.
+func TestReplaceBinaryReportsTempSyncError(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "golab")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := syncFile
+	dirSynced := false
+	syncFile = func(f *os.File) error {
+		if strings.Contains(f.Name(), ".golab-update-") {
+			return errors.New("simulated fsync failure")
+		}
+		if f.Name() == dir {
+			dirSynced = true
+		}
+		return nil
+	}
+	t.Cleanup(func() { syncFile = prev })
+
+	err := replaceBinary(target, []byte("new"), "linux", 0o755)
+	if err == nil || !strings.Contains(err.Error(), "sync update temp file") {
+		t.Fatalf("replaceBinary error = %v, want a sync update temp file error", err)
+	}
+	if dirSynced {
+		t.Fatal("parent directory synced despite a failed temp-file sync")
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "old" {
+		t.Fatalf("failed sync modified the installed binary: %q", got)
 	}
 }
 
