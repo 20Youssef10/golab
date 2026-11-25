@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -32,6 +33,80 @@ type publicRuntimeSpec struct {
 	Variant     string `json:"variant"`
 	Accelerator string `json:"accelerator"`
 	Shape       string `json:"shape"`
+}
+
+// ErrRuntimeHardwareMismatch marks an already-existing runtime whose hardware
+// differs from the requested variant/accelerator/shape. Reattaching to it would
+// silently change the run's machine (and price), so we fail instead (§3.19).
+var ErrRuntimeHardwareMismatch = errors.New("existing runtime hardware does not match request")
+
+// HardwareMismatchError is the typed form of ErrRuntimeHardwareMismatch. Its
+// fields describe hardware only: no tokens, resource names or free-form server
+// text are copied in, so it is safe to log and to surface to the CLI.
+type HardwareMismatchError struct {
+	Requested string
+	Existing  string
+}
+
+func (e *HardwareMismatchError) Error() string {
+	return fmt.Sprintf("%s: requested %s, existing %s", ErrRuntimeHardwareMismatch, e.Requested, e.Existing)
+}
+
+func (e *HardwareMismatchError) Unwrap() error { return ErrRuntimeHardwareMismatch }
+
+// requestedPublicHardware is the wire form of the caller's validated intent.
+// Unset accelerator means NONE upstream, matching the tunnel path's default.
+func requestedPublicHardware(req AssignRequest) publicRuntimeSpec {
+	acc := string(req.Accelerator)
+	if acc == "" {
+		acc = string(AccelNone)
+	}
+	return publicRuntimeSpec{
+		Variant:     publicVariant(req.Variant),
+		Accelerator: acc,
+		Shape:       publicShape(req.Shape),
+	}
+}
+
+// existingPublicHardware normalises the wire form returned by GET. The Public
+// API may omit the spec fields or use *_UNSPECIFIED; mapPublicRuntime treats
+// those as CPU/NONE/STANDARD, so we compare against the same defaults.
+func existingPublicHardware(rt publicRuntime) publicRuntimeSpec {
+	spec := publicRuntimeSpec{
+		Variant:     rt.RuntimeSpec.Variant,
+		Accelerator: rt.RuntimeSpec.Accelerator,
+		Shape:       rt.RuntimeSpec.Shape,
+	}
+	switch spec.Variant {
+	case "", "VARIANT_UNSPECIFIED":
+		spec.Variant = "VARIANT_CPU"
+	}
+	if spec.Accelerator == "" {
+		spec.Accelerator = string(AccelNone)
+	}
+	switch spec.Shape {
+	case "", "SHAPE_UNSPECIFIED":
+		spec.Shape = "SHAPE_STANDARD"
+	}
+	return spec
+}
+
+func describePublicHardware(spec publicRuntimeSpec) string {
+	return fmt.Sprintf("variant=%s accelerator=%s shape=%s", spec.Variant, spec.Accelerator, spec.Shape)
+}
+
+// verifyReattachHardware gates every path that reattaches to an existing
+// runtime (operation code 6 and the uncertain-POST GET reconciliation).
+func verifyReattachHardware(req AssignRequest, rt publicRuntime) error {
+	want := requestedPublicHardware(req)
+	got := existingPublicHardware(rt)
+	if want == got {
+		return nil
+	}
+	return &HardwareMismatchError{
+		Requested: describePublicHardware(want),
+		Existing:  describePublicHardware(got),
+	}
 }
 
 // maxPublicAssignPolls bounds the LRO wait loop. Each :wait call may block for
@@ -83,11 +158,14 @@ func (c *client) assignPublic(ctx context.Context, req AssignRequest) (*Assignme
 	if err != nil {
 		return nil, err
 	}
+	// AIP-155: one stable id per logical operation. Retry attempts must reuse
+	// it so a delayed first POST cannot create a second runtime.
+	requestID := uuid.NewString()
 	var op publicOperation
 	for attempt := 0; ; attempt++ {
 		u := c.publicURL("/v1beta/runtimes", url.Values{
 			"runtimeId": {runtimeID},
-			"requestId": {uuid.NewString()},
+			"requestId": {requestID},
 		})
 		err := c.doRequest(ctx, http.MethodPost, u, requestOptions{
 			contentType: "application/json",
@@ -109,6 +187,9 @@ func (c *client) assignPublic(ctx context.Context, req AssignRequest) (*Assignme
 		// An uncertain POST may have created the runtime. The id is derived
 		// from the notebook hash, so a GET reconciles before we POST again.
 		if rt, getErr := c.getRuntimePublic(ctx, runtimeID); getErr == nil && rt.Name != "" {
+			if err := verifyReattachHardware(req, rt); err != nil {
+				return nil, err
+			}
 			out := mapPublicRuntime(rt, time.Now())
 			return &AssignmentResponse{
 				Accelerator: out.Accelerator, Endpoint: out.Endpoint,
@@ -191,6 +272,9 @@ func (c *client) mapOperationError(ctx context.Context, req AssignRequest, st *p
 	case 6: // ALREADY_EXISTS
 		rt, err := c.getRuntimePublic(ctx, req.NotebookHash.RuntimeID())
 		if err != nil {
+			return nil, err
+		}
+		if err := verifyReattachHardware(req, rt); err != nil {
 			return nil, err
 		}
 		out := mapPublicRuntime(rt, time.Now())

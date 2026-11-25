@@ -254,6 +254,127 @@ func TestPublicAssignReconcilesAfterTransientPOST(t *testing.T) {
 	require.Equal(t, 1, posts, "reconciliation avoids a second POST")
 }
 
+// §3.18: AIP-155 request ids identify ONE logical operation. Every POST
+// attempt of a retried assignment must carry the same requestId, otherwise a
+// delayed first attempt can create two runtimes. Ports the retry half of
+// docs/public_api_migration_plan.md §5 (requestId + retry reconciliation).
+func TestPublicAssignRetriesReuseRequestID(t *testing.T) {
+	t.Setenv("COLAB_CLI_RETRY_BACKOFF", "0")
+	fake := fakecolab.New()
+	defer fake.Close()
+	// Reconciliation must not short-circuit: GET says the runtime is absent,
+	// so the client really performs three POSTs (two 502s then success).
+	fake.SetPublicGetRuntime(fakecolab.Runtime{}, http.StatusNotFound)
+	fake.SetFault(fakecolab.Fault{
+		Method: http.MethodPost, PathContains: "/v1beta/runtimes",
+		Status: http.StatusBadGateway, Times: 2,
+	})
+	fake.SetPublicAssign(fakecolab.PublicOperationSpec{
+		Runtime: fakecolab.Runtime{
+			Name: "runtimes/r-retry", Endpoint: "m-s-retry", URL: "https://retry.example",
+			Token: "retry-token", Variant: "VARIANT_CPU", Accelerator: "NONE", Shape: "SHAPE_STANDARD",
+		},
+	})
+
+	res, err := publicClient(t, fake).Assign(context.Background(), colabapi.AssignRequest{NotebookHash: fixedHash(t)})
+	require.NoError(t, err)
+	require.Equal(t, "m-s-retry", res.Endpoint)
+
+	var ids []string
+	for _, r := range fake.Requests() {
+		if r.Method == http.MethodPost && r.Path == "/v1beta/runtimes" {
+			ids = append(ids, r.Query.Get("requestId"))
+		}
+	}
+	require.Len(t, ids, 3, "two transient failures then success")
+	require.NotEmpty(t, ids[0])
+	for i, id := range ids {
+		require.Equal(t, ids[0], id, "POST attempt %d used a different requestId", i)
+	}
+}
+
+// §3.19: ALREADY_EXISTS (operation code 6) is an idempotent reattach only when
+// the existing runtime has the requested hardware. Attaching a `run --gpu`
+// request to a differently-priced CPU/other-accelerator runtime is unsafe.
+func TestPublicAssignAlreadyExistsHardwareMismatch(t *testing.T) {
+	gpuRuntime := func(acc, shape string) fakecolab.Runtime {
+		return fakecolab.Runtime{
+			Name: "runtimes/r-existing", Endpoint: "m-s-existing", URL: "https://existing.example",
+			Token: "existing-token", Variant: "VARIANT_GPU", Accelerator: acc, Shape: shape,
+		}
+	}
+	req := func(v colabapi.Variant, acc colabapi.Accelerator, shape colabapi.Shape) colabapi.AssignRequest {
+		return colabapi.AssignRequest{NotebookHash: fixedHash(t), Variant: v, Accelerator: acc, Shape: shape}
+	}
+
+	cases := []struct {
+		name     string
+		existing fakecolab.Runtime
+		request  colabapi.AssignRequest
+		wantErr  bool
+	}{
+		{"accelerator mismatch", gpuRuntime("T4", "SHAPE_HIGHMEM"),
+			req(colabapi.VariantGPU, colabapi.AccelL4, colabapi.ShapeHighRAM), true},
+		{"variant mismatch", gpuRuntime("T4", "SHAPE_HIGHMEM"),
+			req(colabapi.VariantTPU, colabapi.AccelT4, colabapi.ShapeHighRAM), true},
+		{"shape mismatch", gpuRuntime("T4", "SHAPE_STANDARD"),
+			req(colabapi.VariantGPU, colabapi.AccelT4, colabapi.ShapeHighRAM), true},
+		{"matching hardware reattaches", gpuRuntime("T4", "SHAPE_HIGHMEM"),
+			req(colabapi.VariantGPU, colabapi.AccelT4, colabapi.ShapeHighRAM), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := fakecolab.New()
+			defer fake.Close()
+			fake.SetPublicAssign(fakecolab.PublicOperationSpec{ErrorCode: 6, ErrorMessage: "exists"})
+			fake.SetPublicGetRuntime(tc.existing, 0)
+
+			res, err := publicClient(t, fake).Assign(context.Background(), tc.request)
+			if tc.wantErr {
+				require.Error(t, err, "mismatched hardware must not be silently reattached")
+				require.Nil(t, res)
+				require.True(t, errors.Is(err, colabapi.ErrRuntimeHardwareMismatch), "got %v", err)
+				var mismatch *colabapi.HardwareMismatchError
+				require.True(t, errors.As(err, &mismatch), "got %v", err)
+				require.Contains(t, err.Error(), "requested")
+				require.Contains(t, err.Error(), "accelerator")
+				require.NotContains(t, err.Error(), "existing-token", "error must not leak credentials")
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, res)
+				require.True(t, res.Reattached)
+			}
+		})
+	}
+}
+
+// §3.19: the same hardware guard applies when a lost POST response is
+// reconciled by GET before the retry loop (§3.18's "operation created, :wait
+// lost" case). A matching runtime still reattaches.
+func TestPublicAssignReconcileRejectsHardwareMismatch(t *testing.T) {
+	t.Setenv("COLAB_CLI_RETRY_BACKOFF", "0")
+	fake := fakecolab.New()
+	defer fake.Close()
+	fake.SetFault(fakecolab.Fault{
+		Method: http.MethodPost, PathContains: "/v1beta/runtimes",
+		Status: http.StatusBadGateway, Times: 1,
+	})
+	fake.SetPublicGetRuntime(fakecolab.Runtime{
+		Name: "runtimes/r-other", Endpoint: "m-s-other", URL: "https://other.example",
+		Token: "other-token", Variant: "VARIANT_CPU", Accelerator: "NONE", Shape: "SHAPE_STANDARD",
+	}, 0)
+
+	res, err := publicClient(t, fake).Assign(context.Background(), colabapi.AssignRequest{
+		NotebookHash: fixedHash(t), Variant: colabapi.VariantGPU,
+		Accelerator: colabapi.AccelT4, Shape: colabapi.ShapeHighRAM,
+	})
+	require.Error(t, err)
+	require.Nil(t, res)
+	require.True(t, errors.Is(err, colabapi.ErrRuntimeHardwareMismatch), "got %v", err)
+	require.Contains(t, err.Error(), "requested")
+	require.NotContains(t, err.Error(), "other-token")
+}
+
 // Backward compatibility: Unassign on the tunnel path is unchanged.
 func TestTunnelUnassignStillWorksUnderPublicClientFlag(t *testing.T) {
 	fake := fakecolab.New()
