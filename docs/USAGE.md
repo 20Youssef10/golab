@@ -69,7 +69,7 @@ golab resume -s train
 golab resume -s train --timeout 0
 ```
 
-Reattach to an execution interrupted by a transport error and wait for its remaining output and final result **without resubmitting the code**. A bounded in-memory journal deduplicates frames replayed after a reconnect. If the kernel emitted output strictly while the socket was down, that output cannot be reconstructed — the original error is a typed `ErrOutputGap` and `resume` only recovers what the new socket actually delivers. With no pending execution it exits 1 with a usage hint. `--timeout SECONDS` uses the same idle semantics as `exec` (`0` = unlimited). Successful resume clears the pending record; it never auto-shuts down the session.
+Reattach to an execution interrupted by a transport error and wait for its remaining output and final result **without resubmitting the code**. A bounded in-memory journal (count and byte caps) deduplicates frames replayed after a reconnect and remembers an observed `status:idle`, so a drop between idle and the final reply resumes to a terminal result instead of timing out. If the kernel emitted output strictly while the socket was down, that output cannot be reconstructed — the original error is a typed `ErrOutputGap` and `resume` only recovers what the new socket actually delivers. With no pending execution it exits 1 with a usage hint. `--timeout SECONDS` uses the same idle semantics as `exec` (`0` = unlimited). Successful resume clears the pending record; it never auto-shuts down the session.
 
 ### `golab restart-kernel`
 

@@ -30,6 +30,16 @@ on-disk schema or persisted token format (per AGENTS.md).
   `golab.yaml` profiles now parse `enforce: true|false`, so profile-based budget
   enforcement actually works (named profiles override defaults).
 
+- Resume and protocol-integrity fixes from the same audit: the journal now
+  persists that `status:idle` was seen, so a socket drop between idle and
+  `execute_reply` can be resumed to a terminal result instead of timing out;
+  output accumulation and journal retention are bounded by count and bytes;
+  a cancel during socket loss posts exactly one interrupt; colab_request hooks
+  run on a bounded worker and socket writes hold the write lock; a timed-out
+  kernel create reconciles with the server before retrying so a late-successful
+  create is reused rather than duplicated; `requestId` is stable across retries;
+  and `ALREADY_EXISTS` reattachment now verifies variant/accelerator/shape.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even
