@@ -65,6 +65,15 @@ on-disk schema or persisted token format (per AGENTS.md).
   unprivileged `build` job from the `id-token: write` `sign` job while keeping
   the pinned certificate identity unchanged.
 
+- SSH/platform hardening from the gap report: embedded SSH connections now
+  pin host keys with TOFU (stored in a separate private `known_hosts.json`, so
+  no sessions schema migration); loose private-key permissions emit a warning;
+  test-only env overrides (`COLAB_TEST_*`, `COLAB_TEST_NO_SIGNALS`,
+  `COLAB_TEST_AGENT`) are inert in release binaries; the keyring probe is
+  cancellable and caches unavailability; `stop` path containment is asserted in
+  sync apply; the auto-update notice skips `--explain` and joins its async
+  writer before exit.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even
