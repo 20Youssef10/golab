@@ -319,7 +319,7 @@ func TestStop(t *testing.T) {
 				NotebookHash: randomNBH(t),
 			})
 		}
-		if code := h.run(t, "", "stop", "--all"); code != 0 {
+		if code := h.run(t, "", "stop", "--all", "--yes"); code != 0 {
 			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
 		}
 		if !strings.Contains(h.stderr.String(), "Stopped 2 session(s).") {
@@ -336,7 +336,7 @@ func TestStop(t *testing.T) {
 	})
 	t.Run("all empty", func(t *testing.T) {
 		h := newHarness(t)
-		if code := h.run(t, "", "stop", "--all"); code != 0 {
+		if code := h.run(t, "", "stop", "--all", "--yes"); code != 0 {
 			t.Fatalf("exit=%d", code)
 		}
 		if !strings.Contains(h.stderr.String(), "No active sessions.") {
@@ -358,6 +358,45 @@ func TestStop(t *testing.T) {
 	})
 }
 
+// CONFIRMED DEFECT §4.15: with neither a TTY nor --yes/COLAB_ASSUME_YES,
+// `stop --all` must refuse before unassigning anything. The contract in
+// docs/AUDIT-04-surpass.md §A3 and docs/COMPAT.md is exit 2 plus a one-line hint.
+func TestStopAllRefusesWithoutTTYOrYes(t *testing.T) {
+	t.Setenv("COLAB_ASSUME_YES", "")
+	t.Setenv("COLAB_TEST_STDIN_TTY", "0")
+	h := newHarness(t)
+	s := h.assignAndStore(t, "s1", colabapi.AssignRequest{NotebookHash: randomNBH(t)})
+
+	code := h.run(t, "", "stop", "--all")
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2; stderr=%q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "--yes") {
+		t.Fatalf("stderr missing --yes hint: %q", h.stderr.String())
+	}
+	for _, r := range h.ctrl.Requests() {
+		if r.Method == http.MethodPost && strings.Contains(r.Path, "/unassign") {
+			t.Fatalf("unassign POST despite refusal: %+v", h.ctrl.Requests())
+		}
+	}
+	assignments, err := h.client.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, a := range assignments {
+		if a.Endpoint == s.Endpoint {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("session unassigned despite refusal: %+v", assignments)
+	}
+	if _, err := h.deps.Store.Get("s1"); err != nil {
+		t.Fatalf("local session removed despite refusal: %v", err)
+	}
+}
+
 // Ports upstream tests/test_cli.py::test_cli_stop_all failure path: a failed
 // unassign must not be swallowed or counted as a success. A user must never be
 // told everything stopped while a runtime keeps billing.
@@ -371,7 +410,7 @@ func TestStopAllReportsFailures(t *testing.T) {
 		PathContains: "/unassign/" + s1.Endpoint,
 		Status:       http.StatusBadGateway,
 	})
-	if code := h.run(t, "", "stop", "--all"); code != 1 {
+	if code := h.run(t, "", "stop", "--all", "--yes"); code != 1 {
 		t.Fatalf("exit=%d, want 1; stderr=%q", code, h.stderr.String())
 	}
 	if !strings.Contains(h.stderr.String(), "Failed to stop session 's1'") {
@@ -531,7 +570,7 @@ func TestStopVerify(t *testing.T) {
 		for _, name := range []string{"s1", "s2"} {
 			h.assignAndStore(t, name, colabapi.AssignRequest{NotebookHash: randomNBH(t)})
 		}
-		if code := h.run(t, "", "stop", "--all", "--verify"); code != 0 {
+		if code := h.run(t, "", "stop", "--all", "--verify", "--yes"); code != 0 {
 			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
 		}
 		if !strings.Contains(h.stderr.String(), "Stopped 2 session(s).") ||
@@ -548,7 +587,7 @@ func TestStopVerify(t *testing.T) {
 			Method: http.MethodPost, PathContains: "/unassign",
 			Status: http.StatusOK, Body: "[]", Times: -1,
 		})
-		if code := h.run(t, "", "stop", "--all", "--verify"); code != 1 ||
+		if code := h.run(t, "", "stop", "--all", "--verify", "--yes"); code != 1 ||
 			!strings.Contains(h.stderr.String(), "still assigned") {
 			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
 		}

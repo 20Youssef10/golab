@@ -393,7 +393,11 @@ func stopCommand() *cobra.Command {
 					names = append(names, n)
 				}
 				sort.Strings(names)
-				if !assumeYes(cmd) && platform.IsStdinTTY() {
+				if !assumeYes(cmd) {
+					if !platform.IsStdinTTY() {
+						return usagef("[colab] Refusing to stop all sessions: stdin is not a TTY. " +
+							"Re-run with --yes (or set COLAB_ASSUME_YES=1) to confirm.")
+					}
 					fmt.Fprintf(d.Stderr, "[colab] Stop %d session(s)? [y/N] ", len(local))
 					var answer string
 					_, _ = fmt.Fscanln(d.Stdin, &answer)
