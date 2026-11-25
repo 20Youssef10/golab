@@ -12,6 +12,7 @@ import (
 
 	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/colabapi"
+	"github.com/20Youssef10/golab/internal/logx"
 	"github.com/20Youssef10/golab/internal/platform"
 	"github.com/20Youssef10/golab/internal/state"
 )
@@ -402,10 +403,21 @@ func stopCommand() *cobra.Command {
 						return nil
 					}
 				}
+				var stoppedCount int
+				var failed []string
 				for _, n := range names {
-					_ = stopOne(cmd.Context(), d, n, local[n], false)
+					if err := stopOne(cmd.Context(), d, n, local[n], false); err != nil {
+						fmt.Fprintf(d.Stderr, "[colab] Failed to stop session '%s': %s\n", n, logx.Redact(err.Error()))
+						failed = append(failed, n)
+						continue
+					}
+					stoppedCount++
+					fmt.Fprintf(d.Stderr, "[colab] Stopped session '%s'.\n", n)
 				}
-				fmt.Fprintf(d.Stderr, "[colab] Stopped %d session(s).\n", len(local))
+				fmt.Fprintf(d.Stderr, "[colab] Stopped %d session(s).\n", stoppedCount)
+				if len(failed) > 0 {
+					return exitf(1, "[colab] Failed to stop session(s): %s.", strings.Join(failed, ", "))
+				}
 				if verify {
 					stopped := make([]state.Session, 0, len(local))
 					for _, n := range names {

@@ -358,6 +358,47 @@ func TestStop(t *testing.T) {
 	})
 }
 
+// Ports upstream tests/test_cli.py::test_cli_stop_all failure path: a failed
+// unassign must not be swallowed or counted as a success. A user must never be
+// told everything stopped while a runtime keeps billing.
+func TestStopAllReportsFailures(t *testing.T) {
+	h := newHarness(t)
+	s1 := h.assignAndStore(t, "s1", colabapi.AssignRequest{NotebookHash: randomNBH(t)})
+	h.assignAndStore(t, "s2", colabapi.AssignRequest{NotebookHash: randomNBH(t)})
+	// Fail the backend unassign for s1 only; s2 still stops cleanly.
+	h.ctrl.SetFault(fakecolab.Fault{
+		Method:       http.MethodPost,
+		PathContains: "/unassign/" + s1.Endpoint,
+		Status:       http.StatusBadGateway,
+	})
+	if code := h.run(t, "", "stop", "--all"); code != 1 {
+		t.Fatalf("exit=%d, want 1; stderr=%q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "Failed to stop session 's1'") {
+		t.Fatalf("failed session not named in stderr: %q", h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "Stopped 1 session(s).") {
+		t.Fatalf("successful-stop count not reported: %q", h.stderr.String())
+	}
+	if strings.Contains(h.stderr.String(), "Stopped 2 session(s).") {
+		t.Fatalf("false success count reported: %q", h.stderr.String())
+	}
+	// The failed runtime must remain assigned on the server.
+	assignments, err := h.client.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, a := range assignments {
+		if a.Endpoint == s1.Endpoint {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("failed session no longer assigned: %+v", assignments)
+	}
+}
+
 // Ports upstream tests/test_cli.py::test_cli_log_* via the history package's
 // exporters; the CLI selects the exporter from the -o suffix.
 func TestLog(t *testing.T) {
