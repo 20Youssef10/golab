@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -256,6 +257,52 @@ func TestRunNotebookExplainMakesNoPosts(t *testing.T) {
 	}
 	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
 		t.Fatalf("--explain wrote an output notebook (err=%v)", err)
+	}
+}
+
+// buildScriptPayload must surface read failures instead of returning an empty
+// payload that would silently execute as a successful no-op.
+func TestBuildScriptPayloadReadError(t *testing.T) {
+	payload, err := buildScriptPayload(filepath.Join(t.TempDir(), "missing.py"), nil, nil)
+	if err == nil {
+		t.Fatal("buildScriptPayload returned nil error for an unreadable script")
+	}
+	if payload != "" {
+		t.Fatalf("payload = %q, want empty on read failure", payload)
+	}
+}
+
+// Ports upstream tests/test_run.py::test_run_missing_script_errors_before_assign
+// and pins confirmed defect 2.3: os.Stat can succeed while os.ReadFile fails
+// (TOCTOU / special files). The script must be read BEFORE createSession so an
+// unreadable script can never run an empty payload on a billable VM. A bound
+// unix socket is used because Stat accepts it and IsDir() is false, but
+// os.ReadFile rejects it with ENXIO — a read failure the Stat guard cannot see.
+func TestRunUnreadableScriptMakesNoPosts(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("unix socket paths are not readable on Windows")
+	}
+	h := newHarness(t)
+	sock := filepath.Join(t.TempDir(), "script.py")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	code := h.run(t, "", "run", sock)
+	if code != 2 {
+		t.Fatalf("exit=%d want 2 (unreadable script must be a usage error) stderr=%q stdout=%q",
+			code, h.stderr.String(), h.stdout.String())
+	}
+	if !strings.Contains(h.stderr.String(), "Could not read script") {
+		t.Fatalf("stderr missing clear read error: %q", h.stderr.String())
+	}
+	if reqs := h.ctrl.Requests(); len(reqs) != 0 {
+		t.Fatalf("allocated VM despite unreadable script: %+v", reqs)
+	}
+	if execs := h.kernel.Executions(); len(execs) != 0 {
+		t.Fatalf("executed code despite unreadable script: %+v", execs)
 	}
 }
 

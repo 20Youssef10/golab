@@ -59,11 +59,14 @@ func stripShebang(body string) string {
 
 // buildScriptPayload produces Python source that runs the script body with
 // python-like sys.argv/__name__ semantics. Every user string is JSON-encoded
-// into a Python literal before being embedded (never string-spliced).
-func buildScriptPayload(script string, args []string, env []envVar) string {
+// into a Python literal before being embedded (never string-spliced). A read
+// failure is returned to the caller, which must surface it before allocating
+// a runtime — silently returning an empty payload would run nothing on a
+// billable VM and exit 0.
+func buildScriptPayload(script string, args []string, env []envVar) (string, error) {
 	body, err := os.ReadFile(script)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	argv := make([]string, 0, len(args)+1)
 	argv = append(argv, filepath.Base(script))
@@ -79,7 +82,7 @@ func buildScriptPayload(script string, args []string, env []envVar) string {
 	b.WriteString("warnings.filterwarnings('ignore', message=\"To exit: use\")\n")
 	b.WriteString(envPrelude(env))
 	b.WriteString(stripShebang(string(body)))
-	return b.String()
+	return b.String(), nil
 }
 
 func systemExitCode(value string) int {
@@ -267,6 +270,7 @@ func runCommand() *cobra.Command {
 			isNB := strings.HasSuffix(strings.ToLower(script), ".ipynb")
 			var notebook *nb.Notebook
 			var blocks []codeBlock
+			var payload string
 			if isNB {
 				var err error
 				blocks, notebook, err = readCodeBlocks(d, script)
@@ -276,6 +280,17 @@ func runCommand() *cobra.Command {
 				if len(forwarded) > 0 {
 					// No sys.argv injection for notebooks: never echo the values.
 					fmt.Fprintf(d.Stderr, "[colab] Warning: extra arguments ignored for notebook '%s' (no sys.argv injection).\n", filepath.Base(script))
+				}
+			} else {
+				// Read the plain script up front, next to the notebook parse
+				// above: an unreadable file must fail before createSession so it
+				// costs zero requests and never runs an empty (false-success)
+				// payload on a billable VM. The Stat checks above only narrow
+				// the TOCTOU/permission/special-file window.
+				var err error
+				payload, err = buildScriptPayload(script, forwarded, envVars)
+				if err != nil {
+					return usagef("[colab] Could not read script '%s': %v", script, err)
 				}
 			}
 			if err := guardBudget(cmd.Context(), d, cmd); err != nil {
@@ -383,7 +398,8 @@ func runCommand() *cobra.Command {
 					}
 				}
 			} else {
-				payload := buildScriptPayload(script, forwarded, envVars)
+				// payload was built before createSession, so an unreadable
+				// script could never reach the allocation path above.
 				setRunning(d, &s, running("run("+filepath.Base(script)+")"))
 				setLastExecution(d, &s, script, nil)
 				var renderErr error
