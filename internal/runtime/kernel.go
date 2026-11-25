@@ -314,7 +314,6 @@ executeLoop:
 	}
 
 	// Terminal idle + reply arrived: recovery is no longer possible or needed.
-	j.terminal = true
 	k.deleteJournal(msgID)
 
 	content := reply.contentMap()

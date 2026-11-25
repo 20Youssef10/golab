@@ -25,7 +25,6 @@ type journal struct {
 	delivered int  // outputs already emitted to the caller
 	dropped   bool // the socket dropped at least once during this execution
 	sawIdle   bool // terminal idle was observed; survives Resume
-	terminal  bool // idle + execute_reply were both observed
 }
 
 func newJournal(msgID string) *journal { return &journal{msgID: msgID} }

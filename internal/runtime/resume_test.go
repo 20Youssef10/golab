@@ -358,6 +358,93 @@ func TestResumeAfterIdleThenDropCompletesWithLateReply(t *testing.T) {
 	}
 }
 
+// TestTerminalIdleReplyDeletesJournalAndResumeUsesFreshJournal pins the two
+// behaviours around the terminal idle+execute_reply path. The journal's dead
+// `terminal` bool used to be set here but was never read: neither recovery nor
+// resume gated on it (sawIdle carries the terminal condition). Removing it must
+// leave intact (1) deletion of the completed journal and (2) Resume creating a
+// fresh journal for the same id and completing against late terminal frames.
+func TestTerminalIdleReplyDeletesJournalAndResumeUsesFreshJournal(t *testing.T) {
+	ws := newFakeWS()
+	k := newFakeKernel(t, ws, &fakeDialer{})
+	defer k.Close()
+
+	countRequests := func() int {
+		n := 0
+		for _, w := range ws.written() {
+			msg, err := DecodeFrame(w.data, w.typ == websocket.MessageBinary)
+			if err == nil && msg.Header.MsgType == "execute_request" {
+				n++
+			}
+		}
+		return n
+	}
+
+	const execID = "exec-terminal-idle-reply"
+	done := make(chan *Result, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		res, err := k.Execute(context.Background(), "work()", ExecOptions{
+			MsgID: execID, IdleTimeout: 5 * time.Second,
+		})
+		errCh <- err
+		done <- res
+	}()
+	if got := waitExecID(t, ws); got != execID {
+		t.Fatalf("execute_request used msg id %q, want %q", got, execID)
+	}
+	// Drive the terminal path: output, status:idle, then execute_reply.
+	ws.pushFrame(t, execStreamMsg(execID, "out-1", "A\n"))
+	ws.pushFrame(t, idleMsg(execID))
+	ws.pushFrame(t, replyMsg(execID, "ok"))
+
+	if err := collectErr(t, errCh); err != nil {
+		t.Fatalf("terminal completion returned an error: %v", err)
+	}
+	res := <-done
+	if res == nil || res.Status != "ok" {
+		t.Fatalf("terminal completion returned the wrong result: %+v", res)
+	}
+	if len(res.Outputs) != 1 || res.Outputs[0].Text != "A\n" {
+		t.Fatalf("terminal completion lost output: %+v", res.Outputs)
+	}
+	// The terminal journal is deleted; the removed flag never gated this.
+	if j := k.lookupJournal(execID); j != nil {
+		t.Fatal("terminal journal was not deleted after idle+reply")
+	}
+	requestsBefore := countRequests()
+	if requestsBefore != 1 {
+		t.Fatalf("want exactly one execute_request from Execute, got %d", requestsBefore)
+	}
+
+	// Resume for the completed id starts from a fresh journal and completes
+	// against a new terminal idle+reply, without resubmitting the code.
+	resumeDone := make(chan *Result, 1)
+	resumeErr := make(chan error, 1)
+	go func() {
+		res, err := k.Resume(context.Background(), execID, ExecOptions{IdleTimeout: 5 * time.Second})
+		resumeErr <- err
+		resumeDone <- res
+	}()
+	ws.pushFrame(t, execStreamMsg(execID, "out-2", "B\n"))
+	ws.pushFrame(t, idleMsg(execID))
+	ws.pushFrame(t, replyMsg(execID, "ok"))
+
+	if err := collectErr(t, resumeErr); err != nil {
+		t.Fatalf("Resume after terminal completion failed: %v", err)
+	}
+	resumed := <-resumeDone
+	if resumed == nil || resumed.Status != "ok" {
+		t.Fatalf("Resume returned the wrong result: %+v", resumed)
+	}
+	if len(resumed.Outputs) != 1 || resumed.Outputs[0].Text != "B\n" {
+		t.Fatalf("Resume outputs wrong: %+v", resumed.Outputs)
+	}
+	if n := countRequests(); n != requestsBefore {
+		t.Fatalf("Resume resubmitted execute_request: before=%d after=%d", requestsBefore, n)
+	}
+}
+
 func countInterruptPOSTs(srv *fakekernel.Server) int {
 	n := 0
 	for _, r := range srv.Requests() {
