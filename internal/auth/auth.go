@@ -154,8 +154,8 @@ var ErrNoAuthCode = errors.New("no authorization code entered")
 // ErrLegacyToken means the migrated Python token.json was unusable.
 var ErrLegacyToken = errors.New("invalid legacy token file")
 
-// ErrInsecureTokenURI means a non-HTTPS token URI was configured for a
-// non-loopback host (loopback is permitted for local fakes/tests).
+// ErrInsecureTokenURI means a token URI other than the pinned Google endpoint
+// was configured (loopback is permitted only in the test binary).
 var ErrInsecureTokenURI = errors.New("insecure OAuth token URI")
 
 // ErrTokenExchange is the sentinel for TokenExchangeError.

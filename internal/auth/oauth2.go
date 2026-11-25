@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,10 @@ import (
 //
 //go:embed oauth_config.json
 var bundledOAuthConfig []byte
+
+// canonicalTokenURI is the only token endpoint a release build may use. A
+// stored token blob cannot change it (defect 2.6).
+const canonicalTokenURI = "https://oauth2.googleapis.com/token"
 
 type clientConfig struct {
 	ClientID     string
@@ -70,10 +75,14 @@ type storedToken struct {
 	// from the granted set above. A change here forces fresh consent; the
 	// granted set stays authoritative for refresh so partial consent survives.
 	// Tokens saved before --scopes existed leave it empty (= the full set).
-	RequestedScopes []string    `json:"requested_scopes,omitempty"`
-	ClientID        string      `json:"client_id,omitempty"`
-	ClientSecret    logx.Secret `json:"-"`
-	TokenURI        string      `json:"token_uri,omitempty"`
+	RequestedScopes []string `json:"requested_scopes,omitempty"`
+	// ClientID and TokenURI are legacy metadata for compatibility with files
+	// written by earlier versions and Python's token.json. They are NEVER
+	// consulted when building the OAuth config: the client config (embedded
+	// unless -c is given) is the only source of client identity and endpoint.
+	ClientID     string      `json:"client_id,omitempty"`
+	ClientSecret logx.Secret `json:"-"`
+	TokenURI     string      `json:"token_uri,omitempty"`
 }
 
 // decodeStored also accepts Python google.oauth2.credentials' "token" field
@@ -162,7 +171,7 @@ func (p *oauth2Provider) loadClientConfig() (clientConfig, error) {
 		return clientConfig{}, fmt.Errorf("%w: no installed/web client_id and token_uri in %q", ErrNoClientConfig, path)
 	}
 	if !allowedTokenURI(details.TokenURI) {
-		return clientConfig{}, fmt.Errorf("%w: token URI must be HTTPS (or loopback for local fakes)", ErrInsecureTokenURI)
+		return clientConfig{}, fmt.Errorf("%w: token URI must be %q (loopback only in tests)", ErrInsecureTokenURI, canonicalTokenURI)
 	}
 	authURI := details.AuthURI
 	if authURI == "" {
@@ -176,16 +185,23 @@ func (p *oauth2Provider) loadClientConfig() (clientConfig, error) {
 	}, nil
 }
 
-// allowedTokenURI rejects plaintext HTTP except for loopback test servers.
+// allowedTokenURI pins the token endpoint to Google's published URL. The only
+// exception is a loopback HTTP server in the Go test binary (httptest fakes);
+// a release build has no "test.v" flag and cannot be redirected to any other
+// host — HTTPS or plaintext. Compare the pinned URL literally so lookalikes
+// (extra path, port, userinfo, query) cannot slip through.
 func allowedTokenURI(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	if strings.EqualFold(u.Scheme, "https") {
+	if raw == canonicalTokenURI {
 		return true
 	}
-	if !strings.EqualFold(u.Scheme, "http") {
+	if flag.CommandLine.Lookup("test.v") == nil {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !strings.EqualFold(u.Scheme, "http") {
+		return false
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return false
 	}
 	host := u.Hostname()
@@ -228,19 +244,12 @@ func (p *oauth2Provider) HTTPClient(ctx context.Context, scopes []string) (*http
 			loadErr = nil
 		}
 	}
-	if loadErr == nil {
-		// Python's token.json carries its own client metadata; honour it so a
-		// legacy token can be refreshed without -c pointing at the same client.
-		if s.ClientID != "" {
-			conf.ClientID = s.ClientID
-		}
-		if s.ClientSecret.Reveal() != "" {
-			conf.ClientSecret = s.ClientSecret.Reveal()
-		}
-		if s.TokenURI != "" && allowedTokenURI(s.TokenURI) {
-			conf.Endpoint.TokenURL = s.TokenURI
-		}
-	}
+	// Security (defect 2.6): the stored blob is opaque credential material,
+	// not configuration. A planted blob must not be able to redirect the
+	// refresh exchange or change the OAuth client identity. Client ID, secret
+	// and token endpoint all stay as loaded from the client config above;
+	// neither value is ever logged. A legacy token minted under another
+	// client simply triggers a fresh consent flow when refresh fails.
 
 	var tok *oauth2.Token
 	var granted []string
