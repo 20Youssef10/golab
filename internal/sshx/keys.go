@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -49,9 +50,19 @@ func PublicKeyType(line string) (string, error) {
 
 // ResolveKey implements the documented discovery order (ADR-005):
 // --identity → ssh-agent → ~/.ssh/id_ed25519 → id_ecdsa.
+// Private-key permission warnings are written to os.Stderr.
 func ResolveKey(identity string) (KeyMaterial, error) {
+	return ResolveKeyWithWriter(identity, os.Stderr)
+}
+
+// ResolveKeyWithWriter is ResolveKey with a caller-supplied destination for
+// private-key permission warnings; a nil writer falls back to os.Stderr.
+func ResolveKeyWithWriter(identity string, warn io.Writer) (KeyMaterial, error) {
+	if warn == nil {
+		warn = os.Stderr
+	}
 	if identity != "" {
-		return resolveIdentity(identity)
+		return resolveIdentity(identity, warn)
 	}
 	// Agent keys come before key files, matching ADR-005.
 	if signers := agentSigners(); len(signers) > 0 {
@@ -70,12 +81,17 @@ func ResolveKey(identity string) (KeyMaterial, error) {
 		priv := filepath.Join(home, ".ssh", name)
 		pub := priv + ".pub"
 		if info, err := os.Stat(priv); err == nil && !info.IsDir() {
+			warnLooseKeyPerms(warn, priv, info.Mode())
 			line, err := DerivePublicLine(priv)
 			if err != nil {
 				return KeyMaterial{}, err
 			}
 			km := KeyMaterial{PublicLine: line, Source: name}
-			if signer, err := ssh.ParsePrivateKey(mustRead(priv)); err == nil {
+			b, err := mustRead(priv)
+			if err != nil {
+				return KeyMaterial{}, err
+			}
+			if signer, err := ssh.ParsePrivateKey(b); err == nil {
 				km.Signers = append(km.Signers, signer)
 			} else {
 				km.Signers = append(km.Signers, agentSigners()...)
@@ -83,7 +99,11 @@ func ResolveKey(identity string) (KeyMaterial, error) {
 			return km, nil
 		}
 		if info, err := os.Stat(pub); err == nil && !info.IsDir() {
-			line := strings.TrimSpace(string(mustRead(pub)))
+			b, err := mustRead(pub)
+			if err != nil {
+				return KeyMaterial{}, err
+			}
+			line := strings.TrimSpace(string(b))
 			if line == "" {
 				continue
 			}
@@ -99,7 +119,7 @@ func ResolveKey(identity string) (KeyMaterial, error) {
 		"Run `ssh-keygen -t ed25519` to generate one, or pass --identity", ErrNoSSHKey)
 }
 
-func resolveIdentity(identity string) (KeyMaterial, error) {
+func resolveIdentity(identity string, warn io.Writer) (KeyMaterial, error) {
 	expanded := expandHome(identity)
 	var privPath, pubPath string
 	if strings.HasSuffix(strings.ToLower(expanded), ".pub") {
@@ -116,21 +136,31 @@ func resolveIdentity(identity string) (KeyMaterial, error) {
 			}
 			km := KeyMaterial{PublicLine: line, Source: "identity", Signers: agentSigners()}
 			// A private key alongside the .pub is preferred for signing.
-			if _, err := os.Stat(privPath); err == nil {
-				if signer, err := ssh.ParsePrivateKey(mustRead(privPath)); err == nil {
+			if info, err := os.Stat(privPath); err == nil {
+				warnLooseKeyPerms(warn, privPath, info.Mode())
+				b, err := mustRead(privPath)
+				if err != nil {
+					return KeyMaterial{}, err
+				}
+				if signer, err := ssh.ParsePrivateKey(b); err == nil {
 					km.Signers = append([]ssh.Signer{signer}, km.Signers...)
 				}
 			}
 			return km, nil
 		}
 	}
-	if _, err := os.Stat(privPath); err == nil {
+	if info, err := os.Stat(privPath); err == nil {
+		warnLooseKeyPerms(warn, privPath, info.Mode())
 		line, err := DerivePublicLine(privPath)
 		if err != nil {
 			return KeyMaterial{}, err
 		}
 		km := KeyMaterial{PublicLine: line, Source: "identity"}
-		if signer, err := ssh.ParsePrivateKey(mustRead(privPath)); err == nil {
+		b, err := mustRead(privPath)
+		if err != nil {
+			return KeyMaterial{}, err
+		}
+		if signer, err := ssh.ParsePrivateKey(b); err == nil {
 			km.Signers = append(km.Signers, signer)
 		} else {
 			km.Signers = append(km.Signers, agentSigners()...)
@@ -143,9 +173,25 @@ func resolveIdentity(identity string) (KeyMaterial, error) {
 	return KeyMaterial{}, &KeyError{Path: identity, Reason: "no public key could be derived."}
 }
 
-func mustRead(path string) []byte {
-	b, _ := os.ReadFile(path)
-	return b
+// warnLooseKeyPerms warns without refusing the key: group/other-accessible
+// private keys are an information-disclosure risk, but refusing them would
+// break legitimate shared-home setups.
+func warnLooseKeyPerms(w io.Writer, path string, mode os.FileMode) {
+	if mode.Perm()&0o077 == 0 {
+		return
+	}
+	fmt.Fprintf(w, "[colab] warning: private key %s has mode %04o (group/other can access it); "+
+		"run `chmod 600 %s` to restrict access\n", path, mode.Perm(), path)
+}
+
+// mustRead reads a key file and reports failures as a typed *KeyError instead
+// of silently returning nil bytes.
+func mustRead(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, &KeyError{Path: path, Reason: "unable to read key file.", Err: err}
+	}
+	return b, nil
 }
 
 func expandHome(p string) string {
@@ -274,11 +320,22 @@ func sshReadString(b []byte, off *int) ([]byte, error) {
 // agentSignersHook is a test seam; production code always leaves it nil.
 var agentSignersHook func() []ssh.Signer
 
+// suppressAgentForTest reports whether the test-only COLAB_TEST_AGENT control
+// is active. It requires a Go test binary ("test.v") or an explicit
+// COLAB_TESTING=1 opt-in: an ambient environment variable must not be able to
+// flip agent behaviour in a release binary (§4.11).
+func suppressAgentForTest() bool {
+	if flag.CommandLine.Lookup("test.v") == nil && os.Getenv("COLAB_TESTING") != "1" {
+		return false
+	}
+	return os.Getenv("COLAB_TEST_AGENT") == "0"
+}
+
 func agentSigners() []ssh.Signer {
 	if agentSignersHook != nil {
 		return agentSignersHook()
 	}
-	if os.Getenv("COLAB_TEST_AGENT") == "0" {
+	if suppressAgentForTest() {
 		return nil
 	}
 	var out []ssh.Signer

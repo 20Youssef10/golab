@@ -1,11 +1,13 @@
 package sshx
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,5 +234,123 @@ func TestDerivePublicLineFromGeneratedKey(t *testing.T) {
 	// The derived line must be accepted verbatim by the public-key parser.
 	if typ, err := PublicKeyType(line); err != nil || typ != "ssh-ed25519" {
 		t.Fatalf("PublicKeyType(%q) = %q,%v", line, typ, err)
+	}
+}
+
+// §4.13: a private key with group/other permission bits must emit a warning,
+// but must remain usable — refusing it would break legitimate shared setups.
+func TestResolveKeyWarnsOnLoosePrivateKeyPerms(t *testing.T) {
+	t.Setenv("COLAB_TEST_AGENT", "0")
+	dir := t.TempDir()
+
+	loose := filepath.Join(dir, "id_ed25519")
+	if err := generateEd25519PrivateKeyFile(loose); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(loose, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var warn bytes.Buffer
+	km, err := ResolveKeyWithWriter(loose, &warn)
+	if err != nil {
+		t.Fatalf("ResolveKeyWithWriter(loose): %v", err)
+	}
+	if len(km.Signers) == 0 {
+		t.Fatal("loose-perm key must still be used for signing")
+	}
+	if !strings.Contains(warn.String(), "chmod 600") || !strings.Contains(warn.String(), loose) {
+		t.Fatalf("want actionable permission warning naming %q, got %q", loose, warn.String())
+	}
+
+	strict := filepath.Join(dir, "id_strict")
+	if err := generateEd25519PrivateKeyFile(strict); err != nil {
+		t.Fatal(err)
+	}
+	warn.Reset()
+	if _, err := ResolveKeyWithWriter(strict, &warn); err != nil {
+		t.Fatalf("ResolveKeyWithWriter(strict): %v", err)
+	}
+	if warn.Len() != 0 {
+		t.Fatalf("0600 key must not warn, got %q", warn.String())
+	}
+}
+
+// §4.13: the same warning applies to the default ~/.ssh/id_ed25519 scan, not
+// just to an explicit --identity path.
+func TestResolveKeyDefaultScanWarnsOnLoosePrivateKeyPerms(t *testing.T) {
+	t.Setenv("COLAB_TEST_AGENT", "0")
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	priv := filepath.Join(sshDir, "id_ed25519")
+	if err := generateEd25519PrivateKeyFile(priv); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(priv, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	var warn bytes.Buffer
+	km, err := ResolveKeyWithWriter("", &warn)
+	if err != nil {
+		t.Fatalf("ResolveKeyWithWriter(default scan): %v", err)
+	}
+	if km.Source != "id_ed25519" {
+		t.Fatalf("source = %q; want id_ed25519", km.Source)
+	}
+	if !strings.Contains(warn.String(), "chmod 600") {
+		t.Fatalf("want permission warning for default-scanned key, got %q", warn.String())
+	}
+}
+
+// §4.11: COLAB_TEST_AGENT is a test-only escape hatch. A release-like binary
+// (no "test.v" flag) must ignore it unless COLAB_TESTING=1 opts in explicitly.
+func TestAgentTestEnvGateReleaseBinary(t *testing.T) {
+	t.Setenv("COLAB_TEST_AGENT", "0")
+	t.Setenv("COLAB_TESTING", "")
+
+	if !suppressAgentForTest() {
+		t.Fatal("test binary must honour COLAB_TEST_AGENT=0")
+	}
+
+	original := flag.CommandLine
+	flag.CommandLine = flag.NewFlagSet("release", flag.ContinueOnError)
+	t.Cleanup(func() { flag.CommandLine = original })
+
+	if suppressAgentForTest() {
+		t.Error("release-like binary honoured COLAB_TEST_AGENT=0 without COLAB_TESTING=1")
+	}
+	t.Setenv("COLAB_TESTING", "1")
+	if !suppressAgentForTest() {
+		t.Error("COLAB_TESTING=1 must opt in to the test-only agent control")
+	}
+}
+
+// §4.13: mustRead must return a typed error instead of silently swallowing an
+// unreadable key. A directory passed where a private key is expected fails
+// os.ReadFile on every platform, so the test does not depend on running as a
+// non-root user.
+func TestUnreadablePrivateKeyReturnsTypedError(t *testing.T) {
+	t.Setenv("COLAB_TEST_AGENT", "0")
+	dir := t.TempDir()
+	pub := filepath.Join(dir, "id_test.pub")
+	priv := filepath.Join(dir, "id_test")
+	if err := os.WriteFile(pub, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAGENT user@host\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(priv, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolveKey(priv)
+	var ke *KeyError
+	if !errors.As(err, &ke) {
+		t.Fatalf("want *KeyError for unreadable private key, got %T: %v", err, err)
+	}
+	if !strings.Contains(ke.Error(), "id_test") {
+		t.Fatalf("typed error must name the key: %q", ke.Error())
 	}
 }
