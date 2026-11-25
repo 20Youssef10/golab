@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,7 +34,16 @@ const (
 	defaultDialTimeout = 5 * time.Second
 	xssiPrefix         = ")]}'\n"
 	controlPrefix      = "/tun/m"
+	// maxResponseSize caps a control-plane response body. A body is read with
+	// one extra byte so an oversized reply can be rejected before decoding
+	// instead of silently becoming valid-but-partial JSON.
+	maxResponseSize = 1 << 20
 )
+
+// ErrResponseTooLarge marks a control-plane response whose body exceeds the
+// read limit. The body is never decoded, so no truncated/partial JSON can be
+// returned. Callers can match it with errors.Is(err, colabapi.ErrResponseTooLarge).
+var ErrResponseTooLarge = errors.New("colab control-plane response too large")
 
 // Client is the Colab control plane. It takes plain values and never imports
 // internal/state or internal/cli.
@@ -223,9 +233,15 @@ func (c *client) doRequest(ctx context.Context, method string, target *url.URL, 
 		return err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Read one byte past the cap so an oversized body is distinguishable from
+	// an exactly-at-cap one. Never hand a truncated body to the decoder: that
+	// would turn an oversized reply into valid-but-partial JSON.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 	if err != nil {
 		return err
+	}
+	if len(raw) > maxResponseSize {
+		return fmt.Errorf("%w: %s %s body exceeds %d bytes", ErrResponseTooLarge, method, target.Path, maxResponseSize)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &StatusError{
