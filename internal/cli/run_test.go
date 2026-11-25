@@ -283,10 +283,17 @@ func TestRunUnreadableScriptMakesNoPosts(t *testing.T) {
 		t.Skip("unix socket paths are not readable on Windows")
 	}
 	h := newHarness(t)
-	sock := filepath.Join(t.TempDir(), "script.py")
-	l, err := net.Listen("unix", sock)
+	// macOS caps AF_UNIX socket paths at ~104 bytes and t.TempDir() embeds the
+	// full test name, so use a deliberately short path under the OS temp root.
+	dir, err := os.MkdirTemp("", "s")
 	if err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "x")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("cannot bind a short unix socket on this platform: %v", err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
 
