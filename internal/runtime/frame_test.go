@@ -1,8 +1,11 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -127,4 +130,84 @@ func FuzzDecodeFrame(f *testing.F) {
 			t.Fatalf("decoded message is not marshalable: %v", e)
 		}
 	})
+}
+
+func TestEncodeFrameRejectsOversizedBuffers(t *testing.T) {
+	// §4.4: cumulative buffer offsets past maxFrameSize must be rejected on
+	// the send side instead of emitting a frame the decoder would refuse.
+	// Ports the decoder's "oversized frame" hardening expectation to encode.
+	half := maxFrameSize/2 + 1024
+	msg := &Message{
+		Channel: "iopub",
+		Header:  MessageHeader{MsgID: "big", MsgType: "display_data"},
+		Buffers: [][]byte{make([]byte, half), make([]byte, half)},
+	}
+	typ, data, err := EncodeFrame(msg)
+	if err == nil {
+		t.Fatalf("EncodeFrame accepted cumulative size %d > maxFrameSize %d (type=%v len=%d)",
+			2*half, maxFrameSize, typ, len(data))
+	}
+	if typ != 0 || len(data) != 0 {
+		t.Fatalf("failed encode must emit no frame: type=%v len=%d", typ, len(data))
+	}
+	if !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("want typed ErrFrameTooLarge, got %T: %v", err, err)
+	}
+	var fse *FrameSizeError
+	if !errors.As(err, &fse) || fse.Limit > uint64(maxFrameSize) {
+		t.Fatalf("want *FrameSizeError bounded by maxFrameSize, got %#v", err)
+	}
+}
+
+func TestCheckedFrameOffsetGuards(t *testing.T) {
+	// §4.4: the cast guard must also reject values beyond the 32-bit wire
+	// field, not just beyond maxFrameSize. Tested at helper level so no
+	// multi-gigabyte buffer allocation is needed.
+	for _, off := range []uint64{uint64(maxFrameSize) + 1, uint64(^uint32(0)) + 1, ^uint64(0)} {
+		_, err := checkedFrameOffset(off)
+		if !errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("offset %d: want typed ErrFrameTooLarge, got %v", off, err)
+		}
+		var fse *FrameSizeError
+		if !errors.As(err, &fse) || fse.Offset != off {
+			t.Fatalf("offset %d: want *FrameSizeError carrying the offset, got %#v", off, err)
+		}
+	}
+	if got, err := checkedFrameOffset(uint64(maxFrameSize)); err != nil || got != uint32(maxFrameSize) {
+		t.Fatalf("boundary offset: got %d, %v", got, err)
+	}
+}
+
+func TestEncodeFrameGoldenBytes(t *testing.T) {
+	// Byte-for-byte regression guard (docs/02 §3.3 wire layout): the offset
+	// guard must not change a single byte of a valid multi-buffer frame.
+	const wantHex = "" +
+		"0000000400000014000000d0000000d3000000d5" +
+		"7b226368616e6e656c223a22696f707562222c22636f6e74656e74223a7b2264617461223a" +
+		"7b22696d6167652f706e67223a22414141227d2c226d65746164617461223a7b7d7d2c22" +
+		"686561646572223a7b226d73675f6964223a22656e6331222c226d73675f74797065223a" +
+		"22646973706c61795f64617461227d2c226d65746164617461223a6e756c6c2c22706172" +
+		"656e745f686561646572223a7b226d73675f6964223a22726571222c226d73675f747970" +
+		"65223a22227d7d616263646566676869"
+	want, err := hex.DecodeString(wantHex)
+	if err != nil {
+		t.Fatalf("bad golden hex: %v", err)
+	}
+	msg := &Message{
+		Channel:      "iopub",
+		Header:       MessageHeader{MsgID: "enc1", MsgType: "display_data"},
+		ParentHeader: MessageHeader{MsgID: "req"},
+		Content:      json.RawMessage(`{"data":{"image/png":"AAA"},"metadata":{}}`),
+		Buffers:      [][]byte{[]byte("abc"), []byte("de"), []byte("fghi")},
+	}
+	typ, got, err := EncodeFrame(msg)
+	if err != nil {
+		t.Fatalf("EncodeFrame: %v", err)
+	}
+	if typ != websocket.MessageBinary {
+		t.Fatalf("want binary frame, got %v", typ)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("wire bytes changed:\n got %x\nwant %x", got, want)
+	}
 }

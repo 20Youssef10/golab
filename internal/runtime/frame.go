@@ -16,6 +16,41 @@ const (
 	maxBuffers   = 4096
 )
 
+// ErrFrameTooLarge is returned by EncodeFrame when a message cannot be
+// represented within the protocol's 32-bit offsets and maxFrameSize limit.
+// Callers must use errors.Is/errors.As; the message text is never matched as
+// a string (AGENTS.md error convention).
+var ErrFrameTooLarge = errors.New("frame too large")
+
+// FrameSizeError reports the first send-side offset that would overflow the
+// wire offset field or exceed maxFrameSize. It carries only numeric limits;
+// no message content is interpolated into the error text.
+type FrameSizeError struct {
+	Offset uint64
+	Limit  uint64
+}
+
+func (e *FrameSizeError) Error() string {
+	return fmt.Sprintf("frame offset %d exceeds limit %d", e.Offset, e.Limit)
+}
+func (e *FrameSizeError) Is(target error) bool { return target == ErrFrameTooLarge }
+func (e *FrameSizeError) Unwrap() error        { return ErrFrameTooLarge }
+
+// checkedFrameOffset converts a running send-side offset to its 32-bit wire
+// value, rejecting anything above maxFrameSize or above the uint32 range
+// before the cast. maxFrameSize is the tighter bound today, but both are
+// checked so raising it later cannot reintroduce a wrap (§4.4).
+func checkedFrameOffset(off uint64) (uint32, error) {
+	limit := uint64(maxFrameSize)
+	if maxUint32 := uint64(^uint32(0)); limit > maxUint32 {
+		limit = maxUint32
+	}
+	if off > limit {
+		return 0, &FrameSizeError{Offset: off, Limit: limit}
+	}
+	return uint32(off), nil
+}
+
 // DecodeFrame decodes one WebSocket message of the Jupyter default protocol.
 // A text frame is a single JSON object; a binary frame is
 //
@@ -93,19 +128,31 @@ func EncodeFrame(msg *Message) (websocket.MessageType, []byte, error) {
 	}
 	nbufs := len(msg.Buffers) + 1
 	offsets := make([]uint32, nbufs)
-	off := uint32(4 * (nbufs + 1))
-	offsets[0] = off // start of the JSON envelope
-	off += uint32(len(j))
+	// Accumulate in uint64 and validate before every cast so a large buffer
+	// can neither wrap a 32-bit offset nor produce a frame the decoder rejects.
+	off := uint64(4 * (nbufs + 1))
+	first, err := checkedFrameOffset(off)
+	if err != nil {
+		return 0, nil, err
+	}
+	offsets[0] = first // start of the JSON envelope
+	off += uint64(len(j))
 	parts := make([][]byte, 0, nbufs)
 	parts = append(parts, j)
 	for i, b := range msg.Buffers {
-		if i+1 < nbufs {
-			offsets[i+1] = off // start of buffer i (0-based)
+		o, err := checkedFrameOffset(off)
+		if err != nil {
+			return 0, nil, err
 		}
-		off += uint32(len(b))
+		offsets[i+1] = o // start of buffer i (0-based); i+1 <= nbufs-1 always
+		off += uint64(len(b))
 		parts = append(parts, b)
 	}
-	out := make([]byte, 0, int(off))
+	total, err := checkedFrameOffset(off)
+	if err != nil {
+		return 0, nil, err
+	}
+	out := make([]byte, 0, int(total))
 	var b4 [4]byte
 	binary.BigEndian.PutUint32(b4[:], uint32(nbufs))
 	out = append(out, b4[:]...)
