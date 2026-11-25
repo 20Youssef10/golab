@@ -19,7 +19,11 @@ func usageCommand() *cobra.Command {
 			}
 			result, err := client.Usage(cmd.Context())
 			if err != nil {
-				return exitf(1, "[colab] Warning: failed to fetch compute-unit info: %s", err)
+				// A failed ccu-info fetch is a recoverable advisory, not a command
+				// failure: keep the [colab] diagnostic on stderr but exit 0 so it
+				// stays distinguishable from a real failure (defect 4.19).
+				fmt.Fprintf(d.Stderr, "[colab] Warning: failed to fetch compute-unit info: %s\n", err)
+				return nil
 			}
 			fmt.Fprintln(d.Stdout, result.String())
 			return nil

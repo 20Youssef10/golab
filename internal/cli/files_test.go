@@ -143,12 +143,21 @@ func TestUsage(t *testing.T) {
 			t.Fatalf("stdout = %q", h.stdout.String())
 		}
 	})
-	t.Run("fetch failure", func(t *testing.T) {
+	t.Run("fetch failure is advisory", func(t *testing.T) {
 		h := newHarness(t)
 		h.ctrl.SetFault(fakecolab.Fault{Method: "GET", PathContains: "/ccu-info", Status: 500})
 		code := h.run(t, "", "usage")
-		if code != 1 || !strings.Contains(h.stderr.String(), "failed to fetch compute-unit info") {
-			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+		// Defect 4.19: a failed ccu-info fetch is a recoverable warning, not a
+		// command failure. Upstream test_cli_usage_fetch_failure expects an
+		// advisory warning on stderr with a successful (0) exit.
+		if code != 0 {
+			t.Fatalf("exit=%d stderr=%q, want advisory exit 0", code, h.stderr.String())
+		}
+		if !strings.Contains(h.stderr.String(), "[colab] Warning: failed to fetch compute-unit info") {
+			t.Fatalf("stderr = %q, want [colab] warning", h.stderr.String())
+		}
+		if h.stdout.String() != "" {
+			t.Fatalf("stdout = %q, want no usage result on fetch failure", h.stdout.String())
 		}
 	})
 }
