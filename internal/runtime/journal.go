@@ -7,9 +7,10 @@ package runtime
 // actually observed, with hard caps so a long execution cannot grow memory
 // without bound.
 const (
-	journalSeenCap = 256 // inbound msg ids kept for dedup
-	journalOutsCap = 256 // output snapshot copies kept for resume
-	maxJournals    = 4   // live journals retained per kernel
+	journalSeenCap  = 256     // inbound msg ids kept for dedup
+	journalOutsCap  = 256     // output snapshot copies kept for resume
+	journalBytesCap = 8 << 20 // 8 MiB of output payload kept for resume
+	maxJournals     = 4       // live journals retained per kernel
 )
 
 // journal tracks one execution's observed messages and outputs. A message id
@@ -20,8 +21,10 @@ type journal struct {
 	msgID     string
 	seen      []string
 	outs      []Output
+	outBytes  int  // payload bytes retained in outs (base64 images dominate)
 	delivered int  // outputs already emitted to the caller
 	dropped   bool // the socket dropped at least once during this execution
+	sawIdle   bool // terminal idle was observed; survives Resume
 	terminal  bool // idle + execute_reply were both observed
 }
 
@@ -43,18 +46,91 @@ func (j *journal) observe(msg *Message) bool {
 	return true
 }
 
-// setOutputs refreshes the bounded snapshot from the live accumulator. If the
-// snapshot shrinks (clear_output), delivered is clamped so it stays a valid
-// count of the outputs held here.
+// setOutputs refreshes the bounded snapshot from the live accumulator. The
+// snapshot is capped BOTH by count and by bytes: a count cap alone lets a few
+// large base64 images retain gigabytes. Eviction is oldest-first, keeping the
+// newest outputs. If the snapshot shrinks (clear_output or eviction), delivered
+// is clamped so it stays a valid count of the outputs held here.
 func (j *journal) setOutputs(outs []Output) {
 	prev := len(j.outs)
-	j.outs = lastN(outs, journalOutsCap)
+	j.outs, j.outBytes = boundedTail(outs, journalOutsCap, journalBytesCap)
 	if shrink := prev - len(j.outs); shrink > 0 {
 		if j.delivered > shrink {
 			j.delivered -= shrink
 		} else {
 			j.delivered = 0
 		}
+	}
+}
+
+// boundedTail copies the most recent outputs that fit both caps. A single
+// output larger than the byte budget is dropped wholesale so the retained
+// snapshot stays strictly bounded.
+func boundedTail(src []Output, countCap, byteCap int) ([]Output, int) {
+	if countCap <= 0 || byteCap <= 0 || len(src) == 0 {
+		return nil, 0
+	}
+	// The count cap delimits the trailing window (the most recent outputs),
+	// not a prefix of src.
+	oldest := 0
+	if len(src) > countCap {
+		oldest = len(src) - countCap
+	}
+	total := 0
+	keep := len(src) // exclusive start of the retained suffix
+	for i := len(src) - 1; i >= oldest; i-- {
+		n := outputBytes(src[i])
+		if total+n > byteCap {
+			break
+		}
+		total += n
+		keep = i
+	}
+	if keep == len(src) {
+		return nil, 0
+	}
+	return append([]Output(nil), src[keep:]...), total
+}
+
+// outputBytes approximates an output's retained payload. Strings (the base64
+// image bodies in Data) dominate and are counted exactly; scalar overhead is
+// ignored because it cannot grow with message size.
+func outputBytes(o Output) int {
+	n := len(o.OutputType) + len(o.Name) + len(o.Text) + len(o.EName) + len(o.EValue)
+	if o.ExecutionCount != nil {
+		n += 8
+	}
+	if o.Transient != nil {
+		n += len(o.Transient.DisplayID)
+	}
+	for _, s := range o.Traceback {
+		n += len(s)
+	}
+	n += valueBytes(o.Data)
+	n += valueBytes(o.Metadata)
+	return n
+}
+
+func valueBytes(v any) int {
+	switch x := v.(type) {
+	case string:
+		return len(x)
+	case []byte:
+		return len(x)
+	case []any:
+		n := 0
+		for _, e := range x {
+			n += valueBytes(e)
+		}
+		return n
+	case map[string]any:
+		n := 0
+		for k, e := range x {
+			n += len(k) + valueBytes(e)
+		}
+		return n
+	default:
+		return 0
 	}
 }
 
@@ -74,17 +150,6 @@ func appendRing[T any](ring []T, v T, cap int) []T {
 	copy(ring, ring[1:])
 	ring[cap-1] = v
 	return ring
-}
-
-// lastN copies at most n trailing elements of src (the most recent outputs).
-func lastN[T any](src []T, n int) []T {
-	if n <= 0 {
-		return nil
-	}
-	if len(src) <= n {
-		return append([]T(nil), src...)
-	}
-	return append([]T(nil), src[len(src)-n:]...)
 }
 
 // --- journal store on kernel -------------------------------------------------

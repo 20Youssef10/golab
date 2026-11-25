@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -274,6 +275,154 @@ func TestResumeWaitsForLateResultWithoutResubmit(t *testing.T) {
 	}
 	if total != 1 {
 		t.Fatalf("want exactly one execute_request, got %d", total)
+	}
+}
+
+func TestResumeAfterIdleThenDropCompletesWithLateReply(t *testing.T) {
+	// status:idle arrives before the socket dies, but execute_reply arrives
+	// only after Resume reattaches. The idle must be remembered on the journal:
+	// otherwise the resumed loop parks the reply waiting for a second idle
+	// (the replayed idle is deduped away) and times out a finished execution.
+	first := newFakeWS()
+	live := newFakeWS()
+	pd := &phaseDialer{live: live}
+	k := newFakeKernel(t, first, &fakeDialer{})
+	k.conn.dialWS = pd.dial
+	k.conn.reconnectBudget = 120 * time.Millisecond
+	k.conn.reconnectInterval = 10 * time.Millisecond
+	defer k.Close()
+
+	execID := "exec-idle-drop"
+	emitted := make(chan string, 4)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := k.Execute(context.Background(), "work()", ExecOptions{
+			MsgID:       execID,
+			IdleTimeout: 5 * time.Second,
+			OnOutput:    func(o Output) { emitted <- o.Text },
+		})
+		errCh <- err
+	}()
+	if got := waitExecID(t, first); got != execID {
+		t.Fatalf("execute_request used msg id %q, want %q", got, execID)
+	}
+
+	idle := idleMsg(execID)
+	idle.Header.MsgID = "idle-1"
+	first.pushFrame(t, idle)
+	// A stream frame after idle proves the idle was consumed (frames are
+	// dispatched in order) without peeking at the journal concurrently.
+	first.pushFrame(t, execStreamMsg(execID, "msg-A", "A\n"))
+	select {
+	case got := <-emitted:
+		if got != "A\n" {
+			t.Fatalf("unexpected output %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle/stream frames were never processed")
+	}
+	first.drop() // socket dies before execute_reply
+
+	err := collectErr(t, errCh)
+	var gap *OutputGapError
+	if !errors.As(err, &gap) {
+		t.Fatalf("want OutputGapError from interrupted Execute, got %v", err)
+	}
+	callsBefore := pd.count()
+	pd.setAllow(true) // Resume reattaches to a live socket
+
+	done := make(chan *Result, 1)
+	resumeErr := make(chan error, 1)
+	go func() {
+		res, err := k.Resume(context.Background(), execID, ExecOptions{IdleTimeout: 5 * time.Second})
+		resumeErr <- err
+		done <- res
+	}()
+	if !waitPhaseDial(pd, callsBefore+1, 3*time.Second) {
+		t.Fatal("Resume did not reattach the channels socket")
+	}
+	// Same-id replay: dedup drops it before the resumed wait loop sees idle.
+	// Only the late execute_reply is left, and it must still complete.
+	live.pushFrame(t, idle)
+	live.pushFrame(t, replyMsg(execID, "ok"))
+
+	if err := collectErr(t, resumeErr); err != nil {
+		t.Fatalf("Resume timed out or failed on a finished execution: %v", err)
+	}
+	res := <-done
+	if res == nil || res.Status != "ok" {
+		t.Fatalf("Resume returned the wrong result: %+v", res)
+	}
+	if len(res.Outputs) != 1 || res.Outputs[0].Text != "A\n" {
+		t.Fatalf("resumed outputs wrong: %+v", res.Outputs)
+	}
+}
+
+func countInterruptPOSTs(srv *fakekernel.Server) int {
+	n := 0
+	for _, r := range srv.Requests() {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.Path, "/interrupt") {
+			n++
+		}
+	}
+	return n
+}
+
+func waitInterruptPOSTs(t *testing.T, srv *fakekernel.Server, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countInterruptPOSTs(srv) >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("did not see %d interrupt POST(s) within %v", want, timeout)
+}
+
+func TestCancelDuringSocketDropPostsOneInterrupt(t *testing.T) {
+	// Ctrl-C during a lost channels socket must POST the REST interrupt once.
+	// ctx.Err() stays non-nil, so the lostChan branch re-entered interrupt()
+	// after the ctxDone/reconnect branch had already done it, double-POSTing
+	// and re-arming the graceful-idle window.
+	srv := fakekernel.New(t)
+	first := newFakeWS()
+	d := &fakeDialer{} // every redial fails; cancellation stops the retry loop
+	k := newFakeKernel(t, first, d)
+	k.id = srv.KernelID()
+	k.graceful = 150 * time.Millisecond
+	k.rest = &restClient{
+		baseURL: srv.URL(), client: srv.Client(), token: srv.Token(),
+		agent: "test", requestTimeout: time.Second,
+	}
+	k.conn.reconnectBudget = 2 * time.Second
+	k.conn.reconnectInterval = 10 * time.Millisecond
+	defer k.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := k.Execute(ctx, "work()", ExecOptions{IdleTimeout: 5 * time.Second})
+		errCh <- err
+	}()
+	waitExecID(t, first)
+	first.drop()
+	if !waitDialCalls(d, 1, 2*time.Second) {
+		t.Fatal("drop did not start a redial")
+	}
+	cancel()
+	waitInterruptPOSTs(t, srv, 1, 2*time.Second)
+	// The closed lost channel stays ready; give the loop room to re-enter the
+	// branch that used to POST a second interrupt.
+	time.Sleep(100 * time.Millisecond)
+	if n := countInterruptPOSTs(srv); n != 1 {
+		t.Fatalf("want exactly one interrupt POST, got %d", n)
+	}
+	if err := collectErr(t, errCh); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if n := countInterruptPOSTs(srv); n != 1 {
+		t.Fatalf("want exactly one interrupt POST, got %d", n)
 	}
 }
 

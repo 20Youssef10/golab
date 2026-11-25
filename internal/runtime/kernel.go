@@ -156,15 +156,23 @@ func (k *kernel) execute(ctx context.Context, code *string, j *journal, opts Exe
 
 	var idle idleTracker
 	idle.reset(opts.IdleTimeout)
-	gotIdle := false
+	// A resumed execution inherits the terminal idle from its journal. Without
+	// this, a replayed idle is deduped away and a late execute_reply is parked
+	// forever waiting for a second idle, losing a finished execution.
+	gotIdle := j.sawIdle
 	interrupted := false
 	ctxDone := ctx.Done()
 	var reply, pendingReply *Message
 
 	// interrupt is shared by the cancellation branch and the reconnect branch:
 	// a cancellation that races with a socket drop still sends the best-effort
-	// REST interrupt and enters the graceful-idle wait.
+	// REST interrupt and enters the graceful-idle wait. It is idempotent:
+	// ctx.Err() stays non-nil after cancellation, so every later lostChan or
+	// failed-reconnect iteration must not POST again or re-arm the window.
 	interrupt := func() {
+		if interrupted {
+			return
+		}
 		// Only the first cancellation interrupts: ctx.Done() stays closed, so
 		// it must be disabled or the next select would immediately take the
 		// force-close branch without waiting for idle.
@@ -259,8 +267,9 @@ executeLoop:
 			j.setOutputs(acc.Outputs())
 			if msg.Header.MsgType == "status" {
 				if state, _ := msg.contentMap()["execution_state"].(string); state == "idle" {
+					j.sawIdle = true // persists across Resume
 					gotIdle = true
-					if pendingReply != nil {
+					if pendingReply != nil && j.sawIdle {
 						reply = pendingReply
 						break executeLoop
 					}
@@ -283,6 +292,13 @@ executeLoop:
 			// must not drop it just because it arrived a few microseconds early.
 			if !gotIdle {
 				pendingReply = msg
+				if j.sawIdle {
+					// Idle was observed by an earlier generation (or just
+					// arrived on another channel): the reply is terminal even
+					// if this call never processed the idle frame itself.
+					reply = msg
+					break executeLoop
+				}
 				continue
 			}
 			if !interrupted {

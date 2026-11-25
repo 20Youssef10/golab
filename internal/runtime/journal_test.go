@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -68,5 +69,61 @@ func TestJournalBounds(t *testing.T) {
 	k.deleteJournal(fmt.Sprintf("exec-%d", maxJournals+2))
 	if k.lookupJournal(fmt.Sprintf("exec-%d", maxJournals+2)) != nil {
 		t.Fatal("terminal journal was not deleted")
+	}
+}
+
+// retainedBytes measures the MIME-bundle payloads that dominate a real
+// notebook (base64 images live in Output.Data, not in Output.Text).
+func retainedBytes(outs []Output) int {
+	n := 0
+	for _, o := range outs {
+		n += len(o.Text) + len(o.EName) + len(o.EValue)
+		for _, s := range o.Traceback {
+			n += len(s)
+		}
+		for _, m := range []map[string]any{o.Data, o.Metadata} {
+			for k, v := range m {
+				n += len(k)
+				switch x := v.(type) {
+				case string:
+					n += len(x)
+				case []byte:
+					n += len(x)
+				}
+			}
+		}
+	}
+	return n
+}
+
+func TestJournalByteBudgetBoundsLargeOutputs(t *testing.T) {
+	// A count cap of 256 is not a memory bound: 256 64-MiB base64 images would
+	// retain multi-GB. The snapshot must also evict oldest-first on a byte
+	// budget, while keeping the most recent output.
+	const byteCap = 8 << 20 // must match journalBytesCap
+	const perOutput = 2 << 20
+	chunk := strings.Repeat("A", perOutput)
+
+	j := newJournal("exec-bytes")
+	acc := make([]Output, 0, 24)
+	for i := 0; i < 24; i++ {
+		acc = append(acc, Output{
+			OutputType: "display_data",
+			Text:       fmt.Sprintf("o-%d", i),
+			Data:       map[string]any{"image/png": chunk},
+		})
+		j.setOutputs(acc)
+		if got := retainedBytes(j.snapshot()); got > byteCap {
+			t.Fatalf("iteration %d: retained %d bytes, budget %d", i, got, byteCap)
+		}
+	}
+	if len(j.outs) == 0 {
+		t.Fatal("byte eviction dropped every output")
+	}
+	if len(j.outs) >= journalOutsCap {
+		t.Fatalf("byte budget was ignored: kept %d outputs", len(j.outs))
+	}
+	if got := j.outs[len(j.outs)-1].Text; got != "o-23" {
+		t.Fatalf("eviction did not keep the newest output, got %q", got)
 	}
 }
