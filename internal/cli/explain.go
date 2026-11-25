@@ -69,13 +69,20 @@ func guardBudget(ctx context.Context, d *app.Deps, cmd *cobra.Command) error {
 	if err != nil {
 		return exitf(2, "[colab] invalid budget profile: %s", logx.Redact(err.Error()))
 	}
+	return guardBudgetWithPolicy(ctx, d, policy)
+}
+
+// guardBudgetWithPolicy applies a resolved policy before a billable call. The
+// policy is passed in so the usage-unavailable behaviour can be tested with an
+// injected Enforce value without depending on profile parsing.
+func guardBudgetWithPolicy(ctx context.Context, d *app.Deps, policy budget.Policy) error {
 	client, err := d.ColabClient(ctx)
 	if err != nil {
-		return nil
+		return budgetUsageUnavailable(policy, err)
 	}
 	usage, err := client.Usage(ctx)
 	if err != nil {
-		return nil
+		return budgetUsageUnavailable(policy, err)
 	}
 	decision, err := budgetCheckFn(ctx, usage, &policy)
 	if err != nil {
@@ -90,6 +97,16 @@ func guardBudget(ctx context.Context, d *app.Deps, cmd *cobra.Command) error {
 	}
 	fmt.Fprintf(d.Stderr, "[colab] budget advisory: %s\n", msg)
 	return nil
+}
+
+// budgetUsageUnavailable fails closed when an enforced guard cannot read
+// ccu-info: an unknown balance is never permission to allocate. Advisory mode
+// keeps the historical silent no-op.
+func budgetUsageUnavailable(policy budget.Policy, err error) error {
+	if !policy.Enforce {
+		return nil
+	}
+	return exitf(1, "[colab] budget guard: usage unavailable: %s", logx.Redact(err.Error()))
 }
 
 // apiLabel names the control plane a plan will use.
