@@ -60,7 +60,7 @@ golab stop --all        # stop every active session
 golab stop -s train --verify          # confirm no assignment remains on the server
 ```
 
-`--all` asks for confirmation on stderr (`Stop N session(s)? [y/N]`) **only when stdin is a TTY**; in a pipeline it proceeds without prompting. Pass `--yes` (or `COLAB_ASSUME_YES=1`) to skip the prompt. It finishes with `Stopped N session(s).` on stderr. Removing local state always happens, even when the backend is already gone. `--verify` re-reads `/tun/m/assignments` after unassigning and exits non-zero if a stopped runtime is still assigned (works with `--all` too); this is an extra GET and is opt-in.
+`--all` asks for confirmation on stderr (`Stop N session(s)? [y/N]`) **only when stdin is a TTY**; in a pipeline it proceeds without prompting. Pass `--yes` (or `COLAB_ASSUME_YES=1`) to skip the prompt. It finishes with `Stopped N session(s).` on stderr, where `N` is the number that actually stopped — any per-session failure is reported and makes the command exit 1. Removing local state always happens, even when the backend is already gone. `--verify` re-reads `/tun/m/assignments` after unassigning and exits non-zero if a stopped runtime is still assigned (works with `--all` too); this is an extra GET and is opt-in.
 
 ### `golab resume`
 
@@ -253,7 +253,7 @@ These are additive commands with no Python counterpart:
 |---|---|
 | `golab doctor [--live] [--json] [--section SECTION] [--timeout D] [--fixtures DIR]` | GET-only, redacting connectivity and configuration probe. `--live` additionally requires `GOLAB_LIVE_PROBES=1` and is disabled when `LIVE_E2E_ENABLED=false`. Sections: `config`, `auth`, `api`, `update`, `wire`. |
 | `golab audit [--json]` | Local-only report on token-store tier, file modes, API capability cache and update verification; no request is made and no credential value is printed. |
-| `golab budget [--profile F] [--profile-name N] [--max-balance N] [--max-hourly N] [--enforce] [--json]` | Advisory compute-unit decision from `GET /tun/m/ccu-info`; never allocates. Without a profile it reports the current usage. |
+| `golab budget [--profile F] [--profile-name N] [--max-balance N] [--max-hourly N] [--enforce] [--json]` | Advisory compute-unit decision from `GET /tun/m/ccu-info`; never allocates. Without a profile it reports the current usage. `--max-balance` is a minimum reserve floor (deny at or below); `--max-hourly` is a rate ceiling (deny at or above). |
 | `golab bundle record --out F --file P [--env K=V …]` / `golab bundle verify MANIFEST [--files-root DIR]` | Create and verify a deterministic provenance manifest of local inputs; fully offline. |
 | `golab sync LOCAL REMOTE [-s NAME] [--direction up\|down\|both] [--apply] [--delete] [--diff] [--include-outputs]` | One-shot directory sync with conflict detection. Dry-run is the default; `--apply` writes. Conflicts fail without changing anything. `--diff` compares two notebooks with volatile metadata and outputs stripped. |
 | `golab agentout [--format text\|json\|ndjson] [--type info\|output\|error] [text …]` | Emit one typed structured-output event; handy for testing a schema pipeline without a VM. |

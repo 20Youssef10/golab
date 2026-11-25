@@ -70,8 +70,8 @@ func TestSSHAutoCreate(t *testing.T) {
 func TestSSHAutoCreateBudgetGuardDenies(t *testing.T) {
 	profile := filepath.Join(t.TempDir(), "golab.yaml")
 	body := "version: 1\n" +
-		"defaults:\n  budget:\n    max_balance: 1\n" +
-		"profiles:\n  default:\n    budget:\n      max_balance: 1\n"
+		"defaults:\n  budget:\n    max_balance: 10\n" +
+		"profiles:\n  default:\n    budget:\n      max_balance: 10\n"
 	if err := os.WriteFile(profile, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestSSHAutoCreateBudgetGuardDenies(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
-			h.ctrl.SetConsumption(5, 0, 0) // balance 5 >= threshold 1
+			h.ctrl.SetConsumption(5, 0, 0) // balance 5 is below the reserve floor of 10
 
 			orig := budgetCheckFn
 			checks := 0

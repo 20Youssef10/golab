@@ -12,6 +12,16 @@ on-disk schema or persisted token format (per AGENTS.md).
 
 ### Fixed
 
+- Spend-safety audit (`docs/gap-report.md` §2–3) found seven defects, all fixed
+  test-first: a failed session-record write now compensates with `Unassign`
+  instead of orphaning a billable runtime; `stop --all` reports the real stop
+  count and exits non-zero naming any session that failed to stop; `run` reads
+  the script before allocating so an unreadable script makes zero requests;
+  `ssh` auto-create now consults the budget guard; an enforced guard fails
+  closed when usage cannot be read; `logout` exits non-zero when proxy tokens
+  could not be cleared; and `max-balance` is corrected to a minimum reserve
+  floor (config key and flag name retained for compatibility).
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even
