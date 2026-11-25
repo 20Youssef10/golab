@@ -69,6 +69,14 @@ func buildInstallCode(packages []string) string {
 	return b.String()
 }
 
+// redactPromptReply returns the history-safe representation of a value typed
+// at an interactive prompt. The real value is still returned to the runtime so
+// the kernel receives it unchanged; only the persisted record is redacted.
+// The byte length keeps logs useful without retaining any of the content.
+func redactPromptReply(value string) string {
+	return fmt.Sprintf("[redacted:%d bytes]", len(value))
+}
+
 // runAutomation resolves the session, records history state, executes the
 // snippet on the kernel and streams outputs. Stdin and streaming can be used
 // together: the runtime's stdin loop is independent of its WS reader.
@@ -114,7 +122,10 @@ func runAutomation(ctx context.Context, d *app.Deps, spec automationSpec) error 
 				return "", readErr
 			}
 			value = strings.TrimRight(value, "\r\n")
-			writeEvent(d, s.Name, history.EventInputReply, map[string]any{"value": value})
+			// Persist only a redacted form: a password typed at a getpass/auth
+			// prompt must never reach plaintext history (or any export of it).
+			writeEvent(d, s.Name, history.EventInputReply,
+				map[string]any{"value": redactPromptReply(value)})
 			return value, nil
 		}
 	}

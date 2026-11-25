@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -859,5 +861,87 @@ func TestWaitForEnterNonTTYEOFPreservesPrompt(t *testing.T) {
 	}
 	if !strings.HasSuffix(h.stderr.String(), "\n") {
 		t.Fatalf("line break after prompt missing: %q", h.stderr.String())
+	}
+}
+
+// --- defect §3.13: typed prompt replies must never land in history ---------
+
+// Regression for §3.13 (ports the credential-bearing half of upstream
+// tests/test_automation.py::test_cli_auth): a password typed at a getpass/auth
+// stdin prompt must reach the kernel verbatim, but the history event and every
+// `golab log -o` export derived from it must carry only a redacted form.
+func TestPromptReplyNeverLeaksToHistoryOrExport(t *testing.T) {
+	const password = "letmein-password-314159"
+
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	// A stream first installs the active-exec state before the stdin prompt;
+	// the delays keep the independent stdin writer from racing the socket close.
+	streamStep := stream("stdout", "Password prompt incoming\n")
+	prompt := inputRequest("Password: ")
+	prompt.Delay = 50 * time.Millisecond
+	idle := statusIdle()
+	idle.Delay = 300 * time.Millisecond
+	reply := replyOK()
+	reply.Delay = 500 * time.Millisecond
+	h.kernel.Script(streamStep, prompt, idle, reply)
+
+	if code := h.run(t, password+"\n", "auth", "-s", "s1"); code != 0 {
+		t.Fatalf("exit = %d; stderr=%q", code, h.stderr.String())
+	}
+
+	// (a) The runtime reply to the kernel must carry the real value unchanged.
+	inputs := waitInputs(t, h, 1)
+	if !strings.Contains(string(inputs[0].Value), password) {
+		t.Fatalf("kernel did not receive the real reply: %s", inputs[0].Value)
+	}
+
+	// (b) The plaintext history JSONL must not contain the typed password.
+	hist, err := os.ReadFile(filepath.Join(h.dir, "s1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoSecret(t, password, string(hist))
+	// The record must carry a redaction marker, not an empty drop or the literal.
+	l, err := history.NewAt(h.dir, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := l.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events {
+		if e.EventType != history.EventInputReply {
+			continue
+		}
+		found = true
+		var payload map[string]any
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		stored, _ := payload["value"].(string)
+		if !strings.Contains(stored, "redact") {
+			t.Fatalf("input_reply stored no redaction marker: %q", stored)
+		}
+	}
+	if !found {
+		t.Fatalf("no input_reply event recorded: %+v", events)
+	}
+
+	// (c) Every export path (the source of `golab log -o`) must be clean too.
+	for _, ext := range []string{".jsonl", ".txt", ".ipynb", ".md"} {
+		t.Run(ext, func(t *testing.T) {
+			exportPath := filepath.Join(t.TempDir(), "export"+ext)
+			if code := h.run(t, "", "log", "-s", "s1", "-o", exportPath); code != 0 {
+				t.Fatalf("log exit=%d stderr=%q", code, h.stderr.String())
+			}
+			exported, err := os.ReadFile(exportPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNoSecret(t, password, string(exported))
+		})
 	}
 }

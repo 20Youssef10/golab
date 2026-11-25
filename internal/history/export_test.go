@@ -167,8 +167,10 @@ func TestExportIPynbEventMapping(t *testing.T) {
 			}}})},
 		{Timestamp: time.Unix(0, 0).UTC(), EventType: EventStdinRequest,
 			Payload: rawPayload(t, map[string]any{"prompt": "Password?"})},
+		// A prompt reply is persisted in redacted form (§3.13); the literal
+		// password must never survive into an export.
 		{Timestamp: time.Unix(0, 0).UTC(), EventType: EventInputReply,
-			Payload: rawPayload(t, map[string]any{"value": "letmein"})},
+			Payload: rawPayload(t, map[string]any{"value": "[redacted:7 bytes]"})},
 		{Timestamp: time.Unix(0, 0).UTC(), EventType: EventFileOperation,
 			Payload: rawPayload(t, map[string]any{"op": "download", "remote": "content/a.txt"})},
 		{Timestamp: time.Unix(0, 0).UTC(), EventType: EventExecution,
@@ -184,6 +186,10 @@ func TestExportIPynbEventMapping(t *testing.T) {
 	n, err := nb.Parse(got)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A typed password must never be re-emitted by any export path.
+	if strings.Contains(string(got), "letmein") {
+		t.Fatalf("ipynb export leaked the prompt reply: %s", got)
 	}
 	wantTypes := []string{
 		"markdown", // title
