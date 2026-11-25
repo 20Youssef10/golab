@@ -70,8 +70,12 @@ func logoutCommand() *cobra.Command {
 			sessions, err := d.Store.List()
 			if err != nil {
 				fmt.Fprintf(d.Stderr, "[colab] Warning: Could not update local session cache (%s).\n", logx.Redact(err.Error()))
-				return nil
+				return exitf(1, "[colab] Failed to clear session proxy tokens: could not read the local session cache.")
 			}
+			// A blanked token that fails to persist is a security failure: exit
+			// non-zero so callers do not carry a stale data-plane token forward.
+			// Accumulate every failure instead of returning on the first one.
+			failed := 0
 			for name, s := range sessions {
 				if s.Token.Reveal() == "" && s.TokenExpiresAt == nil {
 					continue
@@ -80,11 +84,14 @@ func logoutCommand() *cobra.Command {
 				s.TokenExpiresAt = nil
 				if err := d.Store.Put(s); err != nil {
 					fmt.Fprintf(d.Stderr, "[colab] Warning: Could not clear token for session '%s' (%s).\n", name, logx.Redact(err.Error()))
-					return nil
+					failed++
 				}
 			}
 			if len(sessions) > 0 {
 				fmt.Fprintf(d.Stderr, "[colab] Warning: %d local session(s) may still be running on the previous account.\n", len(sessions))
+			}
+			if failed > 0 {
+				return exitf(1, "[colab] Failed to clear proxy tokens for %d local session(s); a stale token may remain on disk.", failed)
 			}
 			return nil
 		},

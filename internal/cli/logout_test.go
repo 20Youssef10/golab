@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/auth"
+	"github.com/20Youssef10/golab/internal/logx"
 	"github.com/20Youssef10/golab/internal/state"
 )
 
@@ -64,6 +66,21 @@ func runWithExtraCommands(t *testing.T, d *app.Deps, stdin string, extra []*cobr
 func runLogout(t *testing.T, d *app.Deps, args ...string) (int, string, string) {
 	t.Helper()
 	return runWithExtraCommands(t, d, "", []*cobra.Command{logoutCommand()}, args...)
+}
+
+// writeRawSessions writes entries straight into sessions.json, bypassing
+// Store.Put validation. A session whose Name fails state.ValidateName is thus
+// readable by Store.List but cannot be re-written by logout's Store.Put — a
+// deterministic way to inject a blanking failure without a fake store.
+func writeRawSessions(t *testing.T, h *testHarness, sessions map[string]state.Session) {
+	t.Helper()
+	b, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.deps.Store.Path(), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestLogoutRemovesToken ports upstream tests/test_cli.py::test_cli_logout_removes_token.
@@ -122,6 +139,85 @@ func TestLogoutInvalidatesSessionTokensAndWarns(t *testing.T) {
 	}
 }
 
+// TestLogoutBlanksAllSessionsExitsZero asserts the happy path still exits 0
+// after blanking the proxy token of every cached session.
+func TestLogoutBlanksAllSessionsExitsZero(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.putSession(t, "s2")
+	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
+
+	code, stdout, stderr := runLogout(t, h.deps, "logout")
+	if code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	for _, name := range []string{"s1", "s2"} {
+		s, err := h.deps.Store.Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.Token.Reveal() != "" || s.TokenExpiresAt != nil {
+			t.Fatalf("stale proxy token survived for %s: %+v", name, s)
+		}
+	}
+	if strings.Contains(stderr, "Failed to clear") {
+		t.Fatalf("unexpected failure message on success path: %q", stderr)
+	}
+	if !strings.Contains(stdout, "Logged out.") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+// TestLogoutPutFailureExitsNonzero guards defect 3.8: a failed proxy-token
+// blanking must not exit 0 with a usable token still on disk.
+func TestLogoutPutFailureExitsNonzero(t *testing.T) {
+	h := newHarness(t)
+	const tokenCanary = "logout-put-failure-token-DO-NOT-LEAK"
+	writeRawSessions(t, h, map[string]state.Session{
+		"s1": {
+			Name:  "bad/name", // fails state.ValidateName inside Store.Put
+			Token: logx.NewSecret(tokenCanary),
+		},
+	})
+	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
+
+	code, stdout, stderr := runLogout(t, h.deps, "logout")
+	if code != 1 {
+		t.Fatalf("exit=%d want 1; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "Failed to clear") {
+		t.Fatalf("missing failure message: stderr=%q", stderr)
+	}
+	if !strings.Contains(stderr, "s1") || !strings.Contains(stderr, "1 local session") {
+		t.Fatalf("failure message must name the session/count: stderr=%q", stderr)
+	}
+	if strings.Contains(stdout+stderr, tokenCanary) {
+		t.Fatalf("token leaked: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+// TestLogoutAccumulatesPutFailures verifies every session is attempted even
+// after one blanking fails, and the count of failures is reported.
+func TestLogoutAccumulatesPutFailures(t *testing.T) {
+	h := newHarness(t)
+	writeRawSessions(t, h, map[string]state.Session{
+		"s1": {Name: "bad/name1", Token: logx.NewSecret("t1")},
+		"s2": {Name: "bad/name2", Token: logx.NewSecret("t2")},
+	})
+	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
+
+	code, _, stderr := runLogout(t, h.deps, "logout")
+	if code != 1 {
+		t.Fatalf("exit=%d want 1; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "'s1'") || !strings.Contains(stderr, "'s2'") {
+		t.Fatalf("both per-session warnings required: stderr=%q", stderr)
+	}
+	if !strings.Contains(stderr, "2 local session") {
+		t.Fatalf("failure count missing: stderr=%q", stderr)
+	}
+}
+
 // TestLogoutResetsCachedAPICapabilities ports upstream
 // tests/test_cli.py::test_cli_logout_resets_cached_api_capabilities.
 func TestLogoutResetsCachedAPICapabilities(t *testing.T) {
@@ -151,9 +247,12 @@ func TestLogoutResetsCachedAPICapabilities(t *testing.T) {
 	}
 }
 
-// TestLogoutStoreErrorWarnsWithoutCrashing ports upstream
+// TestLogoutStoreErrorWarnsAndFails ports upstream
 // tests/test_cli.py::test_cli_logout_store_error_warns_without_crashing.
-func TestLogoutStoreErrorWarnsWithoutCrashing(t *testing.T) {
+// Corrected contract (defect 3.8): a Store.List failure leaves cached proxy
+// tokens on disk, so it still warns but must exit non-zero rather than the
+// upstream exit 0 that this test previously pinned.
+func TestLogoutStoreErrorWarnsAndFails(t *testing.T) {
 	h := newHarness(t)
 	path := filepath.Join(h.dir, "sessions.json")
 	if err := os.WriteFile(path, []byte("{corrupt"), 0o600); err != nil {
@@ -162,8 +261,8 @@ func TestLogoutStoreErrorWarnsWithoutCrashing(t *testing.T) {
 	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
 
 	code, stdout, stderr := runLogout(t, h.deps, "logout")
-	if code != 0 {
-		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	if code != 1 || !strings.Contains(stderr, "Failed to clear") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	if !strings.Contains(stdout, "Logged out.") || !strings.Contains(stderr, "Warning:") {
 		t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
