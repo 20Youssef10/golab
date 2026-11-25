@@ -524,3 +524,111 @@ func randomNBH(t *testing.T) colabapi.NotebookHash {
 	}
 	return h
 }
+
+// faultStorePuts injects a store-boundary fault: replacing sessions.json with
+// a directory makes state.Store.Put fail before any session can be persisted.
+// Call the returned restore func before reading the store again.
+func faultStorePuts(t *testing.T, path string) func() {
+	t.Helper()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Regression for defect 2.1: Assign has already created a billable VM when
+// Store.Put fails. The runtime must be released before the error propagates.
+func TestNewStoreWriteFailureUnassignsRuntime(t *testing.T) {
+	h := newHarness(t)
+	restore := faultStorePuts(t, h.deps.Store.Path())
+	t.Cleanup(func() { _ = os.Remove(h.deps.Store.Path()) })
+
+	// Let the compensating unassign report success without deleting the server
+	// assignment, so the test can compare the endpoint used with the one Assign
+	// actually returned.
+	h.ctrl.SetFault(fakecolab.Fault{
+		Method: http.MethodPost, PathContains: "/unassign",
+		Status: http.StatusOK, Body: "[]",
+	})
+
+	opts, err := resolveRuntimeOptions("", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createSession(context.Background(), h.deps, "leaky", opts); err == nil {
+		t.Fatal("createSession succeeded despite store fault")
+	} else if !strings.Contains(err.Error(), "sessions.json") {
+		t.Fatalf("error does not name the store failure: %v", err)
+	}
+
+	assignments, err := h.client.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("assignments = %+v; want the assigned runtime still present", assignments)
+	}
+	wantPath := "/tun/m/unassign/" + assignments[0].Endpoint
+	var posts int
+	for _, r := range h.ctrl.Requests() {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.Path, "/tun/m/unassign/") {
+			posts++
+			if r.Path != wantPath {
+				t.Fatalf("unassign path = %q; want %q", r.Path, wantPath)
+			}
+		}
+	}
+	if posts != 1 {
+		t.Fatalf("unassign POST count = %d, want 1; requests=%+v", posts, h.ctrl.Requests())
+	}
+
+	restore()
+	sessions, err := h.deps.Store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("session left in store: %v", sessions)
+	}
+}
+
+// The compensating unassign is best effort, but when it also fails the
+// returned error must name both failures rather than swallow either one.
+func TestNewStoreWriteFailureNamesBothErrors(t *testing.T) {
+	h := newHarness(t)
+	restore := faultStorePuts(t, h.deps.Store.Path())
+	t.Cleanup(func() { _ = os.Remove(h.deps.Store.Path()) })
+	h.ctrl.SetFault(fakecolab.Fault{
+		Method: http.MethodPost, PathContains: "/unassign",
+		Status: http.StatusInternalServerError,
+	})
+
+	opts, err := resolveRuntimeOptions("", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = createSession(context.Background(), h.deps, "leaky", opts)
+	if err == nil {
+		t.Fatal("createSession succeeded despite store fault")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "sessions.json") || !strings.Contains(msg, "unassign") {
+		t.Fatalf("error must name both store and unassign failures: %v", err)
+	}
+
+	restore()
+	sessions, err := h.deps.Store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("session left in store: %v", sessions)
+	}
+}

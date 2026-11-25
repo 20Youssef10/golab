@@ -119,7 +119,14 @@ func createSession(ctx context.Context, d *app.Deps, name string, opts runtimeOp
 		MachineShape: opts.shape.String(),
 	}
 	if err := d.Store.Put(s); err != nil {
-		return state.Session{}, err
+		// Assign already created a billable runtime. Release it before
+		// propagating so a failed record write cannot orphan a running VM.
+		if unassignErr := client.Unassign(ctx, res.Endpoint); unassignErr != nil {
+			return state.Session{}, fmt.Errorf(
+				"session record write failed: %w; compensating unassign of %s also failed: %w",
+				err, res.Endpoint, unassignErr)
+		}
+		return state.Session{}, fmt.Errorf("session record write failed: %w", err)
 	}
 	writeEvent(d, name, "session_created", map[string]any{
 		"endpoint": s.Endpoint, "variant": s.Variant,
