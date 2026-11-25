@@ -15,8 +15,11 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 func newTestTieredStore(t *testing.T, kr KeyringBackend, stderr io.Writer) (*tieredStore, string) {
@@ -188,5 +191,153 @@ func TestKeyringTierUsesUpstreamIdentity(t *testing.T) {
 	}
 	if _, err := st.Load(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Load after Delete = %v; want not-exist", err)
+	}
+}
+
+// Ports the cross-process locking intent of state.Store.locked (§4.9): a
+// concurrent refresh in another process must not interleave with Save. A Save
+// made while another writer holds the token-file lock has to wait, not write.
+func TestFileStoreSaveHonoursCrossProcessLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, OAuthTokenFileName)
+	fs := newFileStore(path)
+
+	// Simulate another process holding the token-file lock.
+	lock := flock.New(path + ".lock")
+	ok, err := lock.TryLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("could not acquire simulated cross-process lock")
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- fs.Save([]byte(`{"refresh_token":"rotated"}`)) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Save completed while another writer held the lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: Save is waiting for the lock.
+	}
+
+	if err := lock.Unlock(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Save after lock release: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Save did not complete after the lock was released")
+	}
+
+	b, err := fs.Load()
+	if err != nil || string(b) != `{"refresh_token":"rotated"}` {
+		t.Fatalf("Load = %q, %v", b, err)
+	}
+}
+
+// Two concurrent refreshes must leave exactly one complete, valid token blob
+// (no torn/interleaved write) and keep the file owner-only.
+func TestFileStoreConcurrentSavesYieldOneValidBlob(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, OAuthTokenFileName)
+	fs := newFileStore(path)
+
+	const blobA = `{"refresh_token":"rotated-A","token_type":"Bearer"}`
+	const blobB = `{"refresh_token":"rotated-B","token_type":"Bearer"}`
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, blob := range []string{blobA, blobB} {
+		wg.Add(1)
+		go func(b string) {
+			defer wg.Done()
+			<-start
+			errs <- fs.Save([]byte(b))
+		}(blob)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Save: %v", err)
+		}
+	}
+
+	b, err := fs.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != blobA && string(b) != blobB {
+		t.Fatalf("final blob is neither saved value (torn write?): %q", b)
+	}
+	s, err := decodeStored(b)
+	if err != nil || s.RefreshToken.Reveal() == "" {
+		t.Fatalf("final blob is not a valid token: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if goruntime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+// A symlinked token file must be refused (§4.10): following it would let a
+// planted link redirect the token read to attacker-controlled content.
+func TestFileStoreLoadRejectsSymlink(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, OAuthTokenFileName)
+	target := filepath.Join(dir, "elsewhere.json")
+	if err := os.WriteFile(target, []byte(`{"refresh_token":"planted"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFileStore(path)
+	if _, err := fs.Load(); err == nil {
+		t.Fatal("Load followed a symlinked token file; want refusal")
+	} else if !errors.Is(err, ErrUnsafeTokenFile) {
+		t.Fatalf("Load error = %v; want ErrUnsafeTokenFile", err)
+	}
+}
+
+// A world-readable token file is self-healed on load (§4.10): re-apply
+// MakePrivate so the owner-only invariant holds without locking the user out.
+func TestFileStoreLoadCorrectsLooseMode(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("mode bits are not authoritative on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, OAuthTokenFileName)
+	const blob = `{"refresh_token":"x"}`
+	if err := os.WriteFile(path, []byte(blob), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFileStore(path)
+	b, err := fs.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(b) != blob {
+		t.Fatalf("Load = %q, want %q", b, blob)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode after Load = %o, want 600", got)
 	}
 }

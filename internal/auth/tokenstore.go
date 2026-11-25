@@ -13,9 +13,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/zalando/go-keyring"
 
 	"github.com/20Youssef10/golab/internal/logx"
+	"github.com/20Youssef10/golab/internal/platform"
 )
 
 // Real OS keyring adapter. The 5 s bound is applied by tieredStore, because
@@ -33,6 +35,10 @@ func (realKeyring) Delete(service, user string) error {
 }
 
 var errKeyringTimeout = errors.New("OS keyring probe timed out")
+
+// ErrUnsafeTokenFile means the token file exists but is not a safe owner-only
+// regular file (symlink, directory, FIFO, or a mode that exposes the blob).
+var ErrUnsafeTokenFile = errors.New("unsafe token file")
 
 // withStringTimeout bounds a blocking keyring read. A helper thread that is
 // stuck in D-Bus may outlive the deadline; it reports to a buffered channel
@@ -182,21 +188,96 @@ func (s *tieredStore) Delete() error {
 }
 
 // fileStore keeps a single owner-only JSON blob with atomic replacement.
+// All three operations take the same cross-process lock as state.Store so a
+// refresh in another process cannot race a write or read of the token file.
 type fileStore struct {
 	path string
 }
 
 func newFileStore(path string) *fileStore { return &fileStore{path: path} }
 
+// locked mirrors internal/state's flock pattern. The parent directory is
+// created before taking the lock so the lock file itself can be created on a
+// first-ever Save. The lock file carries no secret material.
+func (f *fileStore) locked(ctx context.Context, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
+		return err
+	}
+	lock := flock.New(f.path + ".lock")
+	ok, err := lock.TryLockContext(ctx, 50*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("timed out acquiring token file lock for %s", f.path)
+	}
+	defer func() { _ = lock.Unlock() }()
+	return fn()
+}
+
 func (f *fileStore) Load() ([]byte, error) {
-	return os.ReadFile(f.path)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var out []byte
+	err := f.locked(ctx, func() error {
+		var err error
+		out, err = f.loadLocked()
+		return err
+	})
+	return out, err
+}
+
+// loadLocked refuses a token path that is not a regular owner-owned file.
+// Reading through a symlink (or from a FIFO/device) would let a planted path
+// supply arbitrary credential material. The mode is validated and repaired
+// after a successful read so a loose file is self-healed rather than leaving
+// the user signed out. No token bytes ever reach an error or log.
+func (f *fileStore) loadLocked() ([]byte, error) {
+	info, err := os.Lstat(f.path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrUnsafeTokenFile, f.path)
+	}
+	data, err := os.ReadFile(f.path)
+	if err != nil {
+		return nil, err
+	}
+	// Close the Lstat→ReadFile window: the file actually read must still be
+	// the regular file we validated, not a symlink swapped in meanwhile.
+	after, err := os.Lstat(f.path)
+	if err != nil {
+		return nil, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(info, after) {
+		return nil, fmt.Errorf("%w: %s changed while being read", ErrUnsafeTokenFile, f.path)
+	}
+	// Re-apply the owner-only mode after a successful read (a no-op on
+	// Windows, where ACLs are the real control).
+	if err := platform.MakePrivate(f.path); err != nil {
+		return nil, err
+	}
+	if runtime.GOOS != "windows" {
+		final, err := os.Lstat(f.path)
+		if err != nil {
+			return nil, err
+		}
+		if got := final.Mode().Perm(); got&0o077 != 0 {
+			return nil, fmt.Errorf("%w: %s mode %o is not owner-only", ErrUnsafeTokenFile, f.path, got)
+		}
+	}
+	return data, nil
 }
 
 func (f *fileStore) Save(data []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return f.locked(ctx, func() error { return f.saveLocked(data) })
+}
+
+func (f *fileStore) saveLocked(data []byte) error {
 	dir := filepath.Dir(f.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	tmp, err := os.CreateTemp(dir, ".oauth-token-*")
 	if err != nil {
 		return err
@@ -230,6 +311,12 @@ func (f *fileStore) Save(data []byte) error {
 }
 
 func (f *fileStore) Delete() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return f.locked(ctx, f.deleteLocked)
+}
+
+func (f *fileStore) deleteLocked() error {
 	err := os.Remove(f.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
