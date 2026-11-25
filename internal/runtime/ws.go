@@ -16,7 +16,18 @@ const (
 	channelBuffer = 256
 	pingInterval  = 60 * time.Second
 	pingTimeout   = 10 * time.Second
+
+	// colab hooks may park on a human. One worker drains a small bounded queue
+	// so a flood of colab_request frames cannot fork unbounded goroutines.
+	hookQueueSize = 2
 )
+
+// hookTask is one intercepted colab_request handed to the single hook worker.
+type hookTask struct {
+	hook func(Request) bool
+	req  Request
+	msg  *Message
+}
 
 // wsConn is the subset of *websocket.Conn that conn uses. It is an interface so
 // tests can drive the reader with a fake connection (transient-drop regression)
@@ -50,8 +61,10 @@ type conn struct {
 	lost      chan struct{}
 	genCancel context.CancelFunc
 
-	hookMu    sync.RWMutex
-	colabHook func(Request) bool
+	hookMu     sync.RWMutex
+	colabHook  func(Request) bool
+	hookCh     chan hookTask
+	hookCancel context.CancelFunc
 
 	activeMu sync.RWMutex
 	active   activeExec
@@ -78,9 +91,16 @@ func newConn(ws wsConn, logger *slog.Logger) *conn {
 		logger:            logger,
 		channels:          map[string]chan *Message{},
 		done:              make(chan struct{}),
+		hookCh:            make(chan hookTask, hookQueueSize),
 		reconnectBudget:   30 * time.Second,
 		reconnectInterval: 500 * time.Millisecond,
 	}
+	// A single worker handles every intercepted colab_request. It is tied to
+	// the whole connection, not to a socket generation: a redial must not
+	// abandon a request that is waiting on a human.
+	hookCtx, hookCancel := context.WithCancel(context.Background())
+	c.hookCancel = hookCancel
+	go c.hookWorker(hookCtx)
 	for _, name := range []string{"shell", "iopub", "stdin", "control", "hb"} {
 		c.channels[name] = make(chan *Message, channelBuffer)
 	}
@@ -104,8 +124,9 @@ func (c *conn) lostChan() <-chan struct{} {
 	return c.lost
 }
 
-// currentWS snapshots the active socket. A redial may swap it concurrently; a
-// write against the previous socket simply fails as a transient error.
+// currentWS snapshots the active socket. Callers that write must hold writeMu
+// across the snapshot and the write so a redial cannot retire the socket in
+// between; startGen takes the same lock when installing a new generation.
 func (c *conn) currentWS() wsConn {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -118,11 +139,17 @@ func (c *conn) currentWS() wsConn {
 func (c *conn) startGen(ws wsConn) {
 	genCtx, cancel := context.WithCancel(context.Background())
 	lost := make(chan struct{})
+	// Install the new socket under the write lock: a send that already holds
+	// it finishes on the socket it snapshotted, and a send that is waiting for
+	// it snapshots this new socket instead. No frame can land on the retired
+	// socket during the redial window.
+	c.writeMu.Lock()
 	c.stateMu.Lock()
 	c.ws = ws
 	c.lost = lost
 	c.genCancel = cancel
 	c.stateMu.Unlock()
+	c.writeMu.Unlock()
 	// Retire this generation when the whole connection is closed. The watcher
 	// exits on cancel too, so reconnect does not leak it.
 	go func() {
@@ -173,8 +200,15 @@ func (c *conn) readLoop(ctx context.Context, ws wsConn, lost chan struct{}) {
 			if hook != nil {
 				req := requestFromMessage(msg)
 				// The hook may wait for a human: never run it on the reader
-				// goroutine. Intercept the message before normal queueing.
-				go c.runColabHook(hook, req, msg)
+				// goroutine and never fork one goroutine per frame. Hand it to
+				// a single bounded worker instead; beyond the queue depth the
+				// request is dropped rather than growing without limit.
+				select {
+				case c.hookCh <- hookTask{hook: hook, req: req, msg: msg}:
+				default:
+					c.logger.Warn("colab_request hook queue full, dropping request",
+						"msg_type", msg.Header.MsgType)
+				}
 				continue
 			}
 		}
@@ -182,6 +216,30 @@ func (c *conn) readLoop(ctx context.Context, ws wsConn, lost chan struct{}) {
 		case c.ch(msg.Channel) <- msg:
 		case <-ctx.Done():
 			return
+		}
+	}
+}
+
+// hookWorker drains colab_request hooks one at a time. The queue is bounded so
+// a flood cannot spawn unbounded goroutines, and the worker exits when the
+// connection closes so no hook outlives the socket. Cancellation is checked
+// before each task so requests queued before close are abandoned.
+func (c *conn) hookWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.done:
+			return
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.done:
+			return
+		case task := <-c.hookCh:
+			c.runColabHook(task.hook, task.req, task.msg)
 		}
 	}
 }
@@ -232,15 +290,20 @@ func (c *conn) send(ctx context.Context, msg *Message) error {
 	if err != nil {
 		return err
 	}
-	ws := c.currentWS()
+	// Lock first, then snapshot the socket under the lock. Snapshotting before
+	// the lock lets a concurrent redial swap c.ws so the frame is written to a
+	// retired socket, silently dropping input_reply/interrupt/execute_request.
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return ws.Write(ctx, typ, data)
+	return c.currentWS().Write(ctx, typ, data)
 }
 
 func (c *conn) close() {
 	c.closeOnce.Do(func() {
 		close(c.done)
+		if c.hookCancel != nil {
+			c.hookCancel()
+		}
 		c.stateMu.Lock()
 		cancel, ws := c.genCancel, c.ws
 		c.stateMu.Unlock()
