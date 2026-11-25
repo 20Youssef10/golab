@@ -447,6 +447,32 @@ func TestMaybeCheckNeverWritesToStdout(t *testing.T) {
 	}
 }
 
+// TestMaybeCheckWaitJoinsCallback pins the join contract the CLI relies on:
+// wait must not return until the report callback (including its writer work)
+// has finished, so no diagnostic can outlive the command.
+func TestMaybeCheckWaitJoinsCallback(t *testing.T) {
+	s, downloads := newReleaseServer(t, releaseFixture{})
+	defer s.Close()
+	cfg := fakeConfig(s)
+
+	callbackDone := make(chan struct{})
+	wait := MaybeCheck(context.Background(), cfg, func(*Release) {
+		time.Sleep(20 * time.Millisecond)
+		close(callbackDone)
+	})
+	wait()
+	select {
+	case <-callbackDone:
+	default:
+		t.Fatal("wait returned before the report callback finished")
+	}
+	if downloads.Load() < 1 {
+		t.Fatalf("expected network traffic, got %d requests", downloads.Load())
+	}
+	// A second wait must be safe (the CLI may join from more than one place).
+	wait()
+}
+
 func TestMaybeCheckSkippedWhenNotDue(t *testing.T) {
 	s, downloads := newReleaseServer(t, releaseFixture{})
 	defer s.Close()

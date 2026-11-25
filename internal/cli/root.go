@@ -21,6 +21,7 @@ import (
 
 type depsContextKey struct{}
 type outputWriterKey struct{}
+type updateJoinKey struct{}
 
 // WithDeps injects a pre-built dependency graph. It is intended for tests and
 // for embedding golab's CLI inside another program.
@@ -43,6 +44,11 @@ func depsOf(cmd *cobra.Command) *app.Deps {
 }
 
 func nowUTC() time.Time { return time.Now().UTC() }
+
+// Test seams. Production uses the real constructors; tests swap them so the
+// auto-update notice's network traffic and dependency construction stay local.
+var newAppDeps = app.New
+var maybeCheckFn = update.MaybeCheck
 
 type rootOptions struct {
 	clientOAuthConfig string
@@ -101,11 +107,10 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 					Scopes:                scopeMode,
 					UsePublicAPI:          &usePublic,
 				}
-				d, err = app.New(cmd.Context(), cfg)
+				d, err = newAppDeps(cmd.Context(), cfg)
 				if err != nil {
 					return mapError(err)
 				}
-				autoUpdateNotice(cmd.Context(), d, cmd.Name())
 			}
 			// Cobra's writers win so help output and command output share the
 			// same streams, including in golden tests. In structured mode,
@@ -119,6 +124,15 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 			ctx := context.WithValue(cmd.Context(), depsContextKey{}, d)
 			if outWriter != cmd.OutOrStdout() {
 				ctx = context.WithValue(ctx, outputWriterKey{}, outWriter)
+			}
+			// Start the throttled notice only after the command's writers are
+			// installed, so its callback never sees a half-configured Deps.
+			// Its join handle travels on the context: execute() waits on it
+			// before returning so no banner can outlive the command.
+			if !injected {
+				if join := autoUpdateNotice(ctx, d, cmd); join != nil {
+					ctx = context.WithValue(ctx, updateJoinKey{}, join)
+				}
 			}
 			// RunE handlers read the dependency graph from the command context.
 			// Without this, a real (non-injected) invocation panics. Store it on
@@ -174,6 +188,11 @@ func execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	root := NewRootCommand(in, out, errOut)
 	root.SetArgs(args)
 	err := root.ExecuteContext(ctx)
+	// The notice runs asynchronously; join it before returning so its stderr
+	// write completes while the command's writers are still alive.
+	if join, ok := root.Context().Value(updateJoinKey{}).(func()); ok && join != nil {
+		join()
+	}
 	if w, ok := root.Context().Value(outputWriterKey{}).(io.Writer); ok {
 		if closeErr := agentout.Close(w); closeErr != nil && err == nil {
 			err = closeErr
@@ -200,19 +219,33 @@ func asExitError(err error, target **exitError) bool {
 
 // autoUpdateNotice runs upstream's throttled release check off the critical
 // path. It never writes to stdout and is skipped for injected test deps so a
-// golden test can never make a network call.
-func autoUpdateNotice(ctx context.Context, d *app.Deps, invoked string) {
+// golden test can never make a network call. A --explain plan performs no
+// billable work, so it must not make a network call either.
+//
+// The returned function joins the background check; nil means no asynchronous
+// work was started.
+func autoUpdateNotice(ctx context.Context, d *app.Deps, cmd *cobra.Command) func() {
+	if explainRequested(cmd) {
+		return nil
+	}
+	invoked := ""
+	if cmd != nil {
+		invoked = cmd.Name()
+	}
 	// A piped `ssh` (ProxyCommand or `-- CMD`) must keep stdout byte-exact and
 	// must not pay for an unrelated network check.
 	if suppressed(invoked) || (invoked == "ssh" && !platform.IsStdoutTTY()) || d.SettingsStore == nil {
-		return
+		return nil
 	}
 	cfg, err := d.UpdateConfig(ctx)
 	if err != nil || !cfg.Enabled {
-		return
+		return nil
 	}
-	update.MaybeCheck(ctx, cfg, func(rel *update.Release) {
-		fmt.Fprintf(d.Stderr, "[colab] Update available: %s. Run 'colab update --install' to upgrade.\n", rel.Version)
+	// Capture the writer before launching the goroutine so a later SetStreams
+	// can never race with the callback's read of d.Stderr.
+	stderr := d.Stderr
+	return maybeCheckFn(ctx, cfg, func(rel *update.Release) {
+		fmt.Fprintf(stderr, "[colab] Update available: %s. Run 'colab update --install' to upgrade.\n", rel.Version)
 		settings, err := d.SettingsStore.Load()
 		if err != nil {
 			return

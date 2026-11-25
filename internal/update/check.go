@@ -176,12 +176,22 @@ func Check(ctx context.Context, cfg Config) (*Release, bool, error) {
 // and never writes to stdout: the banner (if any) is delivered exclusively via
 // report, which the CLI routes to stderr. The internal timeout bounds the
 // background work so a slow release server cannot keep a command alive.
-func MaybeCheck(ctx context.Context, cfg Config, report func(*Release)) {
+//
+// The returned wait function blocks until the check and its report callback
+// have finished. A caller that owns a writer passed to report MUST call wait
+// before tearing that writer down: otherwise the callback can write after the
+// command has exited. Calling wait more than once is safe.
+func MaybeCheck(ctx context.Context, cfg Config, report func(*Release)) (wait func()) {
 	if !cfg.Enabled {
-		return
+		return func() {}
 	}
 	ctx, cancel := context.WithTimeout(ctx, checkBudget)
-	go maybeCheckAsync(ctx, cancel, cfg, report)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		maybeCheckAsync(ctx, cancel, cfg, report)
+	}()
+	return func() { <-done }
 }
 
 func maybeCheckAsync(ctx context.Context, cancel context.CancelFunc, cfg Config, report func(*Release)) {
