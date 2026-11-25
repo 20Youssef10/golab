@@ -10,26 +10,32 @@ on:
 #   ^https://github.com/<Owner>/<Repo>/.github/workflows/release\.yml@refs/tags/v
 # It must therefore stay exactly `.github/workflows/release.yml` and only run
 # from v* tags; a run on any other ref is not a signed release.
-permissions:
-  contents: write
-  id-token: write
+#
+# Privilege split: `go mod download`, goreleaser and syft run in the `build`
+# job, which has NO id-token permission, so a compromised build-time dependency
+# cannot mint a Fulcio signing certificate. Only `sign` holds id-token: write;
+# it never checks out the tag or executes build-time code. Both jobs are in
+# this same workflow file, so the certificate SAN (job_workflow_ref@ref) stays
+# exactly the identity the updater pins.
+permissions: {} # default deny; each job grants only what it needs
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     if: startsWith(github.ref, 'refs/tags/v')
-    # Environment gate for the keyless-signing path. GitHub auto-creates the
-    # `release` environment on first use, but it gates nothing until a repo
-    # admin adds required reviewers there. Splitting signing into a separate
-    # job with only `id-token: write` is deferred until a live signed release
-    # can prove the artifact hand-off (see docs/CONFORMANCE.md §4).
+    # Both halves stay behind the same gate: build publishes the archives,
+    # sign attaches the keyless material. GitHub auto-creates the `release`
+    # environment on first use, but it gates nothing until a repo admin adds
+    # required reviewers there.
     environment: release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # GoReleaser publishes archives + checksums.txt
+      # NO id-token: write here, by design (see header).
     env:
-      COSIGN_VERSION: v2.6.5
       # Exact stable version resolved by the old floating `~> v2` constraint
       # (goreleaser/goreleaser v2.20.3, published 2026-11-20). No floating refs.
       GORELEASER_VERSION: v2.20.3
@@ -53,11 +59,6 @@ jobs:
           test "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = "tag" || {
             echo "release requires an annotated tag (git tag -a)" >&2; exit 1;
           }
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
-        with:
-          cosign-release: ${{ env.COSIGN_VERSION }}
 
       # --- Dry-run validation (no publish) ---------------------------------
       - name: Validate GoReleaser config
@@ -83,7 +84,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- Signed artifacts + signed CycloneDX SBOM -------------------------
+      # --- CycloneDX SBOM ---------------------------------------------------
       # The pinned sbom-action version has no output-file input and its artifact
       # upload is unreliable; install syft and write the file ourselves.
       # Its default syft v0.42.2 cannot parse `go 1.27.4` in go.mod and emits a
@@ -103,6 +104,45 @@ jobs:
         run: |-
           "$SYFT" . -o cyclonedx-json=dist/sbom.cdx.json
 
+      # --- Hand-off to the signing job -------------------------------------
+      # The whole dist directory is passed so the proof step's
+      # `sha256sum -c checksums.txt` sees every file the checker sums. The
+      # artifact is an internal hand-off only, not a published release asset.
+      - name: Upload dist for signing
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: release-dist-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    # Same environment gate as the build job: a reviewer approval covers both
+    # publishing the archives and attaching the signatures.
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release upload attaches bundles to the release
+      id-token: write # keyless Fulcio certificate for cosign
+    env:
+      COSIGN_VERSION: v2.6.5
+    steps:
+      # No checkout and no build tools here: this job only handles the already
+      # built bytes from `build` plus the pinned cosign binary.
+      - name: Download dist from build
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: release-dist-${{ github.sha }}
+          path: dist
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      # --- Signed artifacts + signed CycloneDX SBOM -------------------------
       - name: Sign archives and attest the SBOM
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
