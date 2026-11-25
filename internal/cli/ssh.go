@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -56,6 +58,19 @@ func killStaleSSHd(ctx context.Context, d *app.Deps, s state.Session) {
 // which never forwards the flag.
 func forceKillApplies(force, proxyMode bool, mode sshx.Mode) bool {
 	return force && (!proxyMode || mode != sshx.ModeCmd)
+}
+
+// signalsDisabledForTest reports whether the COLAB_TEST_NO_SIGNALS escape
+// hatch is active. It exists only for Go tests that must skip assertions
+// involving real process signals in sandboxes where delivery is unreliable.
+// The variable is inert in release builds: a binary has no "test.v" flag, so
+// the environment is never consulted and cannot change signal-handling
+// behavior (the same gate internal/auth uses for its loopback exception).
+func signalsDisabledForTest() bool {
+	if flag.CommandLine.Lookup("test.v") == nil {
+		return false
+	}
+	return os.Getenv("COLAB_TEST_NO_SIGNALS") == "1"
 }
 
 // sshTarget is the resolved session plus whether this command created it.

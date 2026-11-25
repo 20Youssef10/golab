@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"os"
@@ -275,7 +276,7 @@ func TestSSHRMTeardownOnSIGHUP(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("SIGHUP is Unix-only")
 	}
-	if os.Getenv("COLAB_TEST_NO_SIGNALS") == "1" {
+	if signalsDisabledForTest() {
 		t.Skip("signals not supported in this environment")
 	}
 	h := newHarness(t)
@@ -496,5 +497,29 @@ func TestKillStaleSSHDFailureIsTolerated(t *testing.T) {
 	}
 	if strings.Contains(h.stderr.String(), "SENSITIVE123") {
 		t.Fatalf("error message leaked sensitive text: %q", h.stderr.String())
+	}
+}
+
+// COLAB_TEST_NO_SIGNALS is a test-only escape hatch: it keeps working under
+// `go test`, but a release binary (which has no "test.v" flag) must ignore the
+// variable entirely so a user cannot change signal-handling behavior through
+// the environment. Mirrors the test-only pin exception in internal/auth.
+func TestSignalsDisabledForTestOnlyInTestBinary(t *testing.T) {
+	t.Setenv("COLAB_TEST_NO_SIGNALS", "")
+	if signalsDisabledForTest() {
+		t.Fatal("escape hatch active with the variable unset")
+	}
+
+	t.Setenv("COLAB_TEST_NO_SIGNALS", "1")
+	if !signalsDisabledForTest() {
+		t.Fatal("escape hatch inactive in the Go test binary")
+	}
+
+	// Simulate a release binary: no testing flags are registered.
+	original := flag.CommandLine
+	flag.CommandLine = flag.NewFlagSet("release", flag.ContinueOnError)
+	t.Cleanup(func() { flag.CommandLine = original })
+	if signalsDisabledForTest() {
+		t.Fatal("escape hatch active in a release-like binary")
 	}
 }
