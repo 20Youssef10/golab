@@ -56,10 +56,70 @@ func TestAccumulatorExactSemantics(t *testing.T) {
 		t.Fatalf("error/execute_result accumulation wrong: %+v", outs)
 	}
 
-	// The streaming hook fires once per newly appended output, not on updates
-	// or clears. We appended: stream, stream, display, error, execute_result.
-	if len(streamed) != 5 {
-		t.Fatalf("streaming hook fired %d times, want 5", len(streamed))
+	// The streaming hook fires once per newly appended output AND once for each
+	// state-changing control event (update_display_data, clear_output) so a
+	// streaming consumer converges on the final Result (gap-report §4.3).
+	// Appended: stream, stream, display, error, execute_result; control: update, clear.
+	if len(streamed) != 7 {
+		t.Fatalf("streaming hook fired %d times, want 7", len(streamed))
+	}
+}
+
+func TestAccumulatorEmitsEventsForClearAndDisplayUpdates(t *testing.T) {
+	// Regression for gap-report §4.3: clear_output and update_display_data
+	// mutated the accumulator but fired no onOutput callback, so a streaming
+	// frontend (whose view is built entirely from those callbacks) diverged
+	// from the final Result. Upstream reference: tests/test_streaming.py's
+	// output_hook assertions (docs/02 §3.5).
+	var got []Output
+	delivered := 0 // mirrors kernel.go:129 (j.delivered++ inside the callback)
+	acc := NewAccumulator(func(o Output) {
+		delivered++
+		got = append(got, o)
+	})
+
+	feed := func(m *Message) {
+		t.Helper()
+		if err := acc.Feed(m); err != nil {
+			t.Fatal(err)
+		}
+		// Accounting stays consistent: every callback increments delivered
+		// exactly once, so it always equals the number of events delivered.
+		if delivered != len(got) {
+			t.Fatalf("delivered=%d but %d callback events observed", delivered, len(got))
+		}
+	}
+
+	feed(msg("stream", `{"name":"stdout","text":"a"}`))
+	feed(DisplayDataMsg("img", "one"))
+	feed(msg("update_display_data",
+		`{"data":{"text/plain":"two"},"metadata":{"k":"v"},"transient":{"display_id":"img"}}`))
+	feed(msg("clear_output", `{"wait":true}`))
+	feed(msg("execute_result", `{"data":{"text/plain":"7"},"metadata":{},"execution_count":7}`))
+
+	wantTypes := []string{"stream", "display_data", "update_display_data", "clear_output", "execute_result"}
+	if len(got) != len(wantTypes) {
+		t.Fatalf("onOutput fired %d times, want %d: %+v", len(got), len(wantTypes), got)
+	}
+	for i, want := range wantTypes {
+		if got[i].OutputType != want {
+			t.Fatalf("event %d has type %q, want %q", i, got[i].OutputType, want)
+		}
+	}
+	// The synthetic update carries the delta so a streaming consumer can apply
+	// the same in-place replacement it sees in the final Result.
+	if got[2].Transient == nil || got[2].Transient.DisplayID != "img" ||
+		got[2].Data["text/plain"] != "two" || got[2].Metadata["k"] != "v" {
+		t.Fatalf("update_display_data event missing its delta: %+v", got[2])
+	}
+	if delivered != len(got) {
+		t.Fatalf("delivered=%d, want %d (one increment per callback)", delivered, len(got))
+	}
+	// Synthetic control events must NOT leak into the final Result.
+	outs := acc.Outputs()
+	if len(outs) != 1 || outs[0].OutputType != "execute_result" ||
+		outs[0].ExecutionCount == nil || *outs[0].ExecutionCount != 7 {
+		t.Fatalf("final Result changed after clear/update: %+v", outs)
 	}
 }
 

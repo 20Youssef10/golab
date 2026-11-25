@@ -87,6 +87,13 @@ func (a *Accumulator) Feed(m *Message) error {
 		// `wait` is deliberately ignored: upstream clears immediately.
 		a.outputs = nil
 		a.head = 0
+		// The streaming view is built entirely from onOutput callbacks, so a
+		// silent clear would diverge from the final Result. Emit a synthetic
+		// control event (it is NOT appended, so Result and retention are
+		// unchanged) to tell consumers to clear their view too (gap-report §4.3).
+		if a.onOutput != nil {
+			a.onOutput(Output{OutputType: "clear_output"})
+		}
 	case "update_display_data":
 		var update struct {
 			Data      map[string]any `json:"data"`
@@ -104,6 +111,18 @@ func (a *Accumulator) Feed(m *Message) error {
 				a.outputs[i].Data = update.Data
 				a.outputs[i].Metadata = update.Metadata
 			}
+		}
+		// Emit a synthetic delta carrying the new MIME bundle and display id so
+		// streaming consumers can apply the same in-place replacement. As with
+		// clear_output this event is not appended to the accumulator, leaving
+		// the bounded ring buffer and the final Result untouched.
+		if a.onOutput != nil {
+			a.onOutput(Output{
+				OutputType: "update_display_data",
+				Data:       update.Data,
+				Metadata:   update.Metadata,
+				Transient:  &Transient{DisplayID: id},
+			})
 		}
 	}
 	return nil
