@@ -50,6 +50,13 @@ on-disk schema or persisted token format (per AGENTS.md).
   size check, including non-seekable streams; and `--budget-profile` /
   `GOLAB_BUDGET_PROFILE` select a named budget profile for the guard.
 
+- Protocol and response-integrity fixes from the gap report: kernel IDs are
+  URL-escaped in REST paths; oversized REST and control-plane responses now
+  return typed errors instead of decoding truncated JSON; `clear_output` and
+  `update_display_data` emit streaming events; frame offsets are checked before
+  a `uint32` cast; the dead journal `terminal` field was removed; `doctor --fixtures`
+  reports `skip` on an empty inventory; and a recoverable `usage` warning exits 0.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even
