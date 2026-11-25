@@ -62,7 +62,7 @@ func guardBudget(ctx context.Context, d *app.Deps, cmd *cobra.Command) error {
 	if path == "" {
 		path = "golab.yaml"
 	}
-	policy, err := budget.LoadProfile(ctx, path, "default")
+	policy, err := budget.LoadProfile(ctx, path, budgetProfileName(cmd))
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, budget.ErrProfileNotFound) {
 		return nil
 	}
@@ -70,6 +70,20 @@ func guardBudget(ctx context.Context, d *app.Deps, cmd *cobra.Command) error {
 		return exitf(2, "[colab] invalid budget profile: %s", logx.Redact(err.Error()))
 	}
 	return guardBudgetWithPolicy(ctx, d, policy)
+}
+
+// budgetProfileName resolves the profile the guard loads. The persistent flag
+// already defaults to GOLAB_BUDGET_PROFILE (or "default"), so an explicit flag
+// wins over the environment. Commands invoked without the root flag (for
+// example, unit calls with a bare cobra command) fall back to the environment
+// and then to "default", preserving the historical behaviour.
+func budgetProfileName(cmd *cobra.Command) string {
+	if cmd != nil && cmd.Root() != nil {
+		if v, err := cmd.Root().PersistentFlags().GetString("budget-profile"); err == nil && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return envOr("GOLAB_BUDGET_PROFILE", "default")
 }
 
 // guardBudgetWithPolicy applies a resolved policy before a billable call. The
