@@ -8,6 +8,7 @@ import (
 	"os"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -38,27 +39,131 @@ func secretKeyringFromContext(ctx context.Context) secretKeyring {
 	return osSecretKeyring{}
 }
 
-// osSecretKeyring is the production adapter. The Get call is bounded so a
-// locked keyring cannot stall `exec` before it even reaches the kernel.
-type osSecretKeyring struct{}
+// keyringProbeTimeout is the hard bound for one OS keyring read. A locked
+// keyring must not stall `exec` before it even reaches the kernel.
+const keyringProbeTimeout = 2 * time.Second
 
-func (osSecretKeyring) Get(service, user string) (string, error) {
-	type answer struct {
-		value string
-		err   error
+// errKeyringUnavailable is returned both on the first confirmed timeout and
+// (from cache) on every lookup after it. The text is the historic timeout
+// message and is deliberately unchanged for user-facing error compatibility.
+var errKeyringUnavailable = errors.New("OS keyring lookup timed out")
+
+// keyringProbe is the blocking keyring read. Its context is cancelled as soon
+// as the bound elapses so a cancellable backend can unwind promptly. The
+// production adapter cannot honour it (go-keyring.Get has no context
+// parameter), but the wrapper goroutine still exits as soon as the read
+// returns, and the unavailable cache below prevents further probes.
+type keyringProbe func(ctx context.Context, service, user string) (string, error)
+
+// defaultKeyringProbe is the production adapter. go-keyring v0.2.8 has no
+// context-aware Get, so ctx cannot interrupt it mid-call; the cancellation is
+// best-effort here and exact for injected probes.
+func defaultKeyringProbe(_ context.Context, service, user string) (string, error) {
+	return keyring.Get(service, user)
+}
+
+// keyringFlight is one in-flight probe shared by all concurrent Get callers.
+// finish publishes the result exactly once: the timer and the probe goroutine
+// race to settle the flight, and only the winner decides the verdict.
+type keyringFlight struct {
+	once  sync.Once
+	done  chan struct{}
+	value string
+	err   error
+}
+
+func (f *keyringFlight) finish(value string, err error) bool {
+	won := false
+	f.once.Do(func() {
+		f.value, f.err = value, err
+		close(f.done)
+		won = true
+	})
+	return won
+}
+
+// keyringProbeState coordinates probes and holds the sticky "unavailable"
+// verdict. This is a deliberate, mutex-guarded exception to the no-package-
+// state rule: it must outlive the many short-lived osSecretKeyring{} values a
+// long repl session creates. Tests inject their own state, so they never
+// touch or reset the process-wide default.
+type keyringProbeState struct {
+	mu          sync.Mutex
+	timeout     time.Duration // zero means keyringProbeTimeout
+	unavailable bool
+	flight      *keyringFlight
+}
+
+var defaultKeyringProbeState keyringProbeState
+
+// osSecretKeyring is the production adapter. Zero values use the real OS
+// keyring and the shared coordinator; tests inject probe/state to simulate a
+// hung backend without touching D-Bus, `security` or Credential Manager.
+type osSecretKeyring struct {
+	probe keyringProbe
+	state *keyringProbeState
+}
+
+func (k osSecretKeyring) Get(service, user string) (string, error) {
+	state := k.state
+	if state == nil {
+		state = &defaultKeyringProbeState
 	}
-	ch := make(chan answer, 1)
+	probe := k.probe
+	if probe == nil {
+		probe = defaultKeyringProbe
+	}
+	timeout := state.timeout
+	if timeout <= 0 {
+		timeout = keyringProbeTimeout
+	}
+
+	state.mu.Lock()
+	if state.unavailable {
+		state.mu.Unlock()
+		return "", errKeyringUnavailable
+	}
+	if fl := state.flight; fl != nil {
+		state.mu.Unlock()
+		<-fl.done // single-flight: share the owner's probe and its bound
+		return fl.value, fl.err
+	}
+	fl := &keyringFlight{done: make(chan struct{})}
+	state.flight = fl
+	state.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
-		v, err := keyring.Get(service, user)
-		ch <- answer{value: v, err: err}
+		v, err := probe(ctx, service, user)
+		fl.finish(v, err)
 	}()
-	timer := time.NewTimer(2 * time.Second)
+
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case a := <-ch:
-		return a.value, a.err
+	case <-fl.done:
+		state.mu.Lock()
+		state.flight = nil
+		// Only a confirmed timeout poisons the cache; ErrNotFound and other
+		// backend errors say nothing about the keyring's availability.
+		if errors.Is(fl.err, errKeyringUnavailable) {
+			state.unavailable = true
+		}
+		state.mu.Unlock()
+		return fl.value, fl.err
 	case <-timer.C:
-		return "", errors.New("OS keyring lookup timed out")
+		// Settle before cancelling so the timeout message wins the race with
+		// a probe that unwinds on ctx.Done().
+		timedOut := fl.finish("", errKeyringUnavailable)
+		cancel()
+		state.mu.Lock()
+		state.flight = nil
+		if timedOut {
+			state.unavailable = true
+		}
+		state.mu.Unlock()
+		return fl.value, fl.err
 	}
 }
 

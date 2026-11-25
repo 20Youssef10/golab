@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -42,6 +44,72 @@ func (f *fakeSecretKeyring) Get(service, user string) (string, error) {
 
 func secretKeyringContext(kr secretKeyring) context.Context {
 	return WithSecretKeyring(context.Background(), kr)
+}
+
+// Local hardening (no upstream Python counterpart): CONFIRMED DEFECT §4.17.
+// osSecretKeyring.Get used to fire keyring.Get in a goroutine bounded only by a
+// 2s timer and returned on timeout WITHOUT cancelling the probe, leaking one
+// blocked goroutine per --secret lookup in a long repl session. The probe must
+// now be context-cancellable, and a confirmed-unavailable verdict must be
+// cached so later lookups never start another probe.
+func TestOSSecretKeyringProbeCancelledAndCached(t *testing.T) {
+	const timeout = 40 * time.Millisecond
+	var probes atomic.Int32
+	probeExited := make(chan struct{})
+	probe := func(ctx context.Context, service, user string) (string, error) {
+		probes.Add(1)
+		<-ctx.Done() // emulate a keyring backend hung until the bound cancels it
+		close(probeExited)
+		return "", ctx.Err()
+	}
+	kr := osSecretKeyring{
+		probe: probe,
+		state: &keyringProbeState{timeout: timeout},
+	}
+
+	_, err := kr.Get(auth.KeyringService, "GOLAB_TEST_HUNG")
+	if err == nil || err.Error() != "OS keyring lookup timed out" {
+		t.Fatalf("error = %v, want the preserved timeout message", err)
+	}
+	// The timeout must cancel the probe: the injected backend unblocks only on
+	// ctx.Done and signals its exit. A leaked goroutine never closes this.
+	select {
+	case <-probeExited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("probe goroutine survived the timeout (leaked)")
+	}
+
+	// A confirmed-unavailable verdict is sticky: a second lookup must not
+	// spawn another probe, only return the same bound error immediately.
+	_, err2 := kr.Get(auth.KeyringService, "GOLAB_TEST_HUNG")
+	if err2 == nil || err2.Error() != err.Error() {
+		t.Fatalf("second error = %v, want %v", err2, err)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("probe started %d times, want exactly 1 (unavailable not cached)", got)
+	}
+}
+
+// The unavailable cache must not swallow ordinary successful reads: only a
+// timeout poisons the keyring, a healthy backend is probed on every lookup.
+func TestOSSecretKeyringSuccessfulProbeNotCached(t *testing.T) {
+	var probes atomic.Int32
+	kr := osSecretKeyring{
+		probe: func(ctx context.Context, service, user string) (string, error) {
+			probes.Add(1)
+			return "value-" + user, nil
+		},
+		state: &keyringProbeState{timeout: time.Second},
+	}
+	for i := 0; i < 2; i++ {
+		v, err := kr.Get(auth.KeyringService, "GOLAB_TEST_OK")
+		if err != nil || v != "value-GOLAB_TEST_OK" {
+			t.Fatalf("Get #%d = %q, %v", i, v, err)
+		}
+	}
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("probe started %d times, want 2", got)
+	}
 }
 
 // Ports upstream issue #157's local-secrets use case: process env is the
