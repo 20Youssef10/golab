@@ -2,11 +2,21 @@ package runtime
 
 import "encoding/json"
 
+// maxAccumulatedOutputs bounds the live output window. It is a multiple of
+// journalOutsCap so the journal's resume snapshot still sees the same trailing
+// outputs it did before accumulation was bounded.
+const maxAccumulatedOutputs = 1024
+
 // Accumulator reproduces jupyter_kernel_client's output_hook exactly
 // (docs/02 §3.5): adjacent streams are NOT merged, update_display_data
 // replaces matching outputs in place, and clear_output ignores `wait`.
+//
+// outputs is a fixed-capacity ring buffer: once full, each new output
+// overwrites the oldest slot in O(1), so a long stream neither retains an
+// unbounded history nor copies the whole history on every append.
 type Accumulator struct {
-	outputs  []Output
+	outputs  []Output // logical order is outputs[head:] followed by outputs[:head]
+	head     int      // index of the oldest retained output; 0 until full
 	onOutput func(Output)
 }
 
@@ -14,13 +24,28 @@ func NewAccumulator(onOutput func(Output)) *Accumulator {
 	return &Accumulator{onOutput: onOutput}
 }
 
-// Outputs returns a copy so callers cannot mutate the accumulator's state.
+// Outputs returns a copy of at most maxAccumulatedOutputs recent outputs in
+// insertion order, so callers cannot mutate the accumulator's state and never
+// pay for a copy of the full history.
 func (a *Accumulator) Outputs() []Output {
-	return append([]Output(nil), a.outputs...)
+	if len(a.outputs) == 0 {
+		return nil
+	}
+	out := make([]Output, 0, len(a.outputs))
+	if a.head == 0 {
+		return append(out, a.outputs...)
+	}
+	out = append(out, a.outputs[a.head:]...)
+	return append(out, a.outputs[:a.head]...)
 }
 
 func (a *Accumulator) append(o Output) {
-	a.outputs = append(a.outputs, o)
+	if len(a.outputs) < maxAccumulatedOutputs {
+		a.outputs = append(a.outputs, o)
+	} else {
+		a.outputs[a.head] = o
+		a.head = (a.head + 1) % maxAccumulatedOutputs
+	}
 	if a.onOutput != nil {
 		a.onOutput(o)
 	}
@@ -61,6 +86,7 @@ func (a *Accumulator) Feed(m *Message) error {
 	case "clear_output":
 		// `wait` is deliberately ignored: upstream clears immediately.
 		a.outputs = nil
+		a.head = 0
 	case "update_display_data":
 		var update struct {
 			Data      map[string]any `json:"data"`
