@@ -22,6 +22,14 @@ on-disk schema or persisted token format (per AGENTS.md).
   could not be cleared; and `max-balance` is corrected to a minimum reserve
   floor (config key and flag name retained for compatibility).
 
+- Trust anchors from the same audit: the OAuth refresh token endpoint is now
+  pinned to `https://oauth2.googleapis.com/token` and the embedded client ID
+  is authoritative, so a planted token blob cannot redirect credentials or
+  override the client pin; the self-update certificate identity now requires
+  a `refs/tags/v` release-workflow SAN, rejecting branch/dispatch runs; and
+  `golab.yaml` profiles now parse `enforce: true|false`, so profile-based budget
+  enforcement actually works (named profiles override defaults).
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even
