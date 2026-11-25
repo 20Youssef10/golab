@@ -1,10 +1,16 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/20Youssef10/golab/internal/contents"
+	"github.com/20Youssef10/golab/internal/logx"
 )
 
 func setupSyncSession(t *testing.T) (*testHarness, *fakeContents, string) {
@@ -155,5 +161,72 @@ func TestSyncRejectsTraversal(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "remote path") {
 		t.Fatalf("unexpected error: %s", h.stderr.String())
+	}
+}
+
+// TestSyncApplyRejectsPathEscape is the §4.18 regression. cleanRemotePath
+// protects collection-time paths, but a crafted manifest/state action must not
+// rely on that: applySync asserts containment itself. No upstream Python test
+// covers this — the escape is possible only through a tampered local manifest.
+func TestSyncApplyRejectsPathEscape(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fc := newFakeContents(t)
+	client, err := contents.New(contents.Config{
+		BaseURL: fc.URL, Token: logx.NewSecret("t"), HTTPClient: fc.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The remote side serves every payload so the pre-fix download/upload
+	// branches actually reach the local filesystem instead of failing early.
+	fc.addFile(path.Join("remote", "../outside-write.txt"), "pwned\n")
+	fc.addFile(path.Join("remote", "/abs-escape.txt"), "pwned\n")
+
+	outsideWrite := filepath.Join(parent, "outside-write.txt")
+	outsideRead := filepath.Join(parent, "outside-read.txt")
+	outsideDelete := filepath.Join(parent, "outside-delete.txt")
+	if err := os.WriteFile(outsideRead, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outsideDelete, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	absTarget := filepath.Join(root, filepath.FromSlash("/abs-escape.txt"))
+
+	cases := []struct {
+		name   string
+		action syncAction
+	}{
+		{"download-traversal", syncAction{Kind: "download", Path: "../outside-write.txt"}},
+		{"delete-traversal", syncAction{Kind: "delete-local", Path: "../outside-delete.txt"}},
+		{"upload-traversal", syncAction{Kind: "upload", Path: "../outside-read.txt"}},
+		{"download-absolute", syncAction{Kind: "download", Path: "/abs-escape.txt"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applySync(context.Background(), client, root, "remote",
+				[]syncAction{tc.action}, nil, nil, map[string]string{})
+			var escape *syncPathEscape
+			if !errors.As(err, &escape) {
+				t.Fatalf("applySync error = %v, want *syncPathEscape", err)
+			}
+		})
+	}
+	if _, err := os.Stat(outsideWrite); !os.IsNotExist(err) {
+		t.Errorf("download wrote outside localRoot: %s (stat err %v)", outsideWrite, err)
+	}
+	if b, err := os.ReadFile(outsideDelete); err != nil || string(b) != "keep\n" {
+		t.Errorf("delete-local mutated a file outside localRoot: %q, %v", b, err)
+	}
+	if _, err := os.Stat(absTarget); !os.IsNotExist(err) {
+		t.Errorf("absolute action path created %s (stat err %v)", absTarget, err)
+	}
+	if len(fc.puts) != 0 {
+		t.Errorf("upload-traversal read outside localRoot and wrote %d remote files", len(fc.puts))
 	}
 }

@@ -335,6 +335,52 @@ func runSync(ctx context.Context, d *app.Deps, client contents.Client,
 	for k, v := range manifest.Files {
 		newHashes[k] = v
 	}
+	if err := applySync(ctx, client, localRoot, remote, actions, localFiles, remoteFiles, newHashes); err != nil {
+		return exitCausef(1, err, "[colab] sync: %s", logx.Redact(err.Error()))
+	}
+	manifest.Schema, manifest.Session, manifest.Remote, manifest.Files =
+		syncManifestSchema, session, remote, newHashes
+	return saveSyncManifest(ctx, manifestPath, manifest)
+}
+
+// syncPathEscape is the typed rejection for an action whose local target
+// resolves outside the sync root. It never carries file contents.
+type syncPathEscape struct {
+	root string
+	path string
+}
+
+func (e *syncPathEscape) Error() string {
+	return fmt.Sprintf("path %q escapes local root %q", e.path, e.root)
+}
+
+// syncLocalTarget resolves a slash-separated action path against localRoot and
+// asserts the result stays inside it. Checking the Rel result catches both a
+// '..' escape and an absolute target; an absolute input is rejected up front
+// because filepath.Join would otherwise nest it under the root silently.
+func syncLocalTarget(localRoot, slashPath string) (string, error) {
+	relPath := filepath.FromSlash(slashPath)
+	if filepath.IsAbs(relPath) {
+		return "", &syncPathEscape{root: localRoot, path: slashPath}
+	}
+	target := filepath.Join(localRoot, relPath)
+	rel, err := filepath.Rel(localRoot, target)
+	if err != nil {
+		return "", &syncPathEscape{root: localRoot, path: slashPath}
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", &syncPathEscape{root: localRoot, path: slashPath}
+	}
+	return target, nil
+}
+
+// applySync performs the planned local and remote mutations. It is separate
+// from planning so the local containment invariant (§4.18) is directly
+// testable with crafted actions: a tampered manifest or state entry must not
+// be able to read, write or delete outside localRoot.
+func applySync(ctx context.Context, client contents.Client, localRoot, remote string,
+	actions []syncAction, localFiles, remoteFiles map[string]syncFile,
+	newHashes map[string]string) error {
 	for _, a := range actions {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -342,7 +388,11 @@ func runSync(ctx context.Context, d *app.Deps, client contents.Client,
 		remotePath := path.Join(remote, a.Path)
 		switch a.Kind {
 		case "upload":
-			b, err := os.ReadFile(filepath.Join(localRoot, filepath.FromSlash(a.Path)))
+			localPath, err := syncLocalTarget(localRoot, a.Path)
+			if err != nil {
+				return err
+			}
+			b, err := os.ReadFile(localPath)
 			if err != nil {
 				return err
 			}
@@ -351,11 +401,14 @@ func runSync(ctx context.Context, d *app.Deps, client contents.Client,
 			}
 			newHashes[a.Path] = sha256Hex(b)
 		case "download":
+			localPath, err := syncLocalTarget(localRoot, a.Path)
+			if err != nil {
+				return err
+			}
 			model, err := client.Read(ctx, remotePath)
 			if err != nil {
 				return err
 			}
-			localPath := filepath.Join(localRoot, filepath.FromSlash(a.Path))
 			if err := os.MkdirAll(filepath.Dir(localPath), 0o700); err != nil {
 				return err
 			}
@@ -369,7 +422,11 @@ func runSync(ctx context.Context, d *app.Deps, client contents.Client,
 			}
 			delete(newHashes, a.Path)
 		case "delete-local":
-			if err := os.Remove(filepath.Join(localRoot, filepath.FromSlash(a.Path))); err != nil && !os.IsNotExist(err) {
+			localPath, err := syncLocalTarget(localRoot, a.Path)
+			if err != nil {
+				return err
+			}
+			if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 			delete(newHashes, a.Path)
@@ -383,9 +440,7 @@ func runSync(ctx context.Context, d *app.Deps, client contents.Client,
 			}
 		}
 	}
-	manifest.Schema, manifest.Session, manifest.Remote, manifest.Files =
-		syncManifestSchema, session, remote, newHashes
-	return saveSyncManifest(ctx, manifestPath, manifest)
+	return nil
 }
 
 func sha256Hex(b []byte) string {
