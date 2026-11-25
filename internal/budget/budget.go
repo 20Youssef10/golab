@@ -3,9 +3,9 @@
 // It never invents a price and never converts compute units into money.
 // Thresholds are expressed in CU and CU/hour, sourced only from the existing
 // GET /tun/m/ccu-info call. A tripped threshold is a warning unless the caller
-// explicitly sets Policy.Enforce (wired to --enforce). The balance threshold
-// is a minimum reserve floor (refuse at or below it); the hourly threshold is
-// a rate ceiling (refuse at or above it).
+// explicitly sets Policy.Enforce (wired to --enforce, or read from a profile's
+// `enforce` key). The balance threshold is a minimum reserve floor (refuse at
+// or below it); the hourly threshold is a rate ceiling (refuse at or above it).
 package budget
 
 import (
@@ -32,6 +32,8 @@ var (
 	ErrProfileNotFound = errors.New("budget: profile not found")
 	// ErrInvalidThreshold means a threshold is not a positive finite number.
 	ErrInvalidThreshold = errors.New("budget: threshold must be a positive finite number")
+	// ErrInvalidBoolean means `enforce` is not a boolean value.
+	ErrInvalidBoolean = errors.New("budget: enforce must be a boolean")
 )
 
 // Policy holds advisory thresholds in compute units only. Enforce must be set
@@ -110,9 +112,10 @@ func Check(ctx context.Context, usage *colabapi.Consumption, policy Policy) (Dec
 
 // LoadProfile reads the small, strict subset of golab.yaml that describes a
 // budget. It supports `version: 1`, `defaults.budget` and named
-// `profiles.<name>.budget` blocks with `max_balance` / `max_hourly` only.
-// `max_balance` is the legacy key name for the minimum reserve floor; it is
-// kept for backward compatibility. Paths are local; the profile never
+// `profiles.<name>.budget` blocks with `max_balance` / `max_hourly` / `enforce`
+// only. `max_balance` is the legacy key name for the minimum reserve floor; it
+// is kept for backward compatibility. A named profile overrides defaults,
+// including an explicit `enforce: false`. Paths are local; the profile never
 // contains a price table.
 func LoadProfile(ctx context.Context, path, profile string) (Policy, error) {
 	if err := ctx.Err(); err != nil {
@@ -125,6 +128,9 @@ func LoadProfile(ctx context.Context, path, profile string) (Policy, error) {
 	versionSeen := false
 	defaults := Policy{}
 	profiles := map[string]Policy{}
+	// A bool's zero value cannot distinguish "not configured" from an explicit
+	// `enforce: false`, so track which named profiles set the key themselves.
+	enforceSet := map[string]bool{}
 	section, sub, named := "", "", ""
 	for i, raw := range strings.Split(string(b), "\n") {
 		if err := ctx.Err(); err != nil {
@@ -189,6 +195,21 @@ func LoadProfile(ctx context.Context, path, profile string) (Policy, error) {
 		if sub != "budget" || !hasValue {
 			return Policy{}, fmt.Errorf("%w: %q on line %d", ErrUnknownKey, key, i+1)
 		}
+		if key == "enforce" {
+			b, err := strconv.ParseBool(value)
+			if err != nil {
+				return Policy{}, fmt.Errorf("%w: %q on line %d", ErrInvalidBoolean, value, i+1)
+			}
+			if named != "" {
+				p := profiles[named]
+				p.Enforce = b
+				profiles[named] = p
+				enforceSet[named] = true
+			} else {
+				defaults.Enforce = b
+			}
+			continue
+		}
 		if key != "max_balance" && key != "max_hourly" {
 			return Policy{}, fmt.Errorf("%w: %q on line %d", ErrUnknownKey, key, i+1)
 		}
@@ -219,6 +240,9 @@ func LoadProfile(ctx context.Context, path, profile string) (Policy, error) {
 	}
 	if p.MaxHourly == 0 {
 		p.MaxHourly = defaults.MaxHourly
+	}
+	if !enforceSet[profile] {
+		p.Enforce = defaults.Enforce
 	}
 	return p, nil
 }

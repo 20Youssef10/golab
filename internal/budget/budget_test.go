@@ -158,6 +158,136 @@ func TestLoadProfileProfileInheritance(t *testing.T) {
 	}
 }
 
+// TestLoadProfileEnforceFromDefaults proves `enforce` is actually read from
+// defaults.budget. Without this, a profile that says enforce: true is only
+// advisory and the fail-closed guard path is unreachable from configuration.
+func TestLoadProfileEnforceFromDefaults(t *testing.T) {
+	const body = `version: 1
+defaults:
+  budget:
+    max_balance: 100
+    max_hourly: 20
+    enforce: true
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "golab.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := LoadProfile(context.Background(), path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Enforce {
+		t.Fatalf("default policy = %+v, want Enforce=true", p)
+	}
+	if p.MaxBalance != 100 || p.MaxHourly != 20 {
+		t.Fatalf("default policy = %+v, want thresholds preserved {100 20}", p)
+	}
+}
+
+// TestLoadProfileNamedEnforceOverride covers both directions of named-profile
+// precedence: a profile may turn enforcement off, and a profile that omits the
+// key inherits the defaults value.
+func TestLoadProfileNamedEnforceOverride(t *testing.T) {
+	const body = `version: 1
+defaults:
+  budget:
+    max_balance: 100
+    max_hourly: 20
+    enforce: true
+profiles:
+  ci:
+    budget:
+      max_balance: 50
+      enforce: false
+  inherit:
+    budget:
+      max_hourly: 40
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "golab.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ci, err := LoadProfile(context.Background(), path, "ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci.Enforce {
+		t.Fatalf("ci policy = %+v, want explicit enforce:false override", ci)
+	}
+	inherited, err := LoadProfile(context.Background(), path, "inherit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inherited.Enforce {
+		t.Fatalf("inherit policy = %+v, want defaults enforce:true inherited", inherited)
+	}
+}
+
+// TestLoadProfileRejectsNonBooleanEnforce requires a clear, typed error for a
+// malformed enforce value instead of silently treating it as advisory.
+func TestLoadProfileRejectsNonBooleanEnforce(t *testing.T) {
+	const body = `version: 1
+defaults:
+  budget:
+    max_balance: 100
+    enforce: maybe
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "golab.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadProfile(context.Background(), path, "")
+	if !errors.Is(err, ErrInvalidBoolean) {
+		t.Fatalf("error = %v, want ErrInvalidBoolean", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "enforce") || !strings.Contains(msg, "boolean") {
+		t.Fatalf("error = %q, want a clear non-boolean enforce diagnostic", msg)
+	}
+}
+
+// TestLoadProfileEnforceDeniesTrippedReserveFloor is the end-to-end budget
+// assertion: a named profile with enforce:true that inherits a reserve floor
+// must produce a denied Check decision when the balance is at/below the floor.
+func TestLoadProfileEnforceDeniesTrippedReserveFloor(t *testing.T) {
+	const body = `version: 1
+defaults:
+  budget:
+    max_balance: 100
+profiles:
+  ci:
+    budget:
+      enforce: true
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "golab.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := LoadProfile(context.Background(), path, "ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.MaxBalance != 100 || !p.Enforce {
+		t.Fatalf("ci policy = %+v, want inherited floor 100 and enforce=true", p)
+	}
+	d, err := Check(context.Background(),
+		&colabapi.Consumption{PaidComputeUnitsBalance: 20}, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Allowed || !d.Enforced {
+		t.Fatalf("decision = %+v, want denied and enforced at a tripped reserve floor", d)
+	}
+	if !strings.Contains(strings.Join(d.Reasons, " "), "reserve floor") {
+		t.Fatalf("reasons do not describe the reserve floor: %v", d.Reasons)
+	}
+}
+
 // TestLoadProfileRejectsPriceTables refuses user-supplied rate tables instead
 // of computing an estimate from unsourced numbers.
 func TestLoadProfileRejectsPriceTables(t *testing.T) {
