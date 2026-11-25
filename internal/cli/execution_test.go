@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -13,6 +14,83 @@ import (
 	"github.com/20Youssef10/golab/internal/nb"
 	"github.com/20Youssef10/golab/internal/testutil/fakekernel"
 )
+
+// Regression for gap-report §3.10: the deferred notebook save announced
+// "Saving…" and discarded both marshal and write errors, so a lost cell-output
+// file still exited 0. Ports the success-path assertions of upstream
+// tests/test_ipynb_exec.py::test_exec_ipynb_creates_output_file with injected
+// I/O failures. A failure must exit non-zero, name the cause, and never claim
+// the notebook was saved.
+func TestExecIPynbSaveFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inject  func(t *testing.T)
+		wantErr string
+	}{
+		{
+			name: "marshal",
+			inject: func(t *testing.T) {
+				orig := marshalNotebook
+				marshalNotebook = func(*nb.Notebook) ([]byte, error) {
+					return nil, errors.New("injected marshal failure")
+				}
+				t.Cleanup(func() { marshalNotebook = orig })
+			},
+			wantErr: "injected marshal failure",
+		},
+		{
+			name: "write",
+			inject: func(t *testing.T) {
+				orig := writeNotebookFile
+				writeNotebookFile = func(string, []byte, os.FileMode) error {
+					return errors.New("injected write failure")
+				}
+				t.Cleanup(func() { writeNotebookFile = orig })
+			},
+			wantErr: "injected write failure",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.inject(t)
+			h := newHarness(t)
+			h.putSession(t, "s1")
+			h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+			h.kernel.Script(
+				fakekernel.Stream("stdout", "cell output\n"),
+				fakekernel.Status("idle"), fakekernel.Reply("ok", nil),
+			)
+
+			n := nb.NewNotebook()
+			c := nb.NewCodeCell("print('a')")
+			c.ID = "cell-a"
+			n.Cells = []nb.Cell{c}
+			raw, err := nb.Marshal(n) // test fixture uses nb directly, never the seam
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "save-fail.ipynb")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outPath := strings.TrimSuffix(path, ".ipynb") + "_output.ipynb"
+
+			if code := h.run(t, "", "exec", "-s", "s1", "-f", path); code == 0 {
+				t.Fatalf("save failure exited 0; stderr=%q stdout=%q", h.stderr.String(), h.stdout.String())
+			}
+			if !strings.Contains(h.stderr.String(), tc.wantErr) {
+				t.Fatalf("stderr lacks the save error %q: %q", tc.wantErr, h.stderr.String())
+			}
+			for _, falseSuccess := range []string{"Saved notebook", "Saving notebook"} {
+				if strings.Contains(h.stderr.String(), falseSuccess) {
+					t.Fatalf("stderr claims %q on a failed save: %q", falseSuccess, h.stderr.String())
+				}
+			}
+			if _, err := os.Stat(outPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("output notebook exists (err=%v) after a failed save", err)
+			}
+		})
+	}
+}
 
 // Ports upstream tests/test_exec.py::test_cli_exec_file and
 // test_cli_exec_outputs.

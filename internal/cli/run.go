@@ -126,7 +126,9 @@ func isTransportError(err error) bool {
 
 // writePending records a recovery handle before code is submitted. The code's
 // hash is kept for identification only; no source is reconstructed on resume.
-func writePending(d *app.Deps, s *state.Session, k runtime.Kernel, msgID, code string) {
+// A failed write is fatal: an unpersisted handle makes `colab resume` fail
+// with ErrNoPendingExecution, so the caller must abort before submission.
+func writePending(d *app.Deps, s *state.Session, k runtime.Kernel, msgID, code string) error {
 	sum := sha256.Sum256([]byte(code))
 	s.Pending = &state.PendingExecution{
 		MsgID:      msgID,
@@ -134,7 +136,11 @@ func writePending(d *app.Deps, s *state.Session, k runtime.Kernel, msgID, code s
 		StartedAt:  time.Now().UTC(),
 		CodeSHA256: hex.EncodeToString(sum[:]),
 	}
-	_ = d.Store.Put(*s)
+	if err := storePut(d, *s); err != nil {
+		s.Pending = nil // never leave an unpersisted handle looking live
+		return fmt.Errorf("could not record pending execution before submission: %w", err)
+	}
+	return nil
 }
 
 func bumpPending(d *app.Deps, s *state.Session, delivered int) {
@@ -142,7 +148,7 @@ func bumpPending(d *app.Deps, s *state.Session, delivered int) {
 		return
 	}
 	s.Pending.Delivered = delivered
-	_ = d.Store.Put(*s)
+	reportStateWriteError(d, "pending", storePut(d, *s))
 }
 
 func clearPending(d *app.Deps, s *state.Session) {
@@ -150,7 +156,7 @@ func clearPending(d *app.Deps, s *state.Session) {
 		return
 	}
 	s.Pending = nil
-	_ = d.Store.Put(*s)
+	reportStateWriteError(d, "pending", storePut(d, *s))
 }
 
 // executeTracked wraps Execute with Pending bookkeeping: a handle is written
@@ -159,7 +165,9 @@ func clearPending(d *app.Deps, s *state.Session) {
 func executeTracked(ctx context.Context, d *app.Deps, s *state.Session, k runtime.Kernel, code string, opts runtime.ExecOptions) (*runtime.Result, error) {
 	msgID := uuid.NewString()
 	opts.MsgID = msgID
-	writePending(d, s, k, msgID, code)
+	if err := writePending(d, s, k, msgID, code); err != nil {
+		return nil, err // no cell is submitted without a durable recovery handle
+	}
 	res, err := k.Execute(ctx, code, opts)
 	if err != nil {
 		var gap *runtime.OutputGapError
@@ -225,7 +233,7 @@ func runCommand() *cobra.Command {
 			}
 			return nil
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			d := depsOf(cmd)
 			script := args[0]
 			forwarded, inlineEnv := extractInlineEnv(args[1:])
@@ -322,9 +330,14 @@ func runCommand() *cobra.Command {
 				_ = kernel.Close()
 				if isNB && notebook != nil {
 					out := strings.TrimSuffix(script, filepath.Ext(script)) + "_output.ipynb"
-					fmt.Fprintf(d.Stderr, "[colab] Saving notebook with outputs to '%s'...\n", out)
-					if data, err := nb.Marshal(notebook); err == nil {
-						_ = os.WriteFile(out, data, 0o600)
+					if err := saveNotebookResult(d, notebook, out); err != nil {
+						if runErr == nil {
+							// The outputs exist nowhere else: fail the command
+							// rather than claim a notebook was saved.
+							runErr = err
+						} else if d.Log != nil {
+							d.Log.Debug("notebook output save failed after command error", "error", err)
+						}
 					}
 				}
 				// A transport interruption may leave the kernel still working.

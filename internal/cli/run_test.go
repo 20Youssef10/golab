@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -8,9 +9,80 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/nb"
+	"github.com/20Youssef10/golab/internal/state"
 	"github.com/20Youssef10/golab/internal/testutil/fakekernel"
 )
+
+// Regression for gap-report §3.10 on the `run` path: a failed notebook write
+// must not report success or exit 0. Ports upstream
+// tests/test_ipynb_exec.py::test_exec_ipynb_creates_output_file for the CLI run
+// command with an injected write failure.
+func TestRunNotebookSaveFailure(t *testing.T) {
+	orig := writeNotebookFile
+	writeNotebookFile = func(string, []byte, os.FileMode) error {
+		return errors.New("injected run write failure")
+	}
+	t.Cleanup(func() { writeNotebookFile = orig })
+
+	h := newHarness(t)
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil)) // /content prelude
+	h.kernel.Script(fakekernel.Stream("stdout", "cell output\n"), fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+
+	n := nb.NewNotebook()
+	c := nb.NewCodeCell("print('a')")
+	c.ID = "cell-a"
+	n.Cells = []nb.Cell{c}
+	path, outPath := writeRunNotebook(t, ".ipynb", n.Cells...)
+
+	if code := h.run(t, "", "run", path); code == 0 {
+		t.Fatalf("save failure exited 0; stderr=%q", h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "injected run write failure") {
+		t.Fatalf("stderr lacks the save error: %q", h.stderr.String())
+	}
+	for _, falseSuccess := range []string{"Saved notebook", "Saving notebook"} {
+		if strings.Contains(h.stderr.String(), falseSuccess) {
+			t.Fatalf("stderr claims %q on a failed save: %q", falseSuccess, h.stderr.String())
+		}
+	}
+	if _, err := os.Stat(outPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output notebook exists (err=%v) after a failed save", err)
+	}
+}
+
+// Regression for gap-report §3.12: a failed Pending write must abort BEFORE
+// the cell is submitted. A handle that was never persisted makes `colab
+// resume` report ErrNoPendingExecution, so continuing would silently disable
+// recovery on a billable VM.
+func TestRunPendingWriteFailureAbortsBeforeSubmit(t *testing.T) {
+	orig := storePut
+	storePut = func(d *app.Deps, s state.Session) error {
+		if s.Pending != nil {
+			return errors.New("injected pending record failure")
+		}
+		return orig(d, s)
+	}
+	t.Cleanup(func() { storePut = orig })
+
+	h := newHarness(t)
+	script := filepath.Join(t.TempDir(), "pending.py")
+	if err := os.WriteFile(script, []byte("print('never submitted')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No kernel scripts are queued: any Execute call would be an overrun.
+
+	if code := h.run(t, "", "run", "-s", "sess", script); code == 0 {
+		t.Fatalf("pending write failure exited 0; stderr=%q", h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "injected pending record failure") {
+		t.Fatalf("stderr lacks the pending error: %q", h.stderr.String())
+	}
+	if got := h.kernel.Executions(); len(got) != 0 {
+		t.Fatalf("cell was submitted despite the failed pending write: %+v", got)
+	}
+}
 
 // writeRunNotebook writes an nbformat v4.5 notebook and returns its path and
 // the derived <base>_output.ipynb path. The extension is a parameter so one

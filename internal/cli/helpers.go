@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -18,6 +19,15 @@ import (
 	"github.com/20Youssef10/golab/internal/render"
 	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/state"
+)
+
+// These seams default to the real os/nb/state calls and let CLI-level tests
+// inject I/O failures (they mirror budgetCheckFn/attachSSHForceKernel). Keep
+// production behaviour byte-identical to the direct calls they replace.
+var (
+	marshalNotebook   = nb.Marshal
+	writeNotebookFile = os.WriteFile
+	storePut          = func(d *app.Deps, s state.Session) error { return d.Store.Put(s) }
 )
 
 // hardwareLabel mirrors upstream's `_hardware_label`: NONE is shown as CPU.
@@ -137,25 +147,52 @@ func resolveSessionName(ctx context.Context, d *app.Deps, name string) (string, 
 	return s.Name, nil
 }
 
+// reportStateWriteError keeps a non-critical session-record write failure
+// visible at debug level. Unlike the Pending handle, Running/LastExecution
+// are progress fields: aborting a live execution over one would be worse than
+// losing the field. Debug is off by default, matching docs/03 §8.
+func reportStateWriteError(d *app.Deps, field string, err error) {
+	if err == nil || d == nil || d.Log == nil {
+		return
+	}
+	d.Log.Debug("session record write failed", "field", field, "error", err)
+}
+
 func writeEvent(d *app.Deps, name, eventType string, payload map[string]any) {
 	logger, err := d.History(name)
 	if err != nil {
 		return
 	}
-	_ = logger.Append(eventType, payload)
+	reportStateWriteError(d, "history event", logger.Append(eventType, payload))
 }
 
 func running(value string) *string { return &value }
 
 func setRunning(d *app.Deps, s *state.Session, value *string) {
 	s.Running = value
-	_ = d.Store.Put(*s)
+	reportStateWriteError(d, "running", storePut(d, *s))
 }
 
 func setLastExecution(d *app.Deps, s *state.Session, kind string, cell *string) {
 	now := time.Now().Format("2006-01-02 15:04:05")
 	s.LastExecution = &state.LastExecution{Kind: kind, Value: cell, At: now}
-	_ = d.Store.Put(*s)
+	reportStateWriteError(d, "last_execution", storePut(d, *s))
+}
+
+// saveNotebookResult writes executed cell outputs back to disk. Success is
+// reported only after the write succeeds; a marshal or write failure is
+// returned so exec/run can never exit 0 after losing the only copy of the
+// outputs (gap-report §3.10).
+func saveNotebookResult(d *app.Deps, notebook *nb.Notebook, out string) error {
+	data, err := marshalNotebook(notebook)
+	if err != nil {
+		return fmt.Errorf("could not marshal notebook outputs for %q: %w", out, err)
+	}
+	if err := writeNotebookFile(out, data, 0o600); err != nil {
+		return fmt.Errorf("could not save notebook outputs to %q: %w", out, err)
+	}
+	fmt.Fprintf(d.Stderr, "[colab] Saved notebook with outputs to '%s'.\n", out)
+	return nil
 }
 
 // renderOutputs converts the runtime's output type into render's protocol-

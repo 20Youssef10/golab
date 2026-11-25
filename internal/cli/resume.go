@@ -58,14 +58,14 @@ func resumeCommand() *cobra.Command {
 			kernel, err := d.Runtime.Attach(ctx, target, runtime.AttachOptions{
 				OnKernelStarted: func(id string) {
 					s.KernelID = id
-					_ = d.Store.Put(*s)
+					reportStateWriteError(d, "kernel id", storePut(d, *s))
 				},
 				OnSessionStarted: func(id string) {
 					s.SessionID = id
 					if s.Pending != nil {
 						s.Pending.SessionID = id
 					}
-					_ = d.Store.Put(*s)
+					reportStateWriteError(d, "session id", storePut(d, *s))
 				},
 			})
 			if err != nil {

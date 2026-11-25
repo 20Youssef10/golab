@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/20Youssef10/golab/internal/app"
+	"github.com/20Youssef10/golab/internal/logx"
 	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/state"
 )
@@ -245,6 +249,48 @@ func TestResumeCommandTypedFailuresAndTimeout(t *testing.T) {
 			t.Fatal("Pending should survive an interrupted resume")
 		}
 	})
+}
+
+// Gap-report §3.12: the two Attach callbacks persist a refreshed KernelID /
+// SessionID. Those writes are non-critical, but they must not be silent: resume
+// still succeeds and the failure is visible in the debug log.
+func TestResumeAttachRecordWriteFailuresAreDebugged(t *testing.T) {
+	h := newHarness(t)
+	var logs bytes.Buffer
+	h.deps.Log = slog.New(logx.NewHandler(&logs, true))
+
+	s := h.putSession(t, "sess")
+	s.KernelID = "kernel-stub"
+	s.Pending = ptrPending(state.PendingExecution{
+		MsgID: "exec-saved", SessionID: "saved-session", StartedAt: time.Now(), CodeSHA256: "sha",
+	})
+	if err := h.deps.Store.Put(s); err != nil {
+		t.Fatal(err)
+	}
+	stub := &stubRecoveryKernel{}
+	h.deps.Runtime = &stubRecoveryRuntime{kernel: stub}
+
+	orig := storePut
+	var calls int
+	storePut = func(d *app.Deps, sess state.Session) error {
+		calls++
+		if calls <= 2 { // the two Attach callbacks, not clearPending's final write
+			return errors.New("injected attach record failure")
+		}
+		return orig(d, sess)
+	}
+	t.Cleanup(func() { storePut = orig })
+
+	if code := h.run(t, "", "resume", "-s", "sess"); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	got := logs.String()
+	if strings.Count(got, "session record write failed") < 2 {
+		t.Fatalf("debug log lacks both attach write failures (%d calls): %q", calls, got)
+	}
+	if calls < 3 {
+		t.Fatalf("clearPending should still write after the reported failures: %d calls", calls)
+	}
 }
 
 func ptrPending(v state.PendingExecution) *state.PendingExecution { return &v }

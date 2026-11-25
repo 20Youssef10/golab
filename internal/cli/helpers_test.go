@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -307,6 +309,31 @@ func (fc *fakeContents) hasFile(name string) bool {
 	defer fc.mu.Unlock()
 	_, ok := fc.files[name]
 	return ok
+}
+
+// Gap-report §3.12: Running/LastExecution records are non-critical (no cell
+// should be aborted over a progress field), but their write failures must be
+// reported at debug level instead of silently discarded.
+func TestSessionRecordWriteFailuresAreDebugged(t *testing.T) {
+	h := newHarness(t)
+	var logs bytes.Buffer
+	h.deps.Log = slog.New(logx.NewHandler(&logs, true))
+	orig := storePut
+	storePut = func(*app.Deps, state.Session) error {
+		return errors.New("injected record failure")
+	}
+	t.Cleanup(func() { storePut = orig })
+
+	s := state.Session{Name: "s1"}
+	setRunning(h.deps, &s, running("exec(script.py)"))
+	setLastExecution(h.deps, &s, "script.py", nil)
+
+	got := logs.String()
+	for _, want := range []string{"session record write failed", "running", "last_execution"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("debug log lacks %q: %q", want, got)
+		}
+	}
 }
 
 // writeEditorScript creates an executable shell script that appends the given

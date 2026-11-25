@@ -321,7 +321,7 @@ func execCommand() *cobra.Command {
 		Use:   "exec",
 		Short: "Execute code in a session",
 		Args:  noArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			d := depsOf(cmd)
 			if err := validateSessionName(name); err != nil {
 				return err
@@ -393,9 +393,14 @@ func execCommand() *cobra.Command {
 				_ = kernel.Close()
 				if isNB && notebook != nil {
 					out := strings.TrimSuffix(file, filepath.Ext(file)) + "_output.ipynb"
-					fmt.Fprintf(d.Stderr, "[colab] Saving notebook with outputs to '%s'...\n", out)
-					if data, err := nb.Marshal(notebook); err == nil {
-						_ = os.WriteFile(out, data, 0o600)
+					if err := saveNotebookResult(d, notebook, out); err != nil {
+						if runErr == nil {
+							// The outputs exist nowhere else: fail the command
+							// rather than claim a notebook was saved.
+							runErr = err
+						} else if d.Log != nil {
+							d.Log.Debug("notebook output save failed after command error", "error", err)
+						}
 					}
 				}
 			}()
