@@ -35,14 +35,14 @@ func logoutCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			d := depsOf(cmd)
 			if d.Config.AuthProvider == auth.AuthADC {
-				fmt.Fprintln(d.Stdout, "[colab] Using --auth=adc. Run 'gcloud auth application-default revoke' to sign out.")
+				fmt.Fprintln(d.Stderr, "[colab] Using --auth=adc. Run 'gcloud auth application-default revoke' to sign out.")
 				return nil
 			}
 
 			clearer, ok := d.Auth.(auth.TokenClearer)
 			if !ok {
 				// Injectable non-OAuth providers (fakes) hold no local token.
-				fmt.Fprintln(d.Stdout, "[colab] Already logged out.")
+				fmt.Fprintln(d.Stderr, "[colab] Already logged out.")
 				return nil
 			}
 			res, err := clearer.ClearToken(cmd.Context())
@@ -50,9 +50,9 @@ func logoutCommand() *cobra.Command {
 				return exitf(1, "[colab] Failed to clear OAuth token (%s).", logx.Redact(err.Error()))
 			}
 			if res.Removed {
-				fmt.Fprintln(d.Stdout, "[colab] Logged out.")
+				fmt.Fprintln(d.Stderr, "[colab] Logged out.")
 			} else {
-				fmt.Fprintln(d.Stdout, "[colab] Already logged out.")
+				fmt.Fprintln(d.Stderr, "[colab] Already logged out.")
 			}
 
 			// Capability flags are only a cache; a best-effort reset is fine.

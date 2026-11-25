@@ -40,7 +40,7 @@ func applyUpdate(ctx context.Context, d *app.Deps, cfg update.Config, rel *updat
 		persistUpdateCheck(d, rel)
 	}
 	if rel == nil {
-		fmt.Fprintf(d.Stdout, "[colab] Colab CLI is up to date (version: %s).\n", cfg.CurrentVersion)
+		fmt.Fprintf(d.Stderr, "[colab] Colab CLI is up to date (version: %s).\n", cfg.CurrentVersion)
 	} else {
 		fmt.Fprintf(d.Stdout, "A new version is available: %s (current: %s).\n", rel.Version, cfg.CurrentVersion)
 		fmt.Fprintf(d.Stdout, "Run 'golab update --install' to upgrade in place.\n")
@@ -52,7 +52,7 @@ func applyUpdate(ctx context.Context, d *app.Deps, cfg update.Config, rel *updat
 		return exitCausef(1, err, "[colab] Update verification failed: %s: %s",
 			logx.Redact(err.Error()), strings.Join(updateErrorSentinels(err), ", "))
 	}
-	fmt.Fprintf(d.Stdout, "[colab] Installed version %s.\n", rel.Version)
+	fmt.Fprintf(d.Stderr, "[colab] Installed version %s.\n", rel.Version)
 	return nil
 }
 

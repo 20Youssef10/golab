@@ -123,3 +123,41 @@ func TestUpdateVerificationFailureExitNonzero(t *testing.T) {
 		t.Fatalf("error should wrap ErrChecksumMismatch: %v", err)
 	}
 }
+
+// TestUpdateDiagnosticsOnStderr guards defect §3.9: every [colab] diagnostic
+// must go to stderr so --output json keeps a clean structured stdout stream.
+// Ports the output assertion of upstream tests/test_update.py (up-to-date
+// message at line 261; upgrade result at lines 131-133).
+func TestUpdateDiagnosticsOnStderr(t *testing.T) {
+	t.Run("up to date", func(t *testing.T) {
+		h := newHarness(t)
+		setStreams(h)
+		cfg := update.Config{Owner: "o", Repo: "r", CurrentVersion: "1.0.0", Enabled: true}
+
+		if code := exitCodeOf(t, applyUpdate(context.Background(), h.deps, cfg, nil, false, false)); code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+		}
+		if strings.Contains(h.stdout.String(), "[colab]") {
+			t.Fatalf("stdout must not contain [colab] diagnostics: %q", h.stdout.String())
+		}
+		if !strings.Contains(h.stderr.String(), "[colab] Colab CLI is up to date (version: 1.0.0).") {
+			t.Fatalf("stderr = %q", h.stderr.String())
+		}
+	})
+	t.Run("new version result stays on stdout", func(t *testing.T) {
+		h := newHarness(t)
+		setStreams(h)
+		cfg := update.Config{Owner: "o", Repo: "r", CurrentVersion: "1.0.0", Enabled: true}
+		rel := &update.Release{Version: "2.0.0", Tag: "v2.0.0"}
+
+		if code := exitCodeOf(t, applyUpdate(context.Background(), h.deps, cfg, rel, false, false)); code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+		}
+		if strings.Contains(h.stdout.String(), "[colab]") {
+			t.Fatalf("stdout must not contain [colab] diagnostics: %q", h.stdout.String())
+		}
+		if !strings.Contains(h.stdout.String(), "A new version is available: 2.0.0 (current: 1.0.0).") {
+			t.Fatalf("stdout = %q", h.stdout.String())
+		}
+	})
+}

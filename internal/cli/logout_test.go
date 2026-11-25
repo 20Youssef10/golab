@@ -96,8 +96,8 @@ func TestLogoutRemovesToken(t *testing.T) {
 	if clearer.calls != 1 {
 		t.Fatalf("ClearToken calls = %d, want 1", clearer.calls)
 	}
-	if !strings.Contains(stdout, "Logged out.") {
-		t.Fatalf("stdout = %q", stdout)
+	if !strings.Contains(stderr, "Logged out.") {
+		t.Fatalf("stderr = %q; stdout = %q", stderr, stdout)
 	}
 }
 
@@ -108,7 +108,7 @@ func TestLogoutAlreadyLoggedOut(t *testing.T) {
 	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{}}
 
 	code, stdout, stderr := runLogout(t, h.deps, "logout")
-	if code != 0 || !strings.Contains(stdout, "Already logged out.") {
+	if code != 0 || !strings.Contains(stderr, "Already logged out.") {
 		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
@@ -120,7 +120,7 @@ func TestLogoutInvalidatesSessionTokensAndWarns(t *testing.T) {
 	h.putSession(t, "s1")
 	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
 
-	code, stdout, stderr := runLogout(t, h.deps, "logout")
+	code, _, stderr := runLogout(t, h.deps, "logout")
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
@@ -131,8 +131,8 @@ func TestLogoutInvalidatesSessionTokensAndWarns(t *testing.T) {
 	if s.Token.Reveal() != "" || s.TokenExpiresAt != nil {
 		t.Fatalf("stale proxy token survived logout: %+v", s)
 	}
-	if !strings.Contains(stdout, "Logged out.") {
-		t.Fatalf("stdout = %q", stdout)
+	if !strings.Contains(stderr, "Logged out.") {
+		t.Fatalf("stderr = %q", stderr)
 	}
 	if !strings.Contains(stderr, "1 local session(s)") || !strings.Contains(stderr, "previous account") {
 		t.Fatalf("stderr = %q", stderr)
@@ -147,9 +147,9 @@ func TestLogoutBlanksAllSessionsExitsZero(t *testing.T) {
 	h.putSession(t, "s2")
 	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
 
-	code, stdout, stderr := runLogout(t, h.deps, "logout")
+	code, _, stderr := runLogout(t, h.deps, "logout")
 	if code != 0 {
-		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
 	for _, name := range []string{"s1", "s2"} {
 		s, err := h.deps.Store.Get(name)
@@ -163,8 +163,8 @@ func TestLogoutBlanksAllSessionsExitsZero(t *testing.T) {
 	if strings.Contains(stderr, "Failed to clear") {
 		t.Fatalf("unexpected failure message on success path: %q", stderr)
 	}
-	if !strings.Contains(stdout, "Logged out.") {
-		t.Fatalf("stdout = %q", stdout)
+	if !strings.Contains(stderr, "Logged out.") {
+		t.Fatalf("stderr = %q", stderr)
 	}
 }
 
@@ -231,7 +231,7 @@ func TestLogoutResetsCachedAPICapabilities(t *testing.T) {
 	}
 	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
 
-	code, stdout, stderr := runLogout(t, h.deps, "logout")
+	code, _, stderr := runLogout(t, h.deps, "logout")
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
@@ -242,8 +242,8 @@ func TestLogoutResetsCachedAPICapabilities(t *testing.T) {
 	if got.PublicAPISupported != nil || got.TunnelAPISupported != nil {
 		t.Fatalf("capability flags not reset: %+v", got)
 	}
-	if !strings.Contains(stdout, "Logged out.") {
-		t.Fatalf("stdout = %q", stdout)
+	if !strings.Contains(stderr, "Logged out.") {
+		t.Fatalf("stderr = %q", stderr)
 	}
 }
 
@@ -260,12 +260,12 @@ func TestLogoutStoreErrorWarnsAndFails(t *testing.T) {
 	}
 	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
 
-	code, stdout, stderr := runLogout(t, h.deps, "logout")
+	code, _, stderr := runLogout(t, h.deps, "logout")
 	if code != 1 || !strings.Contains(stderr, "Failed to clear") {
-		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
-	if !strings.Contains(stdout, "Logged out.") || !strings.Contains(stderr, "Warning:") {
-		t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
+	if !strings.Contains(stderr, "Logged out.") || !strings.Contains(stderr, "Warning:") {
+		t.Fatalf("stderr=%q", stderr)
 	}
 }
 
@@ -289,15 +289,15 @@ func TestLogoutADCPrintsGcloudHint(t *testing.T) {
 	clearer := &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
 	h.deps.Auth = clearer
 
-	code, stdout, _ := runLogout(t, h.deps, "logout")
+	code, _, stderr := runLogout(t, h.deps, "logout")
 	if code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if clearer.calls != 0 {
 		t.Fatal("ADC logout must not clear an OAuth token")
 	}
-	if !strings.Contains(stdout, "gcloud auth application-default revoke") {
-		t.Fatalf("stdout = %q", stdout)
+	if !strings.Contains(stderr, "gcloud auth application-default revoke") {
+		t.Fatalf("stderr = %q", stderr)
 	}
 }
 
@@ -343,7 +343,60 @@ func TestLogoutIdempotent(t *testing.T) {
 	}
 	h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{}}
 	code, stdout, stderr := runLogout(t, h.deps, "logout")
-	if code != 0 || !strings.Contains(stdout, "Already logged out.") {
+	if code != 0 || !strings.Contains(stderr, "Already logged out.") {
 		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
+}
+
+// TestLogoutDiagnosticsOnStderr guards defect §3.9: every [colab] diagnostic
+// must go to stderr so --output json keeps a clean structured stdout stream.
+// Ports the stream contract of upstream tests/test_cli.py::test_cli_logout_removes_token,
+// ::test_cli_logout_already_logged_out and ::test_cli_logout_adc_prints_gcloud_hint.
+func TestLogoutDiagnosticsOnStderr(t *testing.T) {
+	t.Run("removed", func(t *testing.T) {
+		h := newHarness(t)
+		h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
+
+		code, stdout, stderr := runLogout(t, h.deps, "logout")
+		if code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, stderr)
+		}
+		if strings.Contains(stdout, "[colab]") {
+			t.Fatalf("stdout must not contain [colab] diagnostics: %q", stdout)
+		}
+		if !strings.Contains(stderr, "[colab] Logged out.") {
+			t.Fatalf("stderr = %q", stderr)
+		}
+	})
+	t.Run("already logged out", func(t *testing.T) {
+		h := newHarness(t)
+		h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{}}
+
+		code, stdout, stderr := runLogout(t, h.deps, "logout")
+		if code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, stderr)
+		}
+		if strings.Contains(stdout, "[colab]") {
+			t.Fatalf("stdout must not contain [colab] diagnostics: %q", stdout)
+		}
+		if !strings.Contains(stderr, "[colab] Already logged out.") {
+			t.Fatalf("stderr = %q", stderr)
+		}
+	})
+	t.Run("adc hint", func(t *testing.T) {
+		h := newHarness(t)
+		h.deps.Config.AuthProvider = auth.AuthADC
+		h.deps.Auth = &fakeClearer{result: auth.ClearTokenResult{Removed: true}}
+
+		code, stdout, stderr := runLogout(t, h.deps, "logout")
+		if code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, stderr)
+		}
+		if strings.Contains(stdout, "[colab]") {
+			t.Fatalf("stdout must not contain [colab] diagnostics: %q", stdout)
+		}
+		if !strings.Contains(stderr, "[colab] Using --auth=adc.") {
+			t.Fatalf("stderr = %q", stderr)
+		}
+	})
 }
