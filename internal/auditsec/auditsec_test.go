@@ -93,6 +93,37 @@ func TestAuditDetectsSeededDefects(t *testing.T) {
 	}
 }
 
+// TestAuditHistoryModeFindingID proves a world-readable transcript directory
+// gets its own stable finding id instead of the generic path.mode bucket.
+func TestAuditHistoryModeFindingID(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("mode findings are intentionally disabled on Windows")
+	}
+	cfg, _ := fixture(t)
+	if err := os.Mkdir(cfg.HistoryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.HistoryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Audit(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range rep.Findings {
+		if f.ID == "path.mode" {
+			t.Fatalf("history dir reported with generic id path.mode: %+v", f)
+		}
+		if f.ID == "history.dir.mode" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing finding history.dir.mode: %+v", rep.Findings)
+	}
+}
+
 // TestAuditRedactRegression plants both a bearer credential and a JSON token
 // field in state and proves the report is clean after logx.Redact. This guards
 // against a future change that echoes raw state bytes into a finding.

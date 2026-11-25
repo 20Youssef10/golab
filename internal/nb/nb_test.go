@@ -159,6 +159,54 @@ func TestSourceStringAndListForms(t *testing.T) {
 	}
 }
 
+// The nbformat v4 "multiline string" list form requires every line except the
+// last to end in "\n", as written by upstream's nbformat writer (the source and
+// stream-text shapes asserted by tests/test_log_export.py::test_log_export).
+// A hand-authored ["one", "two"] must be reported instead of silently merged
+// into "onetwo".
+func TestMultilineStringListTerminators(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr string
+	}{
+		{name: "string form", in: `"one\ntwo"`, want: "one\ntwo"},
+		{name: "empty list", in: `[]`, want: ""},
+		{name: "single unterminated line", in: `["only"]`, want: "only"},
+		{name: "terminated lines", in: `["one\n","two\n"]`, want: "one\ntwo\n"},
+		{name: "unterminated last line", in: `["one\n","two"]`, want: "one\ntwo"},
+		{name: "crlf terminated line", in: `["one\r\n","two"]`, want: "one\r\ntwo"},
+		{name: "first line unterminated", in: `["one","two"]`, wantErr: "missing a terminating newline"},
+		{name: "middle line unterminated", in: `["one\n","two","three"]`, wantErr: "missing a terminating newline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got MultilineString
+			err := got.UnmarshalJSON([]byte(tc.in))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("UnmarshalJSON(%s) = %q, want error containing %q", tc.in, got, tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %q, want it to contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UnmarshalJSON(%s): %v", tc.in, err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("UnmarshalJSON(%s) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	// The validation must propagate through the notebook-level entry point too.
+	badCell := `{"cell_type":"markdown","id":"x","metadata":{},"source":["one","two"]}`
+	if _, err := ParseCell([]byte(badCell)); err == nil {
+		t.Fatal("ParseCell accepted a malformed multiline source list")
+	}
+}
+
 func TestAttachmentsRoundTrip(t *testing.T) {
 	raw := []byte(`{"cell_type":"markdown","id":"m1","metadata":{},` +
 		`"source":"![x](attachment:image.png)",` +

@@ -6,7 +6,11 @@ import "fmt"
 // Number is the semantic version of this build.
 const Number = "0.2.0"
 
-// Upstream is the google-colab-cli release line this build targets.
+// Upstream is the google-colab-cli release line this build targets. It is
+// deliberately a compatibility range ("0.8.x" plus untagged HEAD), not a
+// verified pin: no drift detector checks this string against upstream
+// releases, and it does not assert interoperability with any specific upstream
+// commit. Read it as compatibility text, not as a tested version guarantee.
 const Upstream = "0.8.x+HEAD"
 
 // String returns the one-line string printed by `golab version`.

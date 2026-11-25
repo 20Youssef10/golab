@@ -10,7 +10,8 @@ import (
 )
 
 // MultilineString is an nbformat "multiline string": it is written as a JSON
-// string but may be read from either a string or an array of strings.
+// string but may be read from either a string or an array of strings. In the
+// list form every line except the last must end in "\n"; see joinMultilineLines.
 type MultilineString string
 
 // UnmarshalJSON accepts both the string and the list-of-lines forms used by
@@ -25,8 +26,27 @@ func (m *MultilineString) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &lines); err != nil {
 		return fmt.Errorf("nb: multiline string must be a string or an array of strings: %w", err)
 	}
-	*m = MultilineString(strings.Join(lines, ""))
+	joined, err := joinMultilineLines(lines)
+	if err != nil {
+		return err
+	}
+	*m = MultilineString(joined)
 	return nil
+}
+
+// joinMultilineLines concatenates the list form of an nbformat multiline
+// string. Concatenation with no separator is correct only when every line but
+// the last carries its own terminating newline, as nbformat requires; without
+// this check a hand-authored ["one", "two"] would silently become "onetwo".
+// The offending index is reported without echoing line content, which may be
+// notebook source and must not leak into an error message.
+func joinMultilineLines(lines []string) (string, error) {
+	for i := 0; i+1 < len(lines); i++ {
+		if !strings.HasSuffix(lines[i], "\n") {
+			return "", fmt.Errorf("nb: multiline string list element %d is missing a terminating newline", i)
+		}
+	}
+	return strings.Join(lines, ""), nil
 }
 
 // Output is one cell output. Stream, display_data, execute_result and error

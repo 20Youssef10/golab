@@ -15,12 +15,18 @@ linters:
     - unused
   settings:
     gosec:
-      # G101 flags key *names* (e.g. "oauth_token"), not credentials;
-      # G115 is bounded by validated frame lengths; G304 is reading paths the
-      # user explicitly supplied (script, requirements, state, resolv.conf);
-      # G118/G204 are deliberate long-lived loops / user-selected editor;
-      # G7xx are experimental taint rules flagging the injected fakes.
-      excludes: [G101, G115, G118, G204, G304, G703, G704, G705]
+      # Re-verified 2026-11-26 with golangci-lint v2.15.0: each remaining
+      # exclusion still suppresses only known false positives. G101 flags key
+      # *names* and public token URLs, not credentials; G115 conversions are
+      # bounded by maxFrameSize/uint32 checks and terminal sizes; G304 reads
+      # paths the user explicitly supplied (profiles, requirements, bundle
+      # files, scripts, state, resolv.conf); G204 is the user-selected editor;
+      # G118 is the connection-scoped stdin loop; G703 is an experimental taint
+      # rule on config-derived token paths that are independently Lstat-checked.
+      # G704/G705 are deliberately no longer excluded: with current code they
+      # produce zero findings, so a blanket suppression would only hide future
+      # real findings.
+      excludes: [G101, G115, G118, G204, G304, G703]
   exclusions:
     rules:
       - path: _test\.go

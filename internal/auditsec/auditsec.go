@@ -163,6 +163,8 @@ func checkMode(rep *Report, name string, info os.FileInfo) {
 		id = "auth.token-file.mode"
 	case "legacy_token":
 		id = "auth.legacy-token.mode"
+	case "history":
+		id = "history.dir.mode"
 	}
 	rep.Findings = append(rep.Findings, Finding{
 		Severity: "warning", ID: id,
