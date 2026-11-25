@@ -3,7 +3,9 @@
 // It never invents a price and never converts compute units into money.
 // Thresholds are expressed in CU and CU/hour, sourced only from the existing
 // GET /tun/m/ccu-info call. A tripped threshold is a warning unless the caller
-// explicitly sets Policy.Enforce (wired to --enforce).
+// explicitly sets Policy.Enforce (wired to --enforce). The balance threshold
+// is a minimum reserve floor (refuse at or below it); the hourly threshold is
+// a rate ceiling (refuse at or above it).
 package budget
 
 import (
@@ -35,9 +37,13 @@ var (
 // Policy holds advisory thresholds in compute units only. Enforce must be set
 // by the caller when it actually intends to refuse an allocation.
 type Policy struct {
+	// MaxBalance is a MINIMUM RESERVE FLOOR: do not allocate when the remaining
+	// paid compute-unit balance is at or below it. The name is legacy; the
+	// config key and flag are still `max_balance` / `--max-balance`.
 	MaxBalance float64
-	MaxHourly  float64
-	Enforce    bool
+	// MaxHourly is a rate ceiling: refuse when the hourly rate is at or above it.
+	MaxHourly float64
+	Enforce   bool
 }
 
 // Decision is the result of a budget check. Reasons are human-readable and
@@ -72,14 +78,14 @@ func Check(ctx context.Context, usage *colabapi.Consumption, policy Policy) (Dec
 	}
 	balance, hourly := usage.PaidComputeUnitsBalance, usage.ConsumptionRateHourly
 	if policy.MaxBalance > 0 {
-		detail := fmt.Sprintf("balance %.2f compute units (advisory max %.2f)", balance, policy.MaxBalance)
-		if balance >= policy.MaxBalance {
-			d.Reasons = append(d.Reasons, "threshold tripped: "+detail)
+		detail := fmt.Sprintf("balance %.2f compute units (minimum reserve floor %.2f)", balance, policy.MaxBalance)
+		if balance <= policy.MaxBalance {
+			d.Reasons = append(d.Reasons, "reserve floor reached: "+detail)
 			if policy.Enforce {
 				d.Allowed = false
 			}
 		} else {
-			d.Reasons = append(d.Reasons, "within threshold: "+detail)
+			d.Reasons = append(d.Reasons, "above reserve floor: "+detail)
 		}
 	}
 	if policy.MaxHourly > 0 {
@@ -105,7 +111,9 @@ func Check(ctx context.Context, usage *colabapi.Consumption, policy Policy) (Dec
 // LoadProfile reads the small, strict subset of golab.yaml that describes a
 // budget. It supports `version: 1`, `defaults.budget` and named
 // `profiles.<name>.budget` blocks with `max_balance` / `max_hourly` only.
-// Paths are local; the profile never contains a price table.
+// `max_balance` is the legacy key name for the minimum reserve floor; it is
+// kept for backward compatibility. Paths are local; the profile never
+// contains a price table.
 func LoadProfile(ctx context.Context, path, profile string) (Policy, error) {
 	if err := ctx.Err(); err != nil {
 		return Policy{}, err

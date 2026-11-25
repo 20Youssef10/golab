@@ -46,6 +46,40 @@ func TestCheckIsAdvisoryUnlessEnforced(t *testing.T) {
 	}
 }
 
+// TestCheckBalanceReserveFloor proves the balance threshold is a MINIMUM
+// RESERVE FLOOR: with --enforce, an allocation is refused when remaining
+// credit is at or below the floor, and allowed when credit is well above it.
+// Regression for the C6 balance-direction defect (1000 CU wrongly denied with
+// max_balance: 100).
+func TestCheckBalanceReserveFloor(t *testing.T) {
+	const floor = 100.0
+	for _, tc := range []struct {
+		name    string
+		balance float64
+		want    bool // Decision.Allowed
+	}{
+		{"below floor", 20, false},
+		{"at floor", floor, false},
+		{"well above floor", 1000, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := Check(context.Background(),
+				&colabapi.Consumption{PaidComputeUnitsBalance: tc.balance},
+				Policy{MaxBalance: floor, Enforce: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d.Allowed != tc.want {
+				t.Fatalf("balance %.2f with reserve floor %.2f: allowed=%t reasons=%v, want allowed=%t",
+					tc.balance, floor, d.Allowed, d.Reasons, tc.want)
+			}
+			if !strings.Contains(strings.Join(d.Reasons, " "), "reserve floor") {
+				t.Fatalf("reasons do not describe the reserve floor: %v", d.Reasons)
+			}
+		})
+	}
+}
+
 // TestCheckNeverInventsPrices rejects any dollar estimate in the decision:
 // thresholds are compute units (CU) and CU/hour only.
 func TestCheckNeverInventsPrices(t *testing.T) {

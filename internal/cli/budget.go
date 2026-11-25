@@ -75,7 +75,7 @@ func NewBudgetCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&profile, "profile", "", "Optional golab.yaml profile file")
 	cmd.Flags().StringVar(&profileName, "profile-name", "", "Named profile inside golab.yaml")
-	cmd.Flags().Float64Var(&maxBalance, "max-balance", 0, "Advisory maximum compute-unit balance")
+	cmd.Flags().Float64Var(&maxBalance, "max-balance", 0, "Minimum compute-unit balance to keep in reserve (legacy flag name: max-balance)")
 	cmd.Flags().Float64Var(&maxHourly, "max-hourly", 0, "Advisory maximum compute units/hour")
 	cmd.Flags().BoolVar(&enforce, "enforce", false, "Refuse an allocation when a threshold is tripped")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the decision as JSON")

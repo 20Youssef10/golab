@@ -34,13 +34,14 @@ func TestBudgetCommandAdvisoryOnly(t *testing.T) {
 	}
 }
 
-// TestBudgetCommandEnforceDenies turns a profile threshold into a refusal,
-// again with no allocation request.
+// TestBudgetCommandEnforceDenies turns a profile reserve floor into a refusal,
+// again with no allocation request. The balance (5) is below the floor (10):
+// a well-funded account must not be denied.
 func TestBudgetCommandEnforceDenies(t *testing.T) {
 	h := newHarness(t)
 	h.ctrl.SetConsumption(5, 0, 0)
 	path := filepath.Join(t.TempDir(), "golab.yaml")
-	body := "version: 1\nprofiles:\n  ci:\n    budget:\n      max_balance: 1\n"
+	body := "version: 1\nprofiles:\n  ci:\n    budget:\n      max_balance: 10\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
