@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"syscall"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/20Youssef10/golab/internal/app"
+	"github.com/20Youssef10/golab/internal/budget"
+	"github.com/20Youssef10/golab/internal/colabapi"
 	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/sshx"
 	"github.com/20Youssef10/golab/internal/state"
@@ -55,6 +58,76 @@ func TestSSHAutoCreate(t *testing.T) {
 	}
 	if !sawAssign {
 		t.Fatalf("no allocation request: %+v", h.ctrl.Requests())
+	}
+}
+
+// Regression for DEFECT 2.4: an enforced budget profile must stop ssh's
+// auto-create path BEFORE it POSTs an allocation. Ports upstream's
+// tests/test_budget_guard.py: a denied guard yields zero allocations. The
+// budgetCheckFn injection supplies `--enforce` (LoadProfile carries only
+// thresholds); profile loading, the Usage GET and the guard's error mapping
+// all run for real, so a zero call count proves the guard was consulted.
+func TestSSHAutoCreateBudgetGuardDenies(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "golab.yaml")
+	body := "version: 1\n" +
+		"defaults:\n  budget:\n    max_balance: 1\n" +
+		"profiles:\n  default:\n    budget:\n      max_balance: 1\n"
+	if err := os.WriteFile(profile, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOLAB_BUDGET_FILE", profile)
+
+	for _, tc := range []struct {
+		name string
+		args func(key string) []string
+	}{
+		{"proxy-unknown-name", func(key string) []string {
+			return []string{"ssh", "--proxy-mode", "-s", "guarded", "-i", key}
+		}},
+		{"bare-interactive", func(key string) []string {
+			return []string{"ssh", "-i", key}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.ctrl.SetConsumption(5, 0, 0) // balance 5 >= threshold 1
+
+			orig := budgetCheckFn
+			checks := 0
+			budgetCheckFn = func(ctx context.Context, usage *colabapi.Consumption, policy *budget.Policy) (budget.Decision, error) {
+				checks++
+				policy.Enforce = true // simulate `--enforce` on the profile
+				return budget.Check(ctx, usage, *policy)
+			}
+			defer func() { budgetCheckFn = orig }()
+
+			key := writeEd25519Key(t)
+			code := h.run(t, "", tc.args(key)...)
+			if checks != 1 {
+				t.Fatalf("budget guard consulted %d times; want 1 (stderr=%q)", checks, h.stderr.String())
+			}
+			if code != 1 {
+				t.Fatalf("exit = %d; want 1; stderr=%q stdout=%q", code, h.stderr.String(), h.stdout.String())
+			}
+			if !strings.Contains(h.stderr.String(), "[colab] budget guard:") {
+				t.Fatalf("no budget-denied error: %q", h.stderr.String())
+			}
+			if !strings.Contains(h.stderr.String(), "compute units") {
+				t.Fatalf("no usage reason in denial: %q", h.stderr.String())
+			}
+			for _, r := range h.ctrl.Requests() {
+				if r.Method == http.MethodPost && r.Path == "/tun/m/assign" {
+					t.Fatalf("allocated despite budget denial: %+v", h.ctrl.Requests())
+				}
+			}
+			local, err := h.deps.Store.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(local) != 0 {
+				t.Fatalf("session persisted despite budget denial: %+v", local)
+			}
+		})
 	}
 }
 

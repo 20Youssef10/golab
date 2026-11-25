@@ -12,6 +12,7 @@ import (
 
 	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/budget"
+	"github.com/20Youssef10/golab/internal/colabapi"
 	"github.com/20Youssef10/golab/internal/logx"
 )
 
@@ -42,6 +43,13 @@ func parseEnvBool(v string) bool {
 	return false
 }
 
+// budgetCheckFn is the decision hook used by guardBudget. The policy is a
+// pointer so a test can inject `--enforce` into the same value the guard uses
+// to choose denial over an advisory. Production delegates to budget.Check.
+var budgetCheckFn = func(ctx context.Context, usage *colabapi.Consumption, policy *budget.Policy) (budget.Decision, error) {
+	return budget.Check(ctx, usage, *policy)
+}
+
 // guardBudget applies an OPTIONAL golab.yaml profile before a billable call.
 // Without a profile it is a no-op; with one it is advisory unless the profile
 // sets enforce: true. Thresholds are compute units only — no dollar prices are
@@ -69,7 +77,7 @@ func guardBudget(ctx context.Context, d *app.Deps, cmd *cobra.Command) error {
 	if err != nil {
 		return nil
 	}
-	decision, err := budget.Check(ctx, usage, policy)
+	decision, err := budgetCheckFn(ctx, usage, &policy)
 	if err != nil {
 		return exitf(1, "[colab] budget check: %s", logx.Redact(err.Error()))
 	}

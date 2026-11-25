@@ -108,7 +108,7 @@ func autoCreateSSHSession(ctx context.Context, d *app.Deps, name, gpu, tpu strin
 
 // resolveSSHTarget implements upstream's auto-create rules. A `ssh -- CMD`
 // (or the hidden cmd-mode proxy re-invocation) MUST use an existing session.
-func resolveSSHTarget(ctx context.Context, d *app.Deps, name, gpu, tpu string, highMem bool, mode sshx.Mode, cmdArgs []string) (sshTarget, error) {
+func resolveSSHTarget(ctx context.Context, d *app.Deps, cmd *cobra.Command, name, gpu, tpu string, highMem bool, mode sshx.Mode, cmdArgs []string) (sshTarget, error) {
 	cmdMode := len(cmdArgs) > 0 || mode == sshx.ModeCmd
 	if cmdMode {
 		s, err := d.ResolveSession(ctx, name)
@@ -125,6 +125,11 @@ func resolveSSHTarget(ctx context.Context, d *app.Deps, name, gpu, tpu string, h
 	// --proxy-mode with an explicit but unknown name creates it on first connect.
 	if mode == sshx.ModeProxy && name != "" {
 		if _, err := d.Store.Get(name); errors.Is(err, state.ErrNotFound) {
+			// Only allocation paths consult the budget guard; attaching to an
+			// existing session is not billable.
+			if err := guardBudget(ctx, d, cmd); err != nil {
+				return sshTarget{}, err
+			}
 			return autoCreateSSHSession(ctx, d, name, gpu, tpu, highMem)
 		}
 	}
@@ -132,6 +137,9 @@ func resolveSSHTarget(ctx context.Context, d *app.Deps, name, gpu, tpu string, h
 	if mode == sshx.ModeInteractive && name == "" {
 		local, err := d.Store.List()
 		if err == nil && len(local) == 0 {
+			if err := guardBudget(ctx, d, cmd); err != nil {
+				return sshTarget{}, err
+			}
 			return autoCreateSSHSession(ctx, d, "", gpu, tpu, highMem)
 		}
 	}
@@ -209,7 +217,7 @@ func sshCommand() *cobra.Command {
 				}))
 				return nil
 			}
-			target, err := resolveSSHTarget(cmd.Context(), d, name, gpu, tpu, highMem, mode, args)
+			target, err := resolveSSHTarget(cmd.Context(), d, cmd, name, gpu, tpu, highMem, mode, args)
 			if err != nil {
 				return err
 			}
