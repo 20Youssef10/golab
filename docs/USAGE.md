@@ -240,7 +240,7 @@ Both `auth` and `drivemount` are interactive flows that still need a human live 
 | `golab readme` / `golab skill` | Print the bundled project README / agent skill text. Uppercase aliases are hidden. |
 | `golab help [COMMAND]` | Help for a command; unknown names exit 2. |
 | `golab completion bash\|zsh\|fish\|powershell` | Generate shell completion scripts. |
-| `golab version` | `golab 0.1.0 (compatible with google-colab-cli 0.8.x+HEAD)`. |
+| `golab version` | `golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)`. |
 | `golab update [--install]` | Check GitHub Releases; with `--install`, verify checksums, cosign signature and signed SBOM before replacing the binary. |
 | `golab logout` | Clear the local OAuth token, cached proxy tokens and capability probes so you can switch accounts. Under `--auth=adc`, print `gcloud auth application-default revoke` guidance instead. |
 | `golab test-public-api` | *(hidden)* Probe Public and Tunnel API reachability and cache the result. |
@@ -296,8 +296,8 @@ It currently applies to `new`, `run` and `ssh`. The output contains no token, UR
 | Code | Meaning |
 |---|---|
 | `0` | Success. |
-| `1` | Generic failure: lost session, API failure, verification failure, failed budget guard. |
-| `2` | Usage or missing prerequisite: bad flag value, unknown command, missing script, unusable SSH key, invalid budget profile. |
+| `1` | Generic failure: unknown command, lost session, API failure, verification failure, failed budget guard. |
+| `2` | Usage or missing prerequisite: bad flag value, missing script, unusable SSH key, invalid budget profile, `help` with an unknown name. |
 | `130` | Interrupted (SIGINT / context cancellation). |
 | Remote / N | `ssh -- CMD` returns the remote status (`255` for an SSH-level error or signal-killed remote); `run` mirrors the script's `sys.exit(N)`. |
 
@@ -331,11 +331,13 @@ TTY behaviour matters in exactly three places: `exec` with no input errors when 
 | `LIVE_E2E_ENABLED` | unset | `false` is a kill switch for live probes. |
 | `NO_COLOR` | unset | Disable coloured terminal output. |
 | `VISUAL`, `EDITOR` | platform default | Editor used by `golab edit`. |
-
-`--scopes minimal` requests only `openid`, `email` and `colaboratory`; it cannot mount Drive (no `drive.file`). Switching modes forces a fresh browser consent on the next command, and existing full-mode tokens are never silently downgraded. MCP-style per-notebook approval is not implemented.
 | `TMPDIR`, Termux `PREFIX` | OS temp dir | Location for temporary files. |
 | `XDG_CACHE_HOME` | `~/.cache` | Base for the cache directory. |
 | `SSH_AUTH_SOCK` | — | Agent socket consulted for SSH keys. |
+
+`--scopes minimal` requests only `openid`, `email` and `colaboratory`; it cannot mount Drive (no `drive.file`). Switching modes forces a fresh browser consent on the next command, and existing full-mode tokens are never silently downgraded. MCP-style per-notebook approval is not implemented.
+
+There is deliberately no `--debug` flag; debug logging is enabled only with `COLAB_DEBUG=1` (or `true`).
 
 Variables named `COLAB_TEST_*` are internal test hooks and are not user settings.
 

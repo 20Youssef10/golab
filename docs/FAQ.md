@@ -8,7 +8,7 @@ No. It is an unofficial, community-written Go implementation of Google's Colab C
 
 ## Which version of the upstream CLI does it target?
 
-Upstream HEAD `0abf82d` — the `v0.8.0` tag plus five commits — analysed on 2026-11-23. That includes `stop --all`, `--public-api` / `--no-public-api`, `test-public-api`, the `ssh --force` equivalent and the Drive propagation fix. `golab version` prints `golab 0.1.0 (compatible with google-colab-cli 0.8.x+HEAD)`.
+Upstream HEAD `0abf82d` — the `v0.8.0` tag plus five commits — analysed on 2026-11-23. That includes `stop --all`, `--public-api` / `--no-public-api`, `test-public-api`, the `ssh --force` equivalent and the Drive propagation fix. `golab version` prints `golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)`.
 
 ## What OAuth scopes does `golab` request?
 
@@ -48,7 +48,7 @@ For L4, V5E1 and V6E1 there is only one machine shape, so `golab` prints `[colab
 
 ## Does the proxy 411 problem (upstream #270) affect `golab`?
 
-Upstream's body-less POSTs get HTTP 411 behind some forward proxies. Go's `net/http` emits `Content-Length: 0` for POSTs, which may behave differently, but this has **not** been verified in a real proxied environment and is on the human-required checklist in [REMEDIATION.md](REMEDIATION.md). If you hit it, record the proxy configuration and report it. Do not work around it by disabling TLS verification.
+Upstream's body-less POSTs get HTTP 411 behind some forward proxies. `golab` implements the code-level fix: for POSTs with no body it sets `ContentLength = -1` and attaches an empty reader, so `net/http` emits chunked transfer instead of `Content-Length: 0` (`internal/colabapi/client.go`); this is recorded in `CHANGELOG.md` as the upstream #270 fix. GETs and requests that carry a body keep the normal `Content-Length` calculation. A run through a real forward proxy is still human-gated (item 7 in [REMEDIATION.md](REMEDIATION.md#human-required-items-not-closed-by-this-release)), so treat this as implemented-but-not-live-proven rather than unimplemented. If you hit HTTP 411 behind a proxy, record the proxy configuration and report it. Do not work around it by disabling TLS verification.
 
 ## How do I set up Termux?
 

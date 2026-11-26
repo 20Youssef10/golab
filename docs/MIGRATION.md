@@ -12,7 +12,7 @@ go install github.com/20Youssef10/golab/cmd/golab@latest
 
 # 2. Sanity-check that you are running the Go binary, not a stale Python one
 which colab && colab version     # names the Python implementation
-golab version                    # golab 0.1.0 (compatible with google-colab-cli 0.8.x+HEAD)
+golab version                    # golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)
 
 # 3. Your existing sessions should already be visible
 golab sessions
@@ -100,7 +100,7 @@ If a session was already gone on the server, `golab` prunes the local record and
 | Structured output | none | `--output text\|json\|ndjson` with the `golab/1` schema, `--explain`, `--yes`; `exec --json` for per-cell NDJSON |
 | Secrets | no CLI bridge | local-only `exec --secret` / `--env-file`; Colab Web secrets are never read |
 | Narrow scopes | single broad grant | `--scopes full\|minimal` forces re-consent on change; minimal cannot mount Drive |
-| Interrupted executions | no recovery | transport errors keep the session; `colab resume -s NAME` waits for late output without resubmitting |
+| Interrupted executions | no recovery | transport errors keep the session; `golab resume -s NAME` waits for late output without resubmitting |
 | Platforms | Linux/macOS only upstream | Linux, macOS, Windows, Termux |
 
 ## `--public-api` vs `--no-public-api`
@@ -116,7 +116,7 @@ Upstream is mid-migration to the Colab Public API (`colaboratory.googleapis.com/
 The design docs were written against `v0.8.0+2`; upstream has since moved. The [compatibility declaration](COMPAT.md) and [audit index](AUDIT-INDEX.md) catalogue this in detail. Highlights:
 
 - **#269 — `colab auth` hangs.** Upstream's `execute_interactive` discards the `stdin_hook` return value, so the kernel's `input()` never receives an `input_reply`, and it prints a raw message dict instead of `content.prompt`. `golab`'s runtime stdin hook explicitly sends `input_reply` with the prompt text from `content.prompt`. This is a *code-level* fix; it still needs a live human run before we claim it publicly.
-- **#270 — proxy 411.** Upstream's body-less POSTs get HTTP 411 behind some forward proxies. Go's `net/http` emits `Content-Length: 0` for POST, but whether `golab` hits the same failure in a proxied environment is unverified and human-gated. If you see it, record the exact proxy setup and report it.
+- **#270 — proxy 411.** Upstream's body-less POSTs get HTTP 411 behind some forward proxies. `golab` sets `ContentLength = -1` with an empty reader for body-less POSTs (`internal/colabapi/client.go`), so `net/http` emits chunked transfer instead of `Content-Length: 0`; the fix is recorded in `CHANGELOG.md`. A live run through a forward proxy is still human-gated ([REMEDIATION.md](REMEDIATION.md#human-required-items-not-closed-by-this-release)), so report your exact proxy setup if you see 411.
 - **#273 / high-memory.** Paid accounts have reported 503 / timeouts for G4/A100/L4 and `--high-mem`. `golab` validates hardware before allocation, retries and reconciles assignments, and maps `412`/quota errors to actionable messages instead of raw failures. For L4/V5E1/V6E1, `--high-mem` is ignored with a notice because only one shape exists.
 - **#266 / #267 / `ssh --force`.** `logout`, recursive transfers and the stale-sshd kill are implemented rather than left as upstream PRs.
 - **Public API lifecycle.** Full LRO create/poll/delete and `runtime_name` persistence are implemented ahead of upstream's current list-only support.
@@ -132,7 +132,7 @@ The design docs were written against `v0.8.0+2`; upstream has since moved. The [
 | Backend rejected accelerator / quota error | Your account lacks entitlement for that GPU/TPU. Try `--gpu T4` or omit the flag for CPU. |
 | `--high-mem ignored` | Expected for L4, V5E1 and V6E1 — those offer a single machine shape. |
 | HTTP 429 on `golab ssh` | Too many SSH sessions on the runtime. Run `golab ssh --force -s NAME`; if that fails, stop stale sessions. |
-| HTTP 411 behind a corporate proxy | Possibly upstream issue #270; our behaviour is unverified. Report your proxy setup; do not disable TLS verification. |
+| HTTP 411 behind a corporate proxy | Upstream issue #270; `golab` sends body-less POSTs as chunked, but a live proxy run is still human-gated. Report your proxy setup; do not disable TLS verification. |
 | `Corrupt state file` | Do not delete the file blindly. Inspect `<config dir>/sessions.json` and its `.bak`, fix the JSON, or move the file aside and re-create sessions. |
 | `colab` still runs the Python tool | Expected — both can be installed. Use `golab` explicitly; `which colab && colab version` identifies the Python one. |
 | `golab auth` appears to hang | Report it with the exact command and logs. This is the upstream #269 area we believe we fixed, but live proof is still pending. |
