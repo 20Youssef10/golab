@@ -92,6 +92,17 @@ on-disk schema or persisted token format (per AGENTS.md).
   coverage gate now ratchets `platform`/`app` as well as the original five
   packages, and `goleak-check` is a hard CI gate instead of advisory.
 
+- Live e2e on billable CPU VMs (2026-11-26) exercised all six tiers: allocation
+  with `--ttl` and `--wait-capacity`, `wait`, `ps`/`cat`/`tail`/`grep`/`du`/
+  `find`/`fetch`, `exec` with `--secret`/`--env-file`, `run --json` with notebook
+  parameters, `run --detach` + `jobs`/`logs`, `reap` (which removed a real
+  orphan), `cost`, the config/init/state/doctor/trace/compat/update commands,
+  and the Public API quota-project failure path. It found and fixed two Tier 2
+  defects: `du` failed to decode the array-shaped `lines` payload, and relative
+  paths in `tail`/`grep`/`du`/`fetch` resolved against kernel cwd `/content`
+  instead of VM root, so files uploaded to `/sample.txt` were invisible. All
+  cases were re-verified live after the fix; cleanup left no assignments.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even

@@ -289,7 +289,7 @@ golab edit -s train content/notes.txt
 
 ### VM inspection
 
-These commands read the running VM through server-side execution/polling; they do not mount a local filesystem or hold a WebSocket open.
+These commands read the running VM through server-side execution/polling; they do not mount a local filesystem or hold a WebSocket open. Relative paths for `tail`, `grep`, `du` and `fetch` are resolved against the VM root (`/`), matching `upload` and `cat`; already-absolute paths are unchanged. `find NAME` always searches `/content`.
 
 ```bash
 golab ps -s train --json                     # alias: golab top
