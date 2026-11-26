@@ -422,7 +422,9 @@ remote-path scans. **Live Colab e2e is still human-gated** per AGENTS.md.
 
 - Audit baseline: initial Go port, audit reports AUDIT-00…04, canonical module path.
 
-[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/20Youssef10/golab/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/20Youssef10/golab/compare/v0.1.9...v0.2.0
+[0.1.9]: https://github.com/20Youssef10/golab/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/20Youssef10/golab/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/20Youssef10/golab/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/20Youssef10/golab/compare/v0.1.5...v0.1.6

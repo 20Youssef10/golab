@@ -7,7 +7,7 @@ Unofficial Go port of `google-colab-cli`; one static binary (`CGO_ENABLED=0`). F
 - `internal/cli` may import anything, but **only `cmd/golab` imports `internal/cli`** (no other `internal/` package does).
 - Protocol packages (`colabapi`, `runtime`, `contents`, `sshx`) take plain values and **never import `state` or `cli`** (keeps them promotable to a public module).
 - Two planes, two credentials: control plane = user OAuth/ADC bearer; data plane = short-lived runtime-proxy token. `colab auth` is a third thing (injects credentials into the VM). Never conflate them.
-- Fire-and-forget: no daemons/background services; all I/O functions take `context.Context`; no package-level mutable state except the one `sync.Once` Termux net-fix.
+- Fire-and-forget: no daemons/background services; all I/O functions take `context.Context`. Package-level vars exist, but only in three categories: test seams (function variables with production defaults that tests override, e.g. the CLI command/kill/hooks in `internal/cli`, the raw-TTY and signer hooks in `internal/sshx`, and the executable-path and trust-loader seams in `internal/update`), effectively-constant lookup tables (regexes, error sentinels, static name/flag maps), and the one package-level `sync.Once` for the Termux net-fix (`internal/platform/platform.go`). No runtime-mutable business state lives at package scope.
 
 ## Commands
 | Task | Command |

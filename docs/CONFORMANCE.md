@@ -1,6 +1,6 @@
 # Conformance ledger — golab vs google-colab-cli 0.8.x+HEAD
 
-> **Date:** 2026-11-23 · **Status:** skeleton ledger, honest accounting.
+> **Date:** 2026-11-26 · **Status:** skeleton ledger, honest accounting.
 > Fakes are **not** live proof (AGENTS.md §3). No L5 live pass has occurred, so
 > no feature is marked "done". This file is the mandatory ledger required by
 > `docs/07-testing-and-conformance.md` §2 and the target of AUDIT-03 P1-1.
@@ -9,7 +9,7 @@
 
 | Layer | Requirement (docs/07 §1) | Status | Evidence / gap |
 |---|---|---|---|
-| **L1 Unit** | every PR, 6 OSes, `-race` | ✅ | ~313 `Test*`/`Fuzz*` functions across 17 packages; `ci.yml` runs `go vet` + `go test -race -count=1` on 6 runners. |
+| **L1 Unit** | every PR, 6 OSes, `-race` | ✅ | 664 `Test*`/`Fuzz*` functions in 103 `_test.go` files across 23 packages (25 total in `go list ./...`); `ci.yml` runs `go vet` + `go test -race -count=1` on 6 runners. |
 | **L2 Component (fakes)** | fakecolab / fakekernel / fakesshd scenario | 🟡 | All three fakes exist with fault injection; the full `new→exec→upload→download→ls→rm→stop` scenario is split across package tests, not one entry point. |
 | **L3 Golden** | fixtures + normalisation + `DELTAS.yaml` + `-update` | 🔴 → 🟡 | `scripts/golden.sh` harness and `testdata/golden/README.md` added; **zero scenario fixtures**. `scripts/golden.sh --scenario wire` secret-scan works once a human supplies `testdata/wire/*.json`. |
 | **L4 Differential** | Python ↔ Go via intercepting proxy, ≥40 scenarios | 🔴 → 🟡 | `scripts/differential.sh` skeleton (help/version + normalisation + diff); proxy/CA bootstrap and 38 scenarios are TODO (external tooling + human account). |
@@ -20,9 +20,10 @@
 ## 2. Upstream-test porting matrix (intent-level, estimate)
 
 Counting: upstream `tests/test_*.py` = 36 files / 373 top-level `def test_`;
-our tree = 52 `*_test.go`, ~311 `Test*` + 2 `Fuzz*` = ~313 top-level test
-functions. Many Go tests are Go-specific (sigstore, sanitiser, frame decoder)
-and do not map 1:1. **Estimate ≈ 200–240 of 373 (~55–65%) intent-level ported.**
+our tree = 103 `*_test.go` files with 664 top-level `Test*`/`Fuzz*` functions
+across 23 packages (25 total in `go list ./...`). Many Go tests are Go-specific
+(sigstore, sanitiser, frame decoder) and do not map 1:1.
+**Estimate ≈ 200–240 of 373 (~55–65%) intent-level ported.**
 Lower-confidence: no per-test ledger existed until this file.
 
 | Upstream group | Upstream tests | Estimated ported | Notes |
@@ -49,19 +50,24 @@ filled per-test and the L4/L5 layers have recorded passes.
 
 ## 3. Coverage gate (scripts/coverage-gate.sh)
 
-Measured 2026-11-23 with `go test -covermode=atomic -coverprofile`:
+Measured with `make coverage` (`go test -covermode=atomic -coverprofile`) and
+aggregated by `scripts/coverage-gate.sh`:
 
-| Package | Coverage | docs/07 §11 target |
-|---|---:|---:|
-| colabapi | 79.6% | 80% |
-| runtime | 83.9% | 80% |
-| state | 76.0% | 80% |
-| sshx | 74.0% | 80% |
-| auth | 83.0% | 80% |
+| Package | Coverage | docs/07 §11 target | Gated? |
+|---|---:|---:|---|
+| colabapi | 82.75% | 80% | yes |
+| runtime | 84.55% | 80% | yes |
+| state | 77.50% | 80% | yes |
+| sshx | 74.17% | 80% | yes |
+| auth | 82.93% | 80% | yes |
+| platform | 31.6% | 80% | no (ungated) |
+| app | 47.2% | 80% | no (ungated) |
 
-CI floors the gate at 70% via `vars.COVERAGE_MIN` until the three under-target
-packages are raised. A 100% gate for the error-mapping table is still TODO
-(the profile cannot isolate that table).
+Total coverage is **75.8%**. The gate checks only the five packages named in
+`docs/07 §11` (80% target); `platform` and `app` are currently ungated. CI
+floors the gate at 70% via `vars.COVERAGE_MIN` until the under-target gated
+packages (`state`, `sshx`) are raised to 80%. A 100% gate for the error-mapping
+table is still TODO (the profile cannot isolate that table).
 
 ## 4. Release pipeline and updater identity
 
@@ -205,11 +211,15 @@ URL; on Termux use `termux-open-url`; elsewhere `xdg-open` / macOS `open` /
 Windows `rundll32 url.dll,FileProtocolHandler`. Headless environments must
 fall back to printing the URL with a clean stdout when piped.
 
-**Current:** `internal/cli/utility_extra.go` implements only the three
-non-WSL/non-Termux launchers. On headless WSL/Termux `openURL` returns false and
-the caller prints the URL — a **degraded path, not a crash**. The Go-side fix
-(`platform.IsWSL`, `termux-open-url`, injectable `exec` seam, table tests) is
-owned by another agent; do not duplicate it here. Track it as an open L6 gap.
+**Current:** the gap is **CLOSED** (2026-11-26). `browserLaunchCommand` in
+`internal/cli/utility.go:271-287` selects all five launchers: `rundll32
+url.dll,FileProtocolHandler` on Windows, `termux-open-url` when present, `open`
+on macOS, `wslview` on WSL, and `xdg-open` elsewhere. WSL is detected by a
+read-only `/proc/version` probe (`detectWSL`), and launcher choice is covered by
+`TestBrowserLaunchCommandSelection` in `internal/cli/utility_test.go`. On a
+headless host with no launcher available, `launchSystemBrowser` returns false
+and the caller prints the URL — a **degraded path, not a crash**. Real
+WSL/Termux device execution remains an open L6 human-only proof (§6 item 7).
 
 ## 6. Human-only / external steps blocking "done"
 
@@ -226,13 +236,30 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
    against the real release and confirmed the installed file executes as
    `golab 0.1.9`. A future release must rerun this check; it remains
    non-waivable.
-6. Wire goleak `TestMain` + dependency (another agent), then drop `ADVISORY=1`
-   from `ci.yml` and raise `COVERAGE_MIN` to 80.
+6. Wire goleak `TestMain` + dependency, then drop `ADVISORY=1` from `ci.yml`
+   and raise `COVERAGE_MIN` to 80.
 7. Termux device matrix, Windows console/ACL/`.old` cleanup, macOS keychain
    argv/timing, QEMU/Termux job enablement.
 
 ## Change log
 
+- 2026-11-26 — Ledger reconciled against `main` and fresh measurements: test
+  counts (§1), coverage numbers (§3) and the URL-launcher gap (§5) are updated.
+  The `docs/gap-report.md` P0–P3 work recorded in `CHANGELOG.md` `[Unreleased]`
+  is on `main`: spend safety (compensating `Unassign`, honest `stop --all`,
+  pre-allocation script read, fail-closed budget guard, `max-balance` direction,
+  named profiles), trust anchors (pinned token endpoint/client ID, `refs/tags/v`
+  release SAN), resume/protocol integrity (bounded journal and worker, single
+  interrupt, create reconciliation, stable `requestId`, hardware reattach
+  check), silent-false-success and response-integrity fixes, and
+  file/release-chain and SSH/platform hardening. All are covered test-first
+  with fakes; **no live proof is claimed for any fake-tested item**. The
+  still-open human-only proofs in §6 are: live billable re-verification of the
+  fixed cases, OAuth consent / Drive approval / interactive TTY, chunked
+  >75 MiB upload, goleak `TestMain` wiring, and the WSL/Termux/device and
+  wire-capture matrices. The tagged-release install acceptance is recorded as
+  closed for v0.1.9 (§4) and v0.2.0 (`CHANGELOG.md` `[Unreleased]` Verification);
+  it must be rerun for each future tag.
 - 2026-11-25 — Post-v0.2.0 audit and live e2e: code review, security audit and
   billable CPU probes found six client defects in the batch 2 features (JSON
   `SystemExit(0)` record, plaintext `--env-file` history leak for ordinary key
@@ -319,8 +346,7 @@ owned by another agent; do not duplicate it here. Track it as an open L6 gap.
   `predicateType = https://cyclonedx.org/schema/bom-1.5`. Fix: guard accepts
   root or nested layout; the assertion is unchanged (§4). No green v0.1.8
   release or working self-update is claimed — a separate install-path defect
-  is being fixed by another agent; a new tag and human install proof are still
-  required.
+  was fixed and is now proved by v0.1.9 (§4); a new tag was required.
 - 2026-11-24 — v0.1.8 prepared: CLI version bumped to match the changelog
   (guarded by `TestNumberMatchesLatestChangelogRelease`) alongside the exact
   CycloneDX predicate URI fix. A signed tag and a real `colab update --install`
