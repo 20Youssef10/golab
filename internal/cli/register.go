@@ -25,4 +25,5 @@ func registerCommands(root *cobra.Command) {
 	RegisterSyncCommands(root)
 	RegisterEnvCommands(root) // TIER4: env freeze
 	registerAttachCommand(root)
+	RegisterTier3Commands(root) // tier3: detached runs, jobs/logs, wait, sync --watch
 }
