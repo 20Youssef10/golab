@@ -10,6 +10,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -258,7 +259,13 @@ func TestResolveKeyWarnsOnLoosePrivateKeyPerms(t *testing.T) {
 	if len(km.Signers) == 0 {
 		t.Fatal("loose-perm key must still be used for signing")
 	}
-	if !strings.Contains(warn.String(), "chmod 600") || !strings.Contains(warn.String(), loose) {
+	// Windows reports 0666 for regular files regardless of chmod; ACLs, not
+	// mode bits, govern access there, so no warning is expected on any mode.
+	if runtime.GOOS == "windows" {
+		if warn.Len() != 0 {
+			t.Fatalf("Windows must not warn on mode bits: %q", warn.String())
+		}
+	} else if !strings.Contains(warn.String(), "chmod 600") || !strings.Contains(warn.String(), loose) {
 		t.Fatalf("want actionable permission warning naming %q, got %q", loose, warn.String())
 	}
 
@@ -271,7 +278,20 @@ func TestResolveKeyWarnsOnLoosePrivateKeyPerms(t *testing.T) {
 		t.Fatalf("ResolveKeyWithWriter(strict): %v", err)
 	}
 	if warn.Len() != 0 {
-		t.Fatalf("0600 key must not warn, got %q", warn.String())
+		t.Fatalf("0600 key must not warn on Unix, and any mode must not warn on Windows: %q", warn.String())
+	}
+}
+
+// Windows reports mode 0666 for regular files even after chmod 0600, so mode
+// bits are not a usable permission signal there (ACLs govern access instead).
+func TestLoosePermWarningOSGate(t *testing.T) {
+	if loosePermWarningsEnabled("windows") {
+		t.Error("Windows must not warn on mode bits")
+	}
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		if !loosePermWarningsEnabled(goos) {
+			t.Errorf("%s must keep the loose-permission warning", goos)
+		}
 	}
 }
 
@@ -302,7 +322,11 @@ func TestResolveKeyDefaultScanWarnsOnLoosePrivateKeyPerms(t *testing.T) {
 	if km.Source != "id_ed25519" {
 		t.Fatalf("source = %q; want id_ed25519", km.Source)
 	}
-	if !strings.Contains(warn.String(), "chmod 600") {
+	if runtime.GOOS == "windows" {
+		if warn.Len() != 0 {
+			t.Fatalf("Windows must not warn on mode bits: %q", warn.String())
+		}
+	} else if !strings.Contains(warn.String(), "chmod 600") {
 		t.Fatalf("want permission warning for default-scanned key, got %q", warn.String())
 	}
 }

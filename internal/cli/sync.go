@@ -356,11 +356,16 @@ func (e *syncPathEscape) Error() string {
 
 // syncLocalTarget resolves a slash-separated action path against localRoot and
 // asserts the result stays inside it. Checking the Rel result catches both a
-// '..' escape and an absolute target; an absolute input is rejected up front
-// because filepath.Join would otherwise nest it under the root silently.
+// '..' escape and an absolute target. Absolute inputs are rejected up front:
+// IsAbs handles native forms ("/x" on Unix, "C:\x" and "\\host\share\x" on
+// Windows); VolumeName also rejects drive-relative ("C:x") and UNC volumes;
+// the separator prefix catches rooted-but-volumeless paths ("\x" on Windows,
+// produced by a POSIX "/x" action) that filepath.Join would otherwise nest
+// under the root silently.
 func syncLocalTarget(localRoot, slashPath string) (string, error) {
 	relPath := filepath.FromSlash(slashPath)
-	if filepath.IsAbs(relPath) {
+	if filepath.IsAbs(relPath) || filepath.VolumeName(relPath) != "" ||
+		strings.HasPrefix(relPath, string(filepath.Separator)) || strings.HasPrefix(slashPath, "/") {
 		return "", &syncPathEscape{root: localRoot, path: slashPath}
 	}
 	target := filepath.Join(localRoot, relPath)

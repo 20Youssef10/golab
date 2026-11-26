@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -182,10 +183,25 @@ func TestSyncApplyRejectsPathEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Absolute action paths are platform-specific: a POSIX "/x" becomes a
+	// volumeless rooted "\x" on Windows, so test the native form as well as
+	// the POSIX one (and a UNC volume on Windows).
+	posixAbs := "/abs-escape.txt"
+	nativeAbs := posixAbs
+	if runtime.GOOS == "windows" {
+		nativeAbs = `C:\abs-escape.txt`
+	}
+
 	// The remote side serves every payload so the pre-fix download/upload
 	// branches actually reach the local filesystem instead of failing early.
 	fc.addFile(path.Join("remote", "../outside-write.txt"), "pwned\n")
-	fc.addFile(path.Join("remote", "/abs-escape.txt"), "pwned\n")
+	for _, abs := range []string{posixAbs, nativeAbs} {
+		fc.addFile(path.Join("remote", abs), "pwned\n")
+	}
+	uncAbs := `\\host\share\abs-escape.txt`
+	if runtime.GOOS == "windows" {
+		fc.addFile(path.Join("remote", uncAbs), "pwned\n")
+	}
 
 	outsideWrite := filepath.Join(parent, "outside-write.txt")
 	outsideRead := filepath.Join(parent, "outside-read.txt")
@@ -196,16 +212,20 @@ func TestSyncApplyRejectsPathEscape(t *testing.T) {
 	if err := os.WriteFile(outsideDelete, []byte("keep\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	absTarget := filepath.Join(root, filepath.FromSlash("/abs-escape.txt"))
 
-	cases := []struct {
+	type escapeCase struct {
 		name   string
 		action syncAction
-	}{
+	}
+	cases := []escapeCase{
 		{"download-traversal", syncAction{Kind: "download", Path: "../outside-write.txt"}},
 		{"delete-traversal", syncAction{Kind: "delete-local", Path: "../outside-delete.txt"}},
 		{"upload-traversal", syncAction{Kind: "upload", Path: "../outside-read.txt"}},
-		{"download-absolute", syncAction{Kind: "download", Path: "/abs-escape.txt"}},
+		{"download-absolute", syncAction{Kind: "download", Path: nativeAbs}},
+		{"download-posix-absolute", syncAction{Kind: "download", Path: posixAbs}},
+	}
+	if runtime.GOOS == "windows" {
+		cases = append(cases, escapeCase{"download-unc-absolute", syncAction{Kind: "download", Path: uncAbs}})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -223,8 +243,13 @@ func TestSyncApplyRejectsPathEscape(t *testing.T) {
 	if b, err := os.ReadFile(outsideDelete); err != nil || string(b) != "keep\n" {
 		t.Errorf("delete-local mutated a file outside localRoot: %q, %v", b, err)
 	}
-	if _, err := os.Stat(absTarget); !os.IsNotExist(err) {
-		t.Errorf("absolute action path created %s (stat err %v)", absTarget, err)
+	if runtime.GOOS != "windows" {
+		// On Windows filepath.Join nests a drive/UNC path under the root, so
+		// the typed rejection above is the portable assertion there.
+		absTarget := filepath.Join(root, filepath.FromSlash(posixAbs))
+		if _, err := os.Stat(absTarget); !os.IsNotExist(err) {
+			t.Errorf("absolute action path created %s (stat err %v)", absTarget, err)
+		}
 	}
 	if len(fc.puts) != 0 {
 		t.Errorf("upload-traversal read outside localRoot and wrote %d remote files", len(fc.puts))

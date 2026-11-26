@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -173,11 +174,19 @@ func resolveIdentity(identity string, warn io.Writer) (KeyMaterial, error) {
 	return KeyMaterial{}, &KeyError{Path: identity, Reason: "no public key could be derived."}
 }
 
+// loosePermWarningsEnabled reports whether mode bits are a meaningful access
+// signal on this OS. Windows reports 0666 for regular files regardless of
+// chmod and governs access through ACLs, so warning there is a false positive
+// that only floods the log.
+func loosePermWarningsEnabled(goos string) bool {
+	return goos != "windows"
+}
+
 // warnLooseKeyPerms warns without refusing the key: group/other-accessible
 // private keys are an information-disclosure risk, but refusing them would
 // break legitimate shared-home setups.
 func warnLooseKeyPerms(w io.Writer, path string, mode os.FileMode) {
-	if mode.Perm()&0o077 == 0 {
+	if !loosePermWarningsEnabled(runtime.GOOS) || mode.Perm()&0o077 == 0 {
 		return
 	}
 	fmt.Fprintf(w, "[colab] warning: private key %s has mode %04o (group/other can access it); "+

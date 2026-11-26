@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -167,7 +168,15 @@ func TestFileHostKeyStoreIsAdditiveAndPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS == "windows" {
+		// Unix mode bits are not meaningful on Windows: Go reports 0666 for a
+		// regular file there regardless of chmod, and platform.MakePrivate is
+		// a no-op because %APPDATA% is already user-ACL restricted. Assert
+		// only that the store exists as a regular file on this platform.
+		if !fi.Mode().IsRegular() {
+			t.Fatalf("store is not a regular file: %v", fi.Mode())
+		}
+	} else if fi.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("store is not owner-only: %v", fi.Mode().Perm())
 	}
 	// Overwriting an existing pin with a different value must not silently
