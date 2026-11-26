@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -60,6 +61,18 @@ func pyPayload(v any) string {
 	return "_PAYLOAD = json.loads(" + pyStringLiteral(string(raw)) + ")\n"
 }
 
+// vmAbsPath makes a user-supplied VM path absolute from the VM root. Kernel
+// snippets execute with cwd /content, but upload/cat/ls resolve relative paths
+// against /, so a relative path must be prefixed with "/" before it reaches a
+// snippet or the two planes disagree about which file it names. Absolute
+// paths pass through unchanged.
+func vmAbsPath(p string) string {
+	if p == "" || path.IsAbs(p) {
+		return p
+	}
+	return "/" + p
+}
+
 // GrepSpec is the plain-value input to BuildGrepCode.
 type GrepSpec struct {
 	Pattern    string
@@ -108,7 +121,7 @@ _emit({"processes": _procs(), "gpu": _gpu(), "memory": _mem(), "disk": _disk()})
 // early lines) or re-read unrelated bytes. Detecting rotation robustly needs
 // inode tracking, which the single cheap execution per interval cannot provide.
 func BuildTailCode(path string, n int, offset int64, initial bool) string {
-	payload := map[string]any{"path": path, "n": n, "offset": offset, "initial": initial}
+	payload := map[string]any{"path": vmAbsPath(path), "n": n, "offset": offset, "initial": initial}
 	return pyPrelude + pyPayload(payload) + `
 p = _PAYLOAD
 path = p["path"]; n = int(p["n"]); offset = int(p["offset"]); initial = bool(p["initial"])
@@ -133,7 +146,7 @@ _emit({"offset": _size(), "chunk": chunk, "exists": _size() >= 0, "error": err.s
 // number of returned lines.
 func BuildGrepCode(spec GrepSpec) string {
 	payload := map[string]any{
-		"pattern": spec.Pattern, "path": spec.Path, "glob": spec.Glob,
+		"pattern": spec.Pattern, "path": vmAbsPath(spec.Path), "glob": spec.Glob,
 		"ignore_case": spec.IgnoreCase, "max_matches": spec.MaxMatches,
 	}
 	return pyPrelude + pyPayload(payload) + `
@@ -156,7 +169,7 @@ _emit({"matches": out[:1048576]})
 
 // BuildDuCode runs `du -sh` per entry under path and bounds the entry count.
 func BuildDuCode(path string, maxEntries int) string {
-	payload := map[string]any{"path": path, "max_entries": maxEntries}
+	payload := map[string]any{"path": vmAbsPath(path), "max_entries": maxEntries}
 	return pyPrelude + pyPayload(payload) + `
 p = _PAYLOAD
 path = p["path"]; mx = int(p["max_entries"])
@@ -194,7 +207,7 @@ _emit({"lines": out[:1048576]})
 // data; argv is used (no shell) so nothing is interpolated unquoted.
 func BuildFetchCode(rawURL, dest, sha256 string, timeoutSeconds int) string {
 	payload := map[string]any{
-		"url": rawURL, "dest": dest, "sha256": sha256, "timeout": timeoutSeconds,
+		"url": rawURL, "dest": vmAbsPath(dest), "sha256": sha256, "timeout": timeoutSeconds,
 	}
 	return pyPrelude + "import hashlib\n" + pyPayload(payload) + `
 p = _PAYLOAD
@@ -278,8 +291,36 @@ type TailResult struct {
 	Error  string `json:"error"`
 }
 
+// LinesResult is the output of the listing snippets (du, find). Older fixtures
+// carry "lines" as one newline-joined string, while the live du snippet emits
+// a Python list. Accept both shapes and normalize to a single string so callers
+// keep one representation and existing string fixtures stay valid.
 type LinesResult struct {
 	Lines string `json:"lines"`
+}
+
+func (l *LinesResult) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Lines json.RawMessage `json:"lines"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if len(wire.Lines) == 0 || string(wire.Lines) == "null" {
+		l.Lines = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(wire.Lines, &s); err == nil {
+		l.Lines = s
+		return nil
+	}
+	var parts []string
+	if err := json.Unmarshal(wire.Lines, &parts); err != nil {
+		return fmt.Errorf("vmstat: lines must be a string or array of strings: %w", err)
+	}
+	l.Lines = strings.Join(parts, "\n")
+	return nil
 }
 
 type TextResult struct {

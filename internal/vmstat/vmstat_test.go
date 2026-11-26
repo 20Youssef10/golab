@@ -2,6 +2,7 @@ package vmstat
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -186,5 +187,95 @@ func TestParseTailAndFetch(t *testing.T) {
 	matches, err := ParseMatches(envelope(TextResult{Matches: "/content/a.py:1:hit\n"}))
 	if err != nil || matches.Matches == "" {
 		t.Fatalf("parse matches: %+v %v", matches, err)
+	}
+}
+
+// codePayload decodes the JSON data literal that pyPayload embeds in a
+// snippet, so tests assert on the values actually sent to the kernel rather
+// than on coincidental substrings of generated source.
+func codePayload(t *testing.T, code string) map[string]any {
+	t.Helper()
+	const prefix = "_PAYLOAD = json.loads("
+	i := strings.Index(code, prefix)
+	if i < 0 {
+		t.Fatalf("snippet has no JSON payload:\n%s", code)
+	}
+	rest := code[i+len(prefix):]
+	j := strings.Index(rest, ")\n")
+	if j < 0 {
+		t.Fatalf("snippet has no payload terminator:\n%s", code)
+	}
+	lit := rest[:j]
+	raw, err := strconv.Unquote(lit)
+	if err != nil {
+		t.Fatalf("payload literal %q is not a Go string: %v", lit, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("payload %q is not JSON: %v", raw, err)
+	}
+	return m
+}
+
+// Ports the live Tier-2 finding: `du` emits a Python list of lines, so
+// LinesResult must accept the array shape as well as the older string shape.
+func TestParseLinesAcceptsArrayAndStringShapes(t *testing.T) {
+	arr := envelope(map[string][]string{"lines": {"4.0K\t/content/a", "8.0K\t/content/b"}})
+	got, err := ParseLines(arr)
+	if err != nil {
+		t.Fatalf("array-shaped lines rejected: %v (%s)", err, arr)
+	}
+	if want := "4.0K\t/content/a\n8.0K\t/content/b"; got.Lines != want {
+		t.Fatalf("array lines = %q, want %q", got.Lines, want)
+	}
+	str := envelope(map[string]string{"lines": "4.0K\t/content/a\n"})
+	got, err = ParseLines(str)
+	if err != nil || got.Lines != "4.0K\t/content/a\n" {
+		t.Fatalf("string-shaped lines regressed: %+v %v", got, err)
+	}
+	// A wrong shape (object) must still fail rather than silently decode.
+	if _, err := ParseLines(envelope(map[string]any{"lines": map[string]string{"a": "b"}})); err == nil {
+		t.Fatal("object-shaped lines accepted")
+	}
+}
+
+// Live e2e: upload/cat address files from the VM root (`/sample.txt`) while
+// kernel snippets run with cwd `/content`. A relative user path must therefore
+// be sent as VM-root-absolute; already-absolute paths are untouched.
+func TestBuildInspectionPathsNormalizeRelativeToVMRoot(t *testing.T) {
+	builders := []struct {
+		name  string
+		key   string
+		build func(string) string
+	}{
+		{"tail", "path", func(p string) string { return BuildTailCode(p, 2, 0, true) }},
+		{"grep", "path", func(p string) string { return BuildGrepCode(GrepSpec{Pattern: "x", Path: p}) }},
+		{"du", "path", func(p string) string { return BuildDuCode(p, 25) }},
+	}
+	for _, b := range builders {
+		t.Run(b.name+"/relative", func(t *testing.T) {
+			if got := codePayload(t, b.build("sample.txt"))[b.key]; got != "/sample.txt" {
+				t.Fatalf("%s payload %s = %v, want /sample.txt", b.name, b.key, got)
+			}
+		})
+		t.Run(b.name+"/absolute", func(t *testing.T) {
+			if got := codePayload(t, b.build("/x/y"))[b.key]; got != "/x/y" {
+				t.Fatalf("%s payload %s = %v, want /x/y", b.name, b.key, got)
+			}
+		})
+	}
+}
+
+// Follow-up live finding: fetch DEST is a user path too. A relative dest must
+// land at /fetched.html so `cat -s S fetched.html` finds it; absolute dests
+// stay untouched.
+func TestBuildFetchCodeNormalizesRelativeDestToVMRoot(t *testing.T) {
+	rel := codePayload(t, BuildFetchCode("https://example.com/x", "fetched.html", "", 60))
+	if got := rel["dest"]; got != "/fetched.html" {
+		t.Fatalf("relative fetch dest = %v, want /fetched.html", got)
+	}
+	abs := codePayload(t, BuildFetchCode("https://example.com/x", "/x/y", "", 60))
+	if got := abs["dest"]; got != "/x/y" {
+		t.Fatalf("absolute fetch dest = %v, want /x/y", got)
 	}
 }

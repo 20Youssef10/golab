@@ -326,3 +326,59 @@ func TestFetchReportsSHAMismatch(t *testing.T) {
 		t.Fatalf("expected failure for sha mismatch; stdout=%q stderr=%q", h.stdout.String(), h.stderr.String())
 	}
 }
+
+// Ports the live Tier-2 finding end to end: relative paths in tail/grep/du
+// must reach the kernel as /sample.txt (the path upload/cat use), and du's
+// array-shaped result must decode instead of exiting 1.
+func TestRelativeVMPathsAndDuArrayDecode(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		obj     any
+		path    string
+		wantOut string
+	}{
+		{"tail", []string{"tail", "-s", "s1", "sample.txt", "-n", "2"},
+			vmstat.TailResult{Chunk: "line\n", Exists: true}, "/sample.txt", "line"},
+		{"grep", []string{"grep", "-s", "s1", "PATTERN", "sample.txt"},
+			vmstat.TextResult{Matches: "sample.txt:1:PATTERN\n"}, "/sample.txt", "PATTERN"},
+		{"du", []string{"du", "-s", "s1", "sample.txt"},
+			map[string][]string{"lines": {"4.0K\t/sample.txt"}}, "/sample.txt", "4.0K"},
+		{"du-absolute", []string{"du", "-s", "s1", "/x/y"},
+			map[string][]string{"lines": {"4.0K\t/x/y"}}, "/x/y", "4.0K"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.putSession(t, "s1")
+			h.kernel.Script(statusIdle(), replyOK())
+			h.kernel.Script(vmEnvelopeStream(tc.obj), statusIdle(), replyOK())
+			if code := h.run(t, "", tc.args...); code != 0 {
+				t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+			}
+			snippet := h.kernel.Executions()[1].Code
+			if want := `\"path\":\"` + tc.path + `\"`; !strings.Contains(snippet, want) {
+				t.Fatalf("snippet path is not %s: %s", tc.path, snippet)
+			}
+			if !strings.Contains(h.stdout.String(), tc.wantOut) {
+				t.Fatalf("stdout missing %q: %q", tc.wantOut, h.stdout.String())
+			}
+		})
+	}
+}
+
+// Follow-up live finding: `fetch URL fetched.html` used to write
+// /content/fetched.html while `cat fetched.html` reads /fetched.html. Assert
+// the kernel payload carries the normalized destination.
+func TestFetchRelativeDestIsVMRootAbsolute(t *testing.T) {
+	h := newHarness(t)
+	h.putSession(t, "s1")
+	h.kernel.Script(statusIdle(), replyOK())
+	h.kernel.Script(vmEnvelopeStream(vmstat.FetchResult{OK: true, Dest: "/fetched.html"}), statusIdle(), replyOK())
+	if code := h.run(t, "", "fetch", "-s", "s1", "https://example.com/x", "fetched.html"); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
+	}
+	snippet := h.kernel.Executions()[1].Code
+	if !strings.Contains(snippet, `\"dest\":\"/fetched.html\"`) {
+		t.Fatalf("fetch did not normalize relative dest: %s", snippet)
+	}
+}
