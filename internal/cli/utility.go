@@ -62,6 +62,7 @@ func urlCommand() *cobra.Command {
 func logCommand() *cobra.Command {
 	var name, eventType, output string
 	var lines int
+	var follow bool
 	cmd := &cobra.Command{
 		Use:   "log",
 		Short: "Manage and view session history logs",
@@ -70,6 +71,11 @@ func logCommand() *cobra.Command {
 			d := depsOf(cmd)
 			if err := validateSessionName(name); err != nil {
 				return err
+			}
+			// [tier5] -f prints new events only; exporting a live stream is
+			// meaningless, so refuse the contradictory combination.
+			if follow && output != "" {
+				return usagef("[colab] log: -f cannot be combined with --output.")
 			}
 			if name == "" {
 				names, err := history.ListSessions(d.HistoryDir)
@@ -90,32 +96,37 @@ func logCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			events, err := l.Read()
+			filter := func(events []history.Event) []history.Event {
+				out := events
+				if eventType != "" {
+					filtered := make([]history.Event, 0, len(out))
+					for _, e := range out {
+						if e.EventType == eventType {
+							filtered = append(filtered, e)
+						}
+					}
+					out = filtered
+				}
+				if lines > 0 && len(out) > lines {
+					out = out[len(out)-lines:]
+				}
+				return out
+			}
+			events, err := l.ReadContext(cmd.Context())
 			if err != nil {
 				return err
 			}
-			if len(events) == 0 {
+			if len(events) == 0 && !follow {
 				fmt.Fprintf(d.Stderr, "[colab] No history found for session '%s'.\n", name)
 				return nil
 			}
-			if eventType != "" {
-				filtered := events[:0]
-				for _, e := range events {
-					if e.EventType == eventType {
-						filtered = append(filtered, e)
-					}
-				}
-				events = filtered
-			}
-			if lines > 0 && len(events) > lines {
-				events = events[len(events)-lines:]
-			}
+			shown := filter(events)
 			if output != "" {
 				format := strings.TrimPrefix(strings.ToLower(filepath.Ext(output)), ".")
 				if format == "" {
 					format = "txt"
 				}
-				data, err := history.ExportWithSession(events, format, name)
+				data, err := history.ExportWithSession(shown, format, name)
 				if err != nil {
 					return exitf(1, "[colab] %s", err)
 				}
@@ -137,16 +148,39 @@ func logCommand() *cobra.Command {
 				}
 				return nil
 			}
-			for _, e := range events {
+			for _, e := range shown {
 				printHistoryEvent(d, e)
 			}
-			return nil
+			if !follow {
+				return nil
+			}
+			seen := len(events)
+			tick := func(ctx context.Context) error {
+				all, err := l.ReadContext(ctx)
+				if err != nil {
+					return err
+				}
+				if len(all) <= seen {
+					return nil
+				}
+				fresh := all[seen:]
+				seen = len(all)
+				for _, e := range fresh {
+					if eventType != "" && e.EventType != eventType {
+						continue
+					}
+					printHistoryEvent(d, e)
+				}
+				return nil
+			}
+			return watchLoopFn(cmd.Context(), defaultFollowInterval, 0, tick)
 		},
 	}
 	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
 	cmd.Flags().IntVarP(&lines, "lines", "n", 0, "Number of recent events to show")
 	cmd.Flags().StringVarP(&eventType, "type", "t", "", "Filter by event type")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "Export to FILE (.ipynb, .md, .txt, .jsonl)")
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Print new events until interrupted") // [tier5]
 	return cmd
 }
 

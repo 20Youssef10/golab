@@ -87,6 +87,9 @@ type Settings struct {
 	UsePublicAPI       bool       `json:"use_public_api,omitempty"`
 	PublicAPISupported *bool      `json:"public_api_supported,omitempty"`
 	TunnelAPISupported *bool      `json:"tunnel_api_supported,omitempty"`
+	// DefaultSession is the session selected by `golab use NAME` [tier5].
+	// Empty means fall back to GOLAB_SESSION and then the unique-session rule.
+	DefaultSession string `json:"default_session,omitempty"`
 }
 
 // DefaultSettings returns the Python CLI's defaults.
@@ -254,6 +257,9 @@ func (s *SettingsStore) locked(ctx context.Context, fn func() error) error {
 	defer func() { _ = lock.Unlock() }()
 	return fn()
 }
+
+// Path returns the underlying settings.json path [tier5].
+func (s *SettingsStore) Path() string { return s.path }
 
 // Load returns settings, or defaults when the file does not exist.
 func (s *SettingsStore) Load() (Settings, error) {

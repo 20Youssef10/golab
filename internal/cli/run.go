@@ -17,8 +17,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/20Youssef10/golab/internal/agentout" // [tier5] run --json
 	"github.com/20Youssef10/golab/internal/app"
 	"github.com/20Youssef10/golab/internal/envlock" // TIER4: --lockfile probe type
+	"github.com/20Youssef10/golab/internal/logx"    // [tier5] --secret redemption
 	"github.com/20Youssef10/golab/internal/nb"
 	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/state"
@@ -65,6 +67,13 @@ func stripShebang(body string) string {
 // a runtime — silently returning an empty payload would run nothing on a
 // billable VM and exit 0.
 func buildScriptPayload(script string, args []string, env []envVar) (string, error) {
+	return buildScriptPayloadWithSecrets(script, args, env, nil)
+}
+
+// buildScriptPayloadWithSecrets is the parity engine shared by plain --env
+// and the Tier-5 --secret/--env-file injectors. Values are always emitted as
+// pyRepr literals; the existing shebang/argv contract is unchanged. [tier5]
+func buildScriptPayloadWithSecrets(script string, args []string, env []envVar, secrets []injectedSecret) (string, error) {
 	body, err := os.ReadFile(script)
 	if err != nil {
 		return "", err
@@ -81,7 +90,11 @@ func buildScriptPayload(script string, args []string, env []envVar) (string, err
 	fmt.Fprintf(&b, "sys.argv = [%s]\n", strings.Join(literals, ", "))
 	b.WriteString("__name__ = '__main__'\n")
 	b.WriteString("warnings.filterwarnings('ignore', message=\"To exit: use\")\n")
-	b.WriteString(envPrelude(env))
+	if len(secrets) == 0 {
+		b.WriteString(envPrelude(env)) // byte-exact legacy path
+	} else {
+		b.WriteString(injectedPrelude(env, secrets))
+	}
 	b.WriteString(stripShebang(string(body)))
 	return b.String(), nil
 }
@@ -226,6 +239,10 @@ func runCommand() *cobra.Command {
 	// Tier 1 item 4: in-run compute-unit ceiling (advisory unless --enforce).
 	var maxCU float64
 	var runEnforce bool
+	// [tier5] parity with exec.
+	var secretNames, envFiles []string
+	var outputImage string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a Python script on a fresh Colab VM, then release it",
@@ -273,6 +290,36 @@ func runCommand() *cobra.Command {
 					return usagef("[colab] Invalid lockfile: %s", err.Error())
 				}
 			}
+			// [tier5] Resolve --secret/--env-file BEFORE any allocation: a bad
+			// key, mode or missing file must exit 2 with zero billable work.
+			var cliSecrets []injectedSecret
+			var sensitive []logx.Secret
+			for _, secretName := range secretNames {
+				value, err := resolveSecretValue(cmd.Context(), secretName)
+				if err != nil {
+					return err
+				}
+				cliSecrets = append(cliSecrets, injectedSecret{name: secretName, value: value})
+				sensitive = append(sensitive, value)
+			}
+			for _, envFile := range envFiles {
+				vars, secrets, err := parseEnvFile(envFile)
+				if err != nil {
+					return err
+				}
+				envVars = append(envVars, vars...)
+				for _, s := range secrets {
+					sensitive = append(sensitive, s.value)
+				}
+			}
+			red := newExecRedactor(sensitive...)
+			// Redact every error surface, including errors set by the teardown
+			// defer registered below (defers run LIFO, so this wrapper is last).
+			defer func() {
+				if runErr != nil {
+					runErr = redactedExecError(runErr, red)
+				}
+			}()
 			if err := validateSessionName(name); err != nil {
 				return err
 			}
@@ -334,7 +381,7 @@ func runCommand() *cobra.Command {
 				// payload on a billable VM. The Stat checks above only narrow
 				// the TOCTOU/permission/special-file window.
 				var err error
-				payload, err = buildScriptPayload(script, forwarded, envVars)
+				payload, err = buildScriptPayloadWithSecrets(script, forwarded, envVars, cliSecrets)
 				if err != nil {
 					return usagef("[colab] Could not read script '%s': %v", script, err)
 				}
@@ -374,6 +421,21 @@ func runCommand() *cobra.Command {
 				}
 				return pruneLost(d, name, err)
 			}
+			// [tier5] run --json uses the same per-cell record writer as exec.
+			// /content setup cells are not recorded, only user cells.
+			var cells *agentout.CellWriter
+			if jsonOutput {
+				format := "ndjson"
+				if agentout.IsWrapped(d.Stdout) {
+					format = "json"
+				}
+				cells, err = agentout.NewCellWriter(d.Stdout, format)
+				if err != nil {
+					return mapAgentOutError(err)
+				}
+				defer func() { _ = cells.Close() }()
+			}
+			outputHook := execOutputHook(d, outputImage)
 			exitCode := 0
 			reason := "run_completed"
 			defer func() {
@@ -422,9 +484,9 @@ func runCommand() *cobra.Command {
 
 			if isNB {
 				// One kernel for every cell: state set by an earlier cell is
-				// visible to later cells. --env is re-applied per cell because
-				// each Execute is an independent kernel request.
-				prelude := envPrelude(envVars)
+				// visible to later cells. --env/--secret/--env-file are
+				// re-applied per cell (each Execute is independent). [tier5]
+				prelude := injectedPrelude(envVars, cliSecrets)
 			cells:
 				for i, block := range blocks {
 					code := prelude + string(block.code)
@@ -445,10 +507,10 @@ func runCommand() *cobra.Command {
 					res, err := executeTracked(ctx, d, &s, kernel, code, runtime.ExecOptions{
 						IdleTimeout: timeoutOption(timeout),
 						OnOutput: func(o runtime.Output) {
-							if o.OutputType == "error" && o.EName == "SystemExit" {
-								return // never print a SystemExit traceback
+							if jsonOutput {
+								return // records are built from the returned outputs
 							}
-							if e := renderOne(d, o, ""); e != nil && renderErr == nil {
+							if e := outputHook(red.Output(o)); e != nil && renderErr == nil {
 								renderErr = e
 							}
 						},
@@ -462,8 +524,20 @@ func runCommand() *cobra.Command {
 						reason = "run_failed"
 						return renderErr
 					default:
-						notebookCellResult(&notebook.Cells[block.cellIdx], res.Outputs, res.ExecutionCount)
-						logExecution(d, name, code, res.Outputs, map[string]any{
+						if jsonOutput {
+							rec, buildErr := buildCellRecord(res.Outputs, i, cellID, outputImage, red, d.Stderr)
+							if buildErr != nil {
+								reason = "run_failed"
+								return buildErr
+							}
+							if e := cells.Emit(rec); e != nil {
+								reason = "run_failed"
+								return e
+							}
+						}
+						safeOutputs := red.Outputs(res.Outputs)
+						notebookCellResult(&notebook.Cells[block.cellIdx], safeOutputs, res.ExecutionCount)
+						logExecution(d, name, red.Redact(code), safeOutputs, map[string]any{
 							"via": "run", "cell_index": i, "cell_id": block.id,
 						})
 						if c := exitCodeFromOutputs(res.Outputs); c != 0 {
@@ -482,10 +556,10 @@ func runCommand() *cobra.Command {
 				res, err := executeTracked(ctx, d, &s, kernel, payload, runtime.ExecOptions{
 					IdleTimeout: timeoutOption(timeout),
 					OnOutput: func(o runtime.Output) {
-						if o.OutputType == "error" && o.EName == "SystemExit" {
-							return // never print a SystemExit traceback
+						if jsonOutput {
+							return // records are built from the returned outputs
 						}
-						if e := renderOne(d, o, ""); e != nil && renderErr == nil {
+						if e := outputHook(red.Output(o)); e != nil && renderErr == nil {
 							renderErr = e
 						}
 					},
@@ -499,11 +573,22 @@ func runCommand() *cobra.Command {
 					reason = "run_failed"
 					return renderErr
 				default:
+					if jsonOutput {
+						rec, buildErr := buildCellRecord(res.Outputs, 0, nil, outputImage, red, d.Stderr)
+						if buildErr != nil {
+							reason = "run_failed"
+							return buildErr
+						}
+						if e := cells.Emit(rec); e != nil {
+							reason = "run_failed"
+							return e
+						}
+					}
 					exitCode = exitCodeFromOutputs(res.Outputs)
 					if exitCode != 0 {
 						reason = "run_failed"
 					}
-					logExecution(d, name, payload, res.Outputs, map[string]any{"via": "run"})
+					logExecution(d, name, red.Redact(payload), red.Outputs(res.Outputs), map[string]any{"via": "run"})
 				}
 			}
 			// TIER4: record provenance only after a successful execution;
@@ -548,6 +633,11 @@ func runCommand() *cobra.Command {
 	// Tier 1 item 4 (surgical additions; keep this block together).
 	cmd.Flags().Float64Var(&maxCU, "max-cu", 0, "Minimum compute-unit balance to maintain during the run (0 disables)")
 	cmd.Flags().BoolVar(&runEnforce, "enforce", false, "Interrupt and stop the run when --max-cu is breached")
+	// [tier5] run/exec parity: same helpers, same record contract.
+	cmd.Flags().StringArrayVar(&secretNames, "secret", nil, "Inject NAME from the process environment or OS keyring into the kernel (repeatable)")
+	cmd.Flags().StringArrayVar(&envFiles, "env-file", nil, "Load KEY=VALUE from a mode-0600 file into the kernel (repeatable)")
+	cmd.Flags().StringVar(&outputImage, "output-image", "", "Path to save a displayed image")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print one JSON record per executed cell on stdout")
 	// Unknown options after SCRIPT belong to the script, not to golab.
 	cmd.Flags().SetInterspersed(false)
 	return cmd

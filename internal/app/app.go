@@ -345,6 +345,13 @@ func (d *Deps) GetSession(ctx context.Context, name string) (*state.Session, err
 
 // ResolveSession implements the shared resolution rule (docs/05).
 func (d *Deps) ResolveSession(ctx context.Context, name string) (*state.Session, error) {
+	// [tier5] Default-session precedence: -s > GOLAB_SESSION > settings
+	// default_session. An empty result keeps the existing unique-session rule.
+	configured, err := ConfiguredSessionName(name, d.SettingsStore)
+	if err != nil {
+		return nil, err
+	}
+	name = configured
 	if name != "" {
 		return d.GetSession(ctx, name)
 	}

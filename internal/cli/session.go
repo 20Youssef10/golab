@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
+	"time" // tier1 TTL + [tier5] status --interval
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -266,6 +266,8 @@ func sessionsCommand() *cobra.Command {
 
 func statusCommand() *cobra.Command {
 	var name string
+	var watch bool
+	var interval time.Duration
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show session status",
@@ -275,37 +277,49 @@ func statusCommand() *cobra.Command {
 			if err := validateSessionName(name); err != nil {
 				return err
 			}
-			local, assignments, err := d.SyncSessions(cmd.Context())
-			if err != nil {
-				return err
+			if watch && interval <= 0 {
+				return usagef("[colab] status: --interval must be positive.")
 			}
-			// `sessions` prints the server-assigned shape; mirror that in
-			// `status` at print time. SyncSessions deliberately does not write
-			// the shape to disk, so neither do we.
-			byEndpoint, byRuntime := indexAssignments(assignments)
-			if name != "" {
-				s, err := d.Store.Get(name)
+			// [tier5] --watch reuses the exact same read-only renderer.
+			tick := func(ctx context.Context) error {
+				local, assignments, err := d.SyncSessions(ctx)
 				if err != nil {
-					if errors.Is(err, state.ErrNotFound) {
-						fmt.Fprintf(d.Stderr, "[colab] Session '%s' not found.\n", name)
-						return nil
-					}
 					return err
 				}
-				printStatus(d, withServerShape(*s, byEndpoint, byRuntime))
+				// `sessions` prints the server-assigned shape; mirror that in
+				// `status` at print time. SyncSessions deliberately does not write
+				// the shape to disk, so neither do we.
+				byEndpoint, byRuntime := indexAssignments(assignments)
+				if name != "" {
+					s, err := d.Store.Get(name)
+					if err != nil {
+						if errors.Is(err, state.ErrNotFound) {
+							fmt.Fprintf(d.Stderr, "[colab] Session '%s' not found.\n", name)
+							return nil
+						}
+						return err
+					}
+					printStatus(d, withServerShape(*s, byEndpoint, byRuntime))
+					return nil
+				}
+				if len(local) == 0 {
+					fmt.Fprintln(d.Stderr, "[colab] No active sessions.")
+					return nil
+				}
+				for _, s := range local {
+					printStatus(d, withServerShape(s, byEndpoint, byRuntime))
+				}
 				return nil
 			}
-			if len(local) == 0 {
-				fmt.Fprintln(d.Stderr, "[colab] No active sessions.")
-				return nil
+			if watch {
+				return watchLoopFn(cmd.Context(), interval, 0, tick)
 			}
-			for _, s := range local {
-				printStatus(d, withServerShape(s, byEndpoint, byRuntime))
-			}
-			return nil
+			return tick(cmd.Context())
 		},
 	}
 	cmd.Flags().StringVarP(&name, "session", "s", "", "Session name")
+	cmd.Flags().BoolVar(&watch, "watch", false, "Refresh status until interrupted")                      // [tier5]
+	cmd.Flags().DurationVar(&interval, "interval", defaultWatchInterval, "Polling interval for --watch") // [tier5]
 	return cmd
 }
 
