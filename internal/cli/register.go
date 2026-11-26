@@ -23,4 +23,5 @@ func registerCommands(root *cobra.Command) {
 	RegisterBundleCommands(root)
 	RegisterAgentOutCommands(root)
 	RegisterSyncCommands(root)
+	registerAttachCommand(root)
 }
