@@ -98,8 +98,6 @@ jobs:
           COVERAGE_MIN: ${{ vars.COVERAGE_MIN || '70' }}
       # Short fuzz smoke on both seeds; nightly workflow runs the long gate.
       - run: make fuzz
-      # goleak needs a go.mod dependency + TestMains in runtime/sshx/repl/update
-      # (owned by another agent). Advisory until wired; remove ADVISORY then.
+      # Hard gate: goleak wiring in runtime/sshx/repl/update is verified here
+      # and executed by the `go test -race ./...` job above. No advisory mode.
       - run: bash scripts/goleak-check.sh
-        env:
-          ADVISORY: "1"

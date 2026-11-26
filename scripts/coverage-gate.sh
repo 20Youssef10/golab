@@ -8,6 +8,14 @@
 # default minimum is 80% for the five gate packages named in docs/07 §11;
 # override with COVERAGE_MIN (global) or COVERAGE_MIN_<pkg> (e.g.
 # COVERAGE_MIN_sshx=75). No profile entry for a package is treated as 0%.
+#
+# platform and app are ratcheted, not targeted: they are not yet at 80%, so
+# their floors are pinned just below the CURRENT measured values (platform
+# 31.6%, app 47.2%). The gate is a non-regression check for those two — it
+# fails only if coverage drops — and COVERAGE_MIN_<pkg> still overrides a
+# ratchet floor. The global COVERAGE_MIN (CI temporarily floors the original
+# five at 70%) deliberately does not apply to ratchet packages, otherwise CI
+# would fail them while they are still being raised.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -18,8 +26,9 @@ if [[ ! -f "$profile" ]]; then
 fi
 
 default_min="${COVERAGE_MIN:-80}"
-# Gate packages from docs/07 §11. Extend here as more packages are gated.
-packages=(colabapi runtime state sshx auth)
+# Gate packages from docs/07 §11, plus the ratcheted platform/app packages.
+# Extend here as more packages are gated.
+packages=(colabapi runtime state sshx auth platform app)
 
 # Aggregate by package directory using statement counts (accurate, not a mean
 # of per-function percentages). Output: "<pkg> <pct> <covered> <total>".
@@ -50,7 +59,20 @@ fail=0
 printf '%-12s %8s %8s %s\n' PACKAGE COVERAGE MINIMUM STATUS
 for pkg in "${packages[@]}"; do
   var="COVERAGE_MIN_${pkg}"
-  min="${!var:-$default_min}"
+  # Ratchet floors: just below current measured coverage (see header). A
+  # package-specific override wins; the global default covers the rest.
+  case "$pkg" in
+    platform) ratchet_min=30 ;;
+    app)      ratchet_min=45 ;;
+    *)        ratchet_min="" ;;
+  esac
+  if [[ -n "${!var:-}" ]]; then
+    min="${!var}"
+  elif [[ -n "$ratchet_min" ]]; then
+    min="$ratchet_min"
+  else
+    min="$default_min"
+  fi
   row="$(printf '%s\n' "$report" | awk -v want="internal/$pkg" '$1 == want { print; exit }')"
   if [[ -z "$row" ]]; then
     pct="0.00"; covered=0; totald=0

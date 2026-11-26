@@ -20,6 +20,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/theupdateframework/go-tuf/v2 v2.4.2
 	github.com/zalando/go-keyring v0.2.8
+	go.uber.org/goleak v1.3.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.59.0
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20261123165210-6c21c5864259
