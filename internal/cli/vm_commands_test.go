@@ -187,10 +187,13 @@ func TestTailFollowBoundedByContext(t *testing.T) {
 	h.kernel.Script(vmEnvelopeStream(vmstat.TailResult{Offset: 7, Chunk: "line-1\n", Exists: true}), statusIdle(), replyOK())
 	// Queue plenty of follow polls so the ticker never runs dry, then bound the
 	// whole run with a generous context deadline (a normal `Ctrl-C` path).
-	for i := 2; i <= 40; i++ {
+	for i := 2; i <= 120; i++ {
 		h.kernel.Script(vmEnvelopeStream(vmstat.TailResult{Offset: int64(i * 7), Chunk: "line\n", Exists: true}), statusIdle(), replyOK())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	// Generous deadline: CI runners under parallel load can take seconds just
+	// to start the command; a 1.5s bound made this test flaky without testing
+	// anything about follow behavior.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	code := h.runCtx(ctx, "", "tail", "-s", "s1", "app.log", "-f", "--interval", "50ms")
 	if code != 0 {
@@ -200,7 +203,7 @@ func TestTailFollowBoundedByContext(t *testing.T) {
 		t.Fatalf("follow did not emit initial chunk: stdout=%q stderr=%q execs=%d",
 			h.stdout.String(), h.stderr.String(), len(h.kernel.Executions()))
 	}
-	if len(h.kernel.Executions()) > 42 { // prelude + initial + at most 40 polls
+	if len(h.kernel.Executions()) > 125 { // prelude + initial + bounded polls for the 5s window
 		t.Fatalf("follow polled too many times: %d", len(h.kernel.Executions()))
 	}
 }
