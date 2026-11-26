@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -73,6 +74,28 @@ func runCUMonitorLoop(ctx context.Context, stop <-chan struct{}, cfg cuMonitorCo
 	return done
 }
 
+// syncWriter serializes writes to a shared destination. The CU monitor emits
+// diagnostics from its own goroutine while the run is still writing to
+// d.Stderr. os.Stderr tolerates concurrent Write calls, but a captured writer
+// (bytes.Buffer in tests, io.Writer adapters in embedders) does not.
+type syncWriter struct {
+	mu     sync.Mutex
+	w      io.Writer
+	active atomic.Int64
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.active.Add(1)
+	defer s.active.Add(-1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// inFlight reports writes that have entered Write but not yet left it. Tests
+// use it to prove the monitor was joined before the command returned.
+func (s *syncWriter) inFlight() int64 { return s.active.Load() }
+
 // runCUMonitor joins the sampling goroutine so a run can never leave one behind.
 type runCUMonitor struct {
 	stop     chan struct{}
@@ -103,6 +126,13 @@ func startRunCUMonitor(ctx context.Context, d *app.Deps, cmd *cobra.Command, max
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	stop := make(chan struct{})
+	// Route every later d.Stderr write through one mutex-protected writer.
+	// Assigning the field (rather than only cfg.Stderr) matters: the monitor's
+	// warning and the command's own diagnostics share the same destination,
+	// and all helpers read d.Stderr from Deps at call time. SetStreams resets
+	// the field on the next command, so this stays command-scoped.
+	stderr := &syncWriter{w: d.Stderr}
+	d.Stderr = stderr
 	cfg := cuMonitorConfig{
 		Interval: runCUSampleInterval,
 		MaxCU:    maxCU,
@@ -111,7 +141,7 @@ func startRunCUMonitor(ctx context.Context, d *app.Deps, cmd *cobra.Command, max
 			return sampleCCU(c, d, client, "guard")
 		},
 		Cancel: cancel,
-		Stderr: d.Stderr,
+		Stderr: stderr,
 		Now:    time.Now,
 	}
 	done := runCUMonitorLoop(ctx, stop, cfg)

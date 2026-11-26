@@ -40,6 +40,40 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+// writerFunc turns a function into an io.Writer for the overlap probe below.
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// Regression for the CI race in TestRunMaxCUEnforcedAbortsAndStops: the CU
+// monitor writes stderr from its own goroutine. The shared writer seam must
+// never let two callers enter the underlying writer at the same time (a plain
+// bytes.Buffer would corrupt under that interleaving).
+func TestSyncWriterSerializesConcurrentWrites(t *testing.T) {
+	var inFlight, overlaps atomic.Int64
+	underlying := writerFunc(func(p []byte) (int, error) {
+		if inFlight.Add(1) != 1 {
+			overlaps.Add(1)
+		}
+		time.Sleep(time.Millisecond) // widen the window without TSan
+		inFlight.Add(-1)
+		return len(p), nil
+	})
+	w := &syncWriter{w: underlying}
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				_, _ = w.Write([]byte("x"))
+			}
+		}()
+	}
+	wg.Wait()
+	require.Zero(t, overlaps.Load(), "syncWriter must serialize writes to its underlying writer")
+}
+
 func TestCUMonitorEnforcedBreachCancels(t *testing.T) {
 	var canceled atomic.Bool
 	var stderr syncBuffer
@@ -114,6 +148,13 @@ func TestRunMaxCUEnforcedAbortsAndStops(t *testing.T) {
 
 	code := h.run(t, "", "run", "--max-cu", "20", "--enforce", "-s", "capped", script)
 	require.NotEqual(t, 0, code, "breach must abort the run")
+	// The monitor writes the breach warning from its own goroutine. By the
+	// time run returns, Stop must have joined it: no write may be in flight,
+	// and the harness buffer must be reached only through the shared seam.
+	sw, ok := h.deps.Stderr.(*syncWriter)
+	require.True(t, ok, "run with --max-cu must install the synchronized stderr writer")
+	require.Zero(t, sw.inFlight(), "CU monitor must be joined before the command returns")
+	require.Same(t, &h.stderr, sw.w, "synchronized writer must wrap the harness stderr")
 	require.Contains(t, h.stderr.String(), "compute unit")
 	var unassigned bool
 	for _, r := range h.ctrl.Requests() {
