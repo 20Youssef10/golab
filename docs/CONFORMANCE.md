@@ -243,6 +243,23 @@ WSL/Termux device execution remains an open L6 human-only proof (§6 item 7).
 
 ## Change log
 
+- 2026-11-26 — Reviewed upstream issue #289 (`googlecolab/google-colab-cli`).
+  Upstream plans a 1.0 release candidate in ~2 weeks whose breaking change is a
+  switch to Colab's Public API; users will have to re-run `colab auth` and set a
+  GCP quota project, and 1.0 adds instructions plus a `colab init-gcp-project`
+  helper. Short-term opt-outs are staying on 0.8.0 or `--no-public-api`, but the
+  tunnel API will likely be turned down soon to prevent abuse. **Already covered
+  in golab:** the full Public API lifecycle (LRO create/poll/delete, persisted
+  `runtime_name`), `--public-api` / `--no-public-api`, `COLAB_CLI_PUBLIC_API`,
+  hidden `test-public-api`, `logout`, WS reconnect/resume and bounded timeouts.
+  **Planned, not done here:** quota-project / re-consent diagnostics, migration
+  docs for the re-auth + quota-project prerequisite, and a web-session attach
+  command; there is no `init-gcp-project` helper or documented quota-project
+  prerequisite yet. **Not claimed:** golab does not claim upstream 1.0 support,
+  and the CLI default stays the tunnel API — `version.Upstream` remains
+  `0.8.x+HEAD` and this ledger still targets 0.8.x+HEAD. No default flip or 1.0
+  support claim without live proof; tunnel shutdown would remove the opt-out, so
+  the Public API path needs live verification before it can become the default.
 - 2026-11-26 — Ledger reconciled against `main` and fresh measurements: test
   counts (§1), coverage numbers (§3) and the URL-launcher gap (§5) are updated.
   The `docs/gap-report.md` P0–P3 work recorded in `CHANGELOG.md` `[Unreleased]`
