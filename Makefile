@@ -49,7 +49,7 @@ coverage:
 coverage-gate: coverage
 	bash scripts/coverage-gate.sh dist/coverage.out
 
-# goleak wiring gate (ADVISORY=1 makes it non-blocking while TestMains land).
+# goleak wiring gate (hard gate; wiring landed in runtime/sshx/repl/update).
 goleak-check:
 	bash scripts/goleak-check.sh
 

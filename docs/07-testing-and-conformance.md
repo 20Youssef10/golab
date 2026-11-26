@@ -13,7 +13,7 @@
 > is [CONFORMANCE.md](CONFORMANCE.md); the tables below are the design target.
 > The §11 coverage gates are **advisory** at v0.2.0:
 > `scripts/coverage-gate.sh` floors at 70 % via `vars.COVERAGE_MIN`, and
-> `scripts/goleak-check.sh` runs in ADVISORY mode. Human-only blockers are in
+> `scripts/goleak-check.sh` is a hard gate (wiring landed in `runtime`, `sshx`, `repl` and `update`). Human-only blockers are in
 > [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and [CONFORMANCE.md](CONFORMANCE.md) §6.
 
 ## 1. Layers

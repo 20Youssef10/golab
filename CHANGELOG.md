@@ -84,6 +84,14 @@ on-disk schema or persisted token format (per AGENTS.md).
   history-directory finding has its own ID; and two unused gosec exclusions were
   removed. Batch 7's new security tests were made portable to Windows runners.
 
+- Documentation and gate reconciliation: README/INDEX/CHANGELOG/CONFORMANCE
+  and the full docs pack now describe v0.2.0 truthfully (fresh counts: 664
+  tests in 103 files across 25 packages, 75.8% coverage), all user-facing
+  `colab` command hints point at `golab`, and the `colab`→`golab` exit-code,
+  version-string, repo-tree, harness, DEC-08 and S-3 drift is resolved. The
+  coverage gate now ratchets `platform`/`app` as well as the original five
+  packages, and `goleak-check` is a hard CI gate instead of advisory.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even

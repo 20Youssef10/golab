@@ -21,7 +21,7 @@ Unofficial Go port of `google-colab-cli`; one static binary (`CGO_ENABLED=0`). F
 | Fuzz smoke | `make fuzz` (10 s, both seeds) |
 
 - `make all` = `check` + `build`. Go **1.27.4** pinned in `go.mod`; golangci-lint **v2** (v2.15.0 in CI).
-- CI gotchas: `windows-11-arm` drops `-race`; the coverage gate is floored at **70** via `COVERAGE_MIN` (target 80); `goleak-check` runs ADVISORY. Check `docs/CONFORMANCE.md` before treating a gate or harness as real.
+- CI gotchas: `windows-11-arm` drops `-race`; the coverage gate is floored at **70** via `COVERAGE_MIN` (target 80); `goleak-check` is a hard gate (goleak is wired in `runtime`/`sshx`/`repl`/`update`). Check `docs/CONFORMANCE.md` before treating a gate or harness as real.
 
 ## Tests & fixtures
 - **Test-first, non-negotiable:** write the failing test first, name the upstream Python test in a comment, watch it fail, then implement.

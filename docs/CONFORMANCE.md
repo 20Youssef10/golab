@@ -15,7 +15,7 @@
 | **L4 Differential** | Python ↔ Go via intercepting proxy, ≥40 scenarios | 🔴 → 🟡 | `scripts/differential.sh` skeleton (help/version + normalisation + diff); proxy/CA bootstrap and 38 scenarios are TODO (external tooling + human account). |
 | **L5 Live e2e** | real CPU runtime, throw-away account, sweeper | 🔴 → 🟡 | `.github/workflows/live-e2e.yml` added: manual dispatch, `LIVE_E2E_ENABLED=false` default, secrets gate, concurrency 1, GET-only default, 60-min sweeper, final emptiness check. **Never run**; first pass is human-only. |
 | **L6 Platform** | QEMU + Termux + devices + Windows consoles | 🟡 | `qemu-smoke.yml` and `termux-nightly.yml` skeletons added (disabled by default); no real runner/device proof. Tier-1 per-OS acceptance (docs/04 §9) has no recorded pass. |
-| **L7 Security/fuzz** | redaction, injection, fuzz ≥1 h, goleak, coverage | 🟡 | `ci.yml` now pins actions, runs `golangci-lint`, pinned `govulncheck`, `go mod verify`, both shell gates, 10 s fuzz smoke and a coverage gate. `goleak` wiring is **absent** (no dep / no `TestMain`): `scripts/goleak-check.sh` currently reports FAIL and runs in ADVISORY mode in CI. |
+| **L7 Security/fuzz** | redaction, injection, fuzz ≥1 h, goleak, coverage | 🟡 | `ci.yml` now pins actions, runs `golangci-lint`, pinned `govulncheck`, `go mod verify`, both shell gates, 10 s fuzz smoke and a coverage gate. `goleak` is **wired and gating**: `go.uber.org/goleak` is a direct dependency, `runtime`/`sshx`/`repl` use `VerifyTestMain` and `update` uses `VerifyNone`, and `scripts/goleak-check.sh` is a hard CI gate. |
 
 ## 2. Upstream-test porting matrix (intent-level, estimate)
 
@@ -236,7 +236,7 @@ WSL/Termux device execution remains an open L6 human-only proof (§6 item 7).
    against the real release and confirmed the installed file executes as
    `golab 0.1.9`. A future release must rerun this check; it remains
    non-waivable.
-6. Wire goleak `TestMain` + dependency, then drop `ADVISORY=1` from `ci.yml`
+6. ✅ Done — goleak dependency + `TestMain`/`VerifyNone` wiring and `ADVISORY=1` removed from `ci.yml`
    and raise `COVERAGE_MIN` to 80.
 7. Termux device matrix, Windows console/ACL/`.old` cleanup, macOS keychain
    argv/timing, QEMU/Termux job enablement.
@@ -256,7 +256,7 @@ WSL/Termux device execution remains an open L6 human-only proof (§6 item 7).
   with fakes; **no live proof is claimed for any fake-tested item**. The
   still-open human-only proofs in §6 are: live billable re-verification of the
   fixed cases, OAuth consent / Drive approval / interactive TTY, chunked
-  >75 MiB upload, goleak `TestMain` wiring, and the WSL/Termux/device and
+  >75 MiB upload, the WSL/Termux/device and
   wire-capture matrices. The tagged-release install acceptance is recorded as
   closed for v0.1.9 (§4) and v0.2.0 (`CHANGELOG.md` `[Unreleased]` Verification);
   it must be rerun for each future tag.
