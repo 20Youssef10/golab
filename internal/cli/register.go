@@ -23,5 +23,6 @@ func registerCommands(root *cobra.Command) {
 	RegisterBundleCommands(root)
 	RegisterAgentOutCommands(root)
 	RegisterSyncCommands(root)
+	RegisterEnvCommands(root) // TIER4: env freeze
 	registerAttachCommand(root)
 }

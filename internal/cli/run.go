@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/20Youssef10/golab/internal/app"
+	"github.com/20Youssef10/golab/internal/envlock" // TIER4: --lockfile probe type
 	"github.com/20Youssef10/golab/internal/nb"
 	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/state"
@@ -218,6 +219,10 @@ func runCommand() *cobra.Command {
 	var highMem, keep bool
 	var timeout float64
 	var env []string
+	// TIER4 additions: notebook params, lockfile verification, run provenance.
+	var paramsFlag []string
+	var paramsFileFlag, lockfile, bundleOut string
+	var bundleFlag bool
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a Python script on a fresh Colab VM, then release it",
@@ -240,6 +245,30 @@ func runCommand() *cobra.Command {
 			envVars, err := parseEnvVars(append(append([]string(nil), env...), inlineEnv...))
 			if err != nil {
 				return err
+			}
+			// TIER4: resolve papermill params and the lockfile before any
+			// allocation: a bad file must never cost a billable VM.
+			params := append([]string(nil), paramsFlag...)
+			paramsFile := paramsFileFlag
+			if strings.HasSuffix(strings.ToLower(script), ".ipynb") {
+				var inlineParams []string
+				var inlineFile string
+				forwarded, inlineParams, inlineFile = extractInlineParams(forwarded)
+				params = append(params, inlineParams...)
+				if inlineFile != "" {
+					paramsFile = inlineFile
+				}
+			}
+			var lock *envlock.Lockfile
+			if lockfile != "" {
+				raw, readErr := os.ReadFile(lockfile)
+				if readErr != nil {
+					return usagef("[colab] Lockfile '%s' not found.", filepath.Base(lockfile))
+				}
+				lock, err = envlock.Parse(raw)
+				if err != nil {
+					return usagef("[colab] Invalid lockfile: %s", err.Error())
+				}
 			}
 			if err := validateSessionName(name); err != nil {
 				return err
@@ -282,6 +311,12 @@ func runCommand() *cobra.Command {
 			if isNB {
 				var err error
 				blocks, notebook, err = readCodeBlocks(d, script)
+				if err != nil {
+					return err
+				}
+				// TIER4: inject -p/--params-file assignments after the
+				// parameters-tagged cell, before any VM is allocated.
+				blocks, err = applyNotebookParams(notebook, blocks, params, paramsFile)
 				if err != nil {
 					return err
 				}
@@ -355,6 +390,18 @@ func runCommand() *cobra.Command {
 				var e error
 				reason, e = runErrorReason(d, name, err)
 				return e
+			}
+
+			// TIER4: verify hardware/interpreter and install the lockfile on
+			// the freshly allocated VM before the user's code runs.
+			var probedEnv *envlock.Lockfile
+			if lock != nil {
+				var e error
+				probedEnv, e = applyLockfile(ctx, d, &s, kernel, lock)
+				if e != nil {
+					reason = "run_failed"
+					return e
+				}
 			}
 
 			if isNB {
@@ -443,6 +490,23 @@ func runCommand() *cobra.Command {
 					logExecution(d, name, payload, res.Outputs, map[string]any{"via": "run"})
 				}
 			}
+			// TIER4: record provenance only after a successful execution;
+			// it stays "recorded", never a verified replay claim.
+			if bundleFlag {
+				codeBytes, readErr := os.ReadFile(script)
+				if readErr != nil {
+					reason = "run_failed"
+					return readErr
+				}
+				out := bundleOut
+				if out == "" {
+					out = "run.json"
+				}
+				if err := recordRunBundle(cmd.Context(), d, &s, kernel, script, codeBytes, out, probedEnv); err != nil {
+					reason = "run_failed"
+					return err
+				}
+			}
 			if ctx.Err() != nil {
 				return exitf(130, "")
 			}
@@ -459,6 +523,12 @@ func runCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&keep, "keep", false, "Do not stop the session after the script finishes")
 	cmd.Flags().Float64Var(&timeout, "timeout", 30, "Seconds without output before failing (0 for no limit)")
 	cmd.Flags().StringArrayVar(&env, "env", nil, "Set KEY=VALUE in the remote kernel (repeatable)")
+	// TIER4 flags.
+	cmd.Flags().StringArrayVarP(&paramsFlag, "param", "p", nil, "Set NAME=VALUE notebook parameter (repeatable)")
+	cmd.Flags().StringVar(&paramsFileFlag, "params-file", "", "JSON/YAML notebook params file")
+	cmd.Flags().StringVar(&lockfile, "lockfile", "", "Verify and install this environment lockfile before running")
+	cmd.Flags().BoolVar(&bundleFlag, "bundle", false, "Record a provenance manifest for this run")
+	cmd.Flags().StringVar(&bundleOut, "out", "", "Provenance manifest path for --bundle (default run.json)")
 	// Unknown options after SCRIPT belong to the script, not to golab.
 	cmd.Flags().SetInterspersed(false)
 	return cmd

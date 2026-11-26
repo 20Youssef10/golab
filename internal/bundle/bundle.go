@@ -48,6 +48,9 @@ type Input struct {
 	Shape           string
 	UpstreamVersion string
 	GolabVersion    string
+	// Environment is the optional VM probe recorded by `golab run --bundle`.
+	// TIER4: metadata-only bundles leave it nil, which keeps their IDs stable.
+	Environment *Environment
 }
 
 // FileRecord is the digest of one input file.
@@ -76,6 +79,8 @@ type Manifest struct {
 	GolabVersion    string       `json:"golab_version"`
 	Files           []FileRecord `json:"files"`
 	Provenance      Provenance   `json:"provenance"`
+	// Environment is TIER4's optional recorded VM probe.
+	Environment *Environment `json:"environment,omitempty"`
 }
 
 // canonical is the ID input: every recorded field except the ID itself.
@@ -90,6 +95,7 @@ type canonical struct {
 	GolabVersion    string       `json:"golab_version"`
 	Files           []FileRecord `json:"files"`
 	Provenance      Provenance   `json:"provenance"`
+	Environment     *Environment `json:"environment,omitempty"`
 }
 
 func (m Manifest) canonical() canonical {
@@ -97,7 +103,7 @@ func (m Manifest) canonical() canonical {
 		Schema: m.Schema, CodeHash: m.CodeHash, EnvHash: m.EnvHash,
 		Accelerator: m.Accelerator, Variant: m.Variant, Shape: m.Shape,
 		UpstreamVersion: m.UpstreamVersion, GolabVersion: m.GolabVersion,
-		Files: m.Files, Provenance: m.Provenance,
+		Files: m.Files, Provenance: m.Provenance, Environment: m.Environment,
 	}
 }
 
@@ -153,6 +159,7 @@ func New(in Input) (*Manifest, error) {
 			RecordedBy: "golab bundle record",
 			Note:       "recorded provenance, not a verified replay; no cache by default",
 		},
+		Environment: in.Environment,
 	}
 	b, err := json.Marshal(m.canonical())
 	if err != nil {

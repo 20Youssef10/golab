@@ -92,6 +92,7 @@ func newBundleRecordCommand() *cobra.Command {
 
 func newBundleVerifyCommand() *cobra.Command {
 	var filesRoot string
+	var envVerify bool // TIER4: re-check the environment in a fresh VM
 	cmd := &cobra.Command{
 		Use:   "verify MANIFEST",
 		Short: "Verify a bundle manifest and optionally re-hash local inputs",
@@ -107,12 +108,21 @@ func newBundleVerifyCommand() *cobra.Command {
 					return mapBundleError(err)
 				}
 			}
-			fmt.Fprintf(d.Stdout, "Bundle %s verified%s\n", m.ID,
+			// TIER4: --env actually allocates a fresh VM; without it this
+			// command only re-checks stored metadata, so say exactly that.
+			if envVerify {
+				if err := verifyBundleEnv(cmd.Context(), d, m); err != nil {
+					return err
+				}
+				return nil
+			}
+			fmt.Fprintf(d.Stdout, "Bundle %s verified (recorded metadata only)%s\n", m.ID,
 				map[bool]string{true: " (inputs re-hashed)", false: ""}[filesRoot != ""])
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&filesRoot, "files-root", "", "Local root for re-hashing recorded input files")
+	cmd.Flags().BoolVar(&envVerify, "env", false, "Re-check the recorded environment in a FRESH VM")
 	return cmd
 }
 
