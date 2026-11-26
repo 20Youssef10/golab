@@ -116,6 +116,45 @@ live re-run of the fixed cases follows this commit.
 
 ### Added
 
+- Six feature tiers landed on `main` (2026-11-26), all written test-first with
+  fakes; **no live e2e proof is claimed for any of them** — the billable probes
+  remain human-only. **Tier 1 (spend safety):** `reap [--older-than --dry-run
+  --yes --json]` unassigns server runtimes with no local record and prunes stale
+  local records; `new --ttl D [--ttl-action warn|stop]` stores a local expiry
+  checked on every invocation (no daemon or timer) and `--wait-capacity D`
+  retries capacity refusals; `cost [--since --json]` reports observed compute
+  units from `GET /tun/m/ccu-info` (account-level, CU only, no prices); and
+  `run --max-cu N [--enforce]` guards a foreground run against that same
+  account-level balance. **Tier 2 (VM inspection):** `ps` (alias `top`), `cat`,
+  `tail [-f -n --interval]`, `grep [-i --glob --max-matches]`, `du`, `find` and
+  `fetch [--sha256]` read the VM through server-side polling (`internal/vmstat`);
+  `tail -f` is not byte-perfect under log rotation. **Tier 3 (background):**
+  `run --detach --ttl`, `jobs`, `logs ID [-f]`, `wait --for kernel|idle|ready
+  --timeout` and `sync --watch`; detached jobs are **remote**, there is no local
+  daemon, the VM stays allocated and billable, and `--ttl` is mandatory but
+  advisory — the decision and its non-goals are in
+  [ADR-001](docs/adr-001-detached-runs.md). **Tier 4 (reproducibility):**
+  `env freeze -s NAME -o FILE`, `run --lockfile`, `run -p K=V --params-file`,
+  `run --bundle --out` and `bundle verify --env`; metadata-only verify is
+  RECORDED, while `--env` actually re-checks the environment in a fresh VM
+  (`internal/envlock`, `internal/nbparams`). **Tier 5 (ergonomics):** `config
+  get|set|unset|list|path`, `init [--force]`, `use NAME|--clear` with
+  `GOLAB_SESSION` (resolution `-s` > env > persisted default > unique),
+  `status --watch --interval`, `log -f`, and `run --json --secret --env-file
+  --output-image` parity with `exec`. **Tier 6 (honesty):**
+  `GOLAB_TRACE=file.ndjson` and `trace -- <cmd>` append redacted wire traces —
+  query **keys** only, body shape/hash, never headers or tokens — with
+  `--unsafe-bodies` as an explicit, labelled opt-in; `compat report [--json]`
+  compares against an embedded **self-snapshot**, not a live upstream;
+  `doctor --fix [--apply]` plans locally and applies only safe reversible fixes
+  (dry-run default); `state migrate [--dry-run|--apply]` stamps an additive
+  `schema_version` while preserving unknown fields; `update --verify-only PATH`
+  verifies a local artifact; and new `install.sh` / `install.ps1` verify a
+  SHA-256 checksum plus the cosign signature. New gate packages exist for cost,
+  vmstat, detach, envlock, nbparams, compat, doctorfix and trace; the coverage
+  gate still checks the original seven packages. See [USAGE.md](docs/USAGE.md),
+  [MIGRATION.md](docs/MIGRATION.md) and [CONFORMANCE.md](docs/CONFORMANCE.md).
+
 - Upstream `googlecolab/google-colab-cli` issue #289 (reviewed 2026-11-26, tracked
   in [CONFORMANCE.md](docs/CONFORMANCE.md)): the planned 1.0 release candidate
   switches the control plane to Colab's Public API and requires users to re-run

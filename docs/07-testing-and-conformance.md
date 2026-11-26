@@ -15,6 +15,14 @@
 > `scripts/coverage-gate.sh` floors at 70 % via `vars.COVERAGE_MIN`, and
 > `scripts/goleak-check.sh` is a hard gate (wiring landed in `runtime`, `sshx`, `repl` and `update`). Human-only blockers are in
 > [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and [CONFORMANCE.md](CONFORMANCE.md) §6.
+>
+> **Six tiers landed 2026-11-26** with new fake-tested gate packages
+> (`cost`, `vmstat`, `detach`, `envlock`, `nbparams`, `compat`, `doctorfix`,
+> `trace`). These are L1/L2 additions only. `scripts/coverage-gate.sh` still
+> checks the original **seven** packages (`colabapi`, `runtime`, `state`,
+> `sshx`, `auth`, `platform`, `app`); the eight new packages are not in that
+> gate. No L3/L4/L5 proof exists for any of the new commands; see
+> [CONFORMANCE.md](CONFORMANCE.md) §Change log.
 
 ## 1. Layers
 

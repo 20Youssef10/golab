@@ -23,12 +23,16 @@
 >   restart and is not claimed; no Tier-1 per-OS §9 acceptance pass is recorded.
 >   See [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and
 >   [CONFORMANCE.md](CONFORMANCE.md) §1/§6.
-> - **Distribution actually configured:** GitHub Releases (archives + SHA-256
->   checksums + cosign signatures + signed SBOMs) via `.goreleaser.yaml` and
->   `.github/workflows/release.yml`, plus
->   `go install github.com/20Youssef10/golab/cmd/golab@latest`. The remaining §7 channels
->   (`install.sh`, `install.ps1`, Homebrew, Scoop, winget, nfpm packages, AUR,
->   Termux TUR, Docker/Nix) are **planned, not configured** at v0.2.0.
+> - **Distribution actually configured (updated 2026-11-26):** GitHub Releases
+>   (archives + SHA-256 checksums + cosign signatures + signed SBOMs) via
+>   `.goreleaser.yaml` and `.github/workflows/release.yml`, plus
+>   `go install github.com/20Youssef10/golab/cmd/golab@latest`. The root
+>   `install.sh` and `install.ps1` installers now **exist**: both verify the
+>   SHA-256 checksum and the cosign keyless signature before installing, and
+>   `install.sh --verify-only ARTIFACT BUNDLE CHECKSUMS` reuses that gate for
+>   local/CI checks. They are not yet wired into release CI and have **no live
+>   install proof**. Homebrew, Scoop, winget, nfpm packages (`.deb`/`.rpm`/`.apk`),
+>   AUR, Termux TUR and Docker/Nix remain **planned, not configured**.
 
 ---
 
@@ -151,8 +155,8 @@ Optional later improvement: Tailscale's `androiddns` approach (query Android's `
 | Channel | Platforms | Mechanism | Phase |
 |---|---|---|---|
 | GitHub Releases (archives + checksums + cosign sigs + SBOM) | all | GoReleaser | 1 |
-| `install.sh` (verifies checksum+signature) | Linux, macOS, Termux | curl installer | 4 |
-| `install.ps1` | Windows | PowerShell installer | 4 |
+| `install.sh` (verifies SHA-256 + cosign signature; `--verify-only`) | Linux, macOS, Termux | curl installer | exists (2026-11-26), not CI-wired/live-proven |
+| `install.ps1` (verifies SHA-256 + cosign signature) | Windows | PowerShell installer | exists (2026-11-26), not CI-wired/live-proven |
 | Homebrew tap | macOS, Linux | GoReleaser `brews` | 4 |
 | Scoop bucket | Windows | GoReleaser `scoops` | 4 |
 | winget | Windows | GoReleaser `winget` → PR to `winget-pkgs` | 5 |
@@ -161,6 +165,10 @@ Optional later improvement: Tailscale's `androiddns` approach (query Android's `
 | Termux (`go install`, tarball, TUR) | Termux | see §3.3 | 4 |
 | `go install github.com/20Youssef10/golab/cmd/golab@latest` | all with Go | source | 1 (configured) |
 | Nix flake / Docker `scratch` image | optional | community | 5+ |
+
+Rows marked "exists" are scripts present in the repository, not configured
+release channels; the remaining Phase values are the original plan, not a claim
+that those channels are live.
 
 ## 8. Build & CI matrix
 

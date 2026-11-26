@@ -57,14 +57,19 @@ With only one active session you can omit `-s`; `golab` selects it automatically
 
 | Area | Commands |
 |---|---|
-| Sessions | `new`, `sessions`, `status`, `stop` (`--all`, `--verify`), `restart-kernel` |
-| Execution | `exec` (`-f`, `--env`, `--timeout`, `--secret`, `--env-file`, `--json`), `repl`, `run` (script or `.ipynb`), `resume` (`--timeout`) |
-| Files | `ls`, `rm`, `upload` / `download` (`-r`), `edit` |
+| Sessions | `new` (`--ttl`, `--wait-capacity`), `sessions`, `status` (`--watch`), `stop` (`--all`, `--verify`), `restart-kernel`, `attach`, `reap` (`--dry-run`), `use`, `wait` |
+| Execution | `exec` (`-f`, `--env`, `--timeout`, `--secret`, `--env-file`, `--json`, `--output-image`), `repl`, `run` (script or `.ipynb`; `--detach --ttl`, `--max-cu`, `--lockfile`, `--bundle`, `-p`), `resume`, `jobs`, `logs ID [-f]` |
+| VM inspection | `ps` (alias `top`), `cat`, `tail [-f]`, `grep`, `du`, `find`, `fetch [--sha256]` |
+| Files | `ls`, `rm`, `upload` / `download` (`-r`), `edit`, `sync [--watch]` |
+| Reproducibility | `env freeze [-s -o]`, `bundle record`, `bundle verify [--env]`, `run --bundle --out` |
+| Config & state | `init [--force]`, `config get\|set\|unset\|list\|path`, `use NAME\|--clear`, `state migrate [--dry-run\|--apply]` |
 | Remote access | `ssh` (`-- CMD`, `--proxy-mode`, `--rm`, `--force`, `--colab-internal-mode` [hidden/internal]) |
 | Automation | `install`, `drivemount`, `auth` (hidden) |
-| Account & info | `usage`, `url`, `log`, `pay`, `whoami` (hidden), `version`, `help`, `completion` |
-| Maintenance | `update`, `logout`, `readme`, `skill`, `test-public-api` (hidden) |
-| Go-only extras | `doctor`, `audit`, `budget`, `bundle`, `sync`, `agentout` |
+| Account & info | `usage`, `cost [--since --json]` (CU only), `url`, `log [-f]`, `pay`, `whoami` (hidden), `version`, `help`, `completion` |
+| Maintenance | `update [--verify-only PATH]`, `doctor [--fix --apply]`, `compat report [--json]`, `trace -- <cmd>`, `logout`, `readme`, `skill`, `test-public-api` (hidden) |
+| Go-only extras | `audit`, `budget`, `agentout` |
+
+**Spend safety / VM inspection.** `cost` reports observed compute units (CU only, account-level, no prices) and `run --max-cu N --enforce` guards a run against the same account-level balance; `reap` unassigns orphaned server runtimes. `new --ttl D` records a local expiry checked on every invocation (no daemon). The inspection commands poll the VM server-side: `tail -f` is not byte-perfect across log rotation. See **[docs/USAGE.md](docs/USAGE.md)** for flags and caveats.
 
 Full flags, examples and workflows are in **[docs/USAGE.md](docs/USAGE.md)**.
 
@@ -84,7 +89,7 @@ These flags work on every command (Cobra also provides `-h`/`--help`).
 | `--yes` | off | `COLAB_ASSUME_YES` | Assume yes for non-destructive confirmations. Never bypasses a budget guard. |
 | `--logtostderr` | off | `COLAB_DEBUG=1` | Verbose logs on stderr (debug logging is off by default). |
 
-Additional environment overrides: `COLAB_CONFIG_DIR`, `COLAB_CLI_REQUEST_TIMEOUT`, `COLAB_CLI_ASSIGN_RETRIES`, `COLAB_CLI_RETRY_BACKOFF`, `GOLAB_BUDGET_FILE`, `GOLAB_LIVE_PROBES`, `NO_COLOR`, `VISUAL`/`EDITOR`. The complete table is in [docs/USAGE.md](docs/USAGE.md#9-environment-variables).
+Additional environment overrides: `COLAB_CONFIG_DIR`, `COLAB_CLI_REQUEST_TIMEOUT`, `COLAB_CLI_ASSIGN_RETRIES`, `COLAB_CLI_RETRY_BACKOFF`, `GOLAB_BUDGET_FILE`, `GOLAB_SESSION` (default session), `GOLAB_TRACE` / `GOLAB_TRACE_UNSAFE_BODIES` (wire trace), `GOLAB_LIVE_PROBES`, `NO_COLOR`, `VISUAL`/`EDITOR`. The complete table is in [docs/USAGE.md](docs/USAGE.md#9-environment-variables).
 
 ## Configuration paths
 

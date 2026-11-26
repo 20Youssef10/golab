@@ -10,6 +10,17 @@
 > wire/golden fixture layer. A billable live e2e pass is recorded in
 > `CHANGELOG.md` `[0.2.0]` Verification.
 >
+> **2026-11-26 (six tiers):** the current CLI command surface is the one printed
+> by `golab --help` and documented in [USAGE.md](USAGE.md) §1–§6 (notably `reap`,
+> `cost`, `wait`, `jobs`, `logs`, the VM inspection commands, `env freeze`,
+> `bundle`, `config`, `init`, `use`, `state migrate`, `compat report`, `trace`
+> and `doctor --fix`). New leaf/gate packages are `internal/cost`, `vmstat`,
+> `detach`, `envlock`, `nbparams`, `compat`, `doctorfix` and `trace`; all are
+> fake-tested with **no live e2e proof**. Status is in
+> [CONFORMANCE.md](CONFORMANCE.md); detached-run non-goals are in
+> [ADR-001](adr-001-detached-runs.md). No new constructor or import contract is
+> asserted here — read the package sources for APIs.
+>
 > Dated: 2026-11-26. This file is the **integration contract** between packages.
 > It is intentionally short. The authoritative behaviour specs remain docs/01–08 and
 > the upstream Python source cloned at `/tmp/opencode/google-colab-cli` (HEAD).
@@ -109,6 +120,10 @@ var ErrNotFound = errors.New("session not found")
 ```
 State writes: cross-process lock, temp file in same dir, fsync, atomic rename;
 `.bak` of last good file; **parse failure returns `ErrCorrupt`, never `{}`**.
+`sessions.json` also carries an additive top-level `schema_version` (currently
+`1`); a legacy file reads as `0` and a newer version aborts. `golab state
+migrate --apply` only stamps that key — session records and unknown fields are
+preserved verbatim.
 
 ## Package ownership map (who writes what)
 

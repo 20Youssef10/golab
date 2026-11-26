@@ -27,14 +27,14 @@ The following are deliberate equivalents. Flags are the same where practical; di
 
 | Python `colab` | `golab` | Notes |
 |---|---|---|
-| `colab new` | `golab new` | Same `-s`, `--gpu`, `--tpu`, `--high-mem`. Names validated before any allocation. |
-| `colab sessions` | `golab sessions` | Same output shape; server-only assignments show as `[?]`. |
-| `colab status` | `golab status` | `-s`, `IDLE`/`BUSY`, last execution. |
+| `colab new` | `golab new` | Same `-s`, `--gpu`, `--tpu`, `--high-mem`; adds `--ttl` / `--ttl-action` and `--wait-capacity`. Names validated before any allocation. |
+| `colab sessions` | `golab sessions` | Same output shape; server-only assignments show as `[?]`. `golab reap` unassigns the `[?]` orphans. |
+| `colab status` | `golab status` | `-s`, `IDLE`/`BUSY`, last execution; adds `--watch` / `--interval`. |
 | `colab stop` | `golab stop` | Adds `--all` with confirmation. |
 | `colab restart-kernel` | `golab restart-kernel` | – |
 | `colab exec` | `golab exec` | `-f`, `--env`, `--timeout`, `--output-image`; `.ipynb` cells and `# @title`. |
 | `colab repl` | `golab repl` | Piped stdin supported; rich TTY frontend when interactive. |
-| `colab run` | `golab run` | Shebang, argv and `sys.exit()` semantics preserved. |
+| `colab run` | `golab run` | Shebang, argv and `sys.exit()` semantics preserved; adds `--max-cu`/`--enforce`, `--detach --ttl`, `--lockfile`, `-p`/`--params-file`, `--bundle`, and `exec`-parity `--json`/`--secret`/`--env-file`/`--output-image`. |
 | `colab ls` | `golab ls` | Default remote path `content`. |
 | `colab rm` | `golab rm` | – |
 | `colab upload` | `golab upload` | Adds `-r` / `--recursive` (upstream PR #267); streams and guards paths. |
@@ -44,7 +44,7 @@ The following are deliberate equivalents. Flags are the same where practical; di
 | `colab ssh` | `golab ssh` | Embedded SSH client; adds `--force`. `--proxy-mode`, `-i`, `--rm`, `-- CMD` all present. |
 | `colab usage` | `golab usage` | – |
 | `colab url` | `golab url` | `--open` now really launches a browser (Termux/WSL aware). |
-| `colab log` | `golab log` | `-n`, `-t`, `-o` with `.ipynb`/`.md`/`.txt`/`.jsonl` exporters. |
+| `colab log` | `golab log` | `-n`, `-t`, `-o` with `.ipynb`/`.md`/`.txt`/`.jsonl` exporters; adds `-f`/`--follow`. |
 | `colab pay` | `golab pay` | – |
 | `colab update` | `golab update` | `--install` verifies signed GitHub Releases instead of PyPI/pip. |
 | `colab logout` | `golab logout` | Clears token + cached proxy tokens + capability flags (PR #266). |
@@ -102,6 +102,14 @@ If a session was already gone on the server, `golab` prunes the local record and
 | Narrow scopes | single broad grant | `--scopes full\|minimal` forces re-consent on change; minimal cannot mount Drive |
 | Interrupted executions | no recovery | transport errors keep the session; `golab resume -s NAME` waits for late output without resubmitting |
 | Platforms | Linux/macOS only upstream | Linux, macOS, Windows, Termux |
+
+### New ergonomics and spend semantics
+
+- **Default session.** `golab use NAME` persists `default_session` in `settings.json`; `golab use --clear` resets it. Resolution is `-s NAME` → `GOLAB_SESSION` → that persisted default → the unique-session fallback. `golab config get|set|unset|list|path` reads and writes the same settings file (with redacted output), and `golab init [--force]` scaffolds `golab.yaml` / `.golabignore`.
+- **TTL is local.** `new --ttl D [--ttl-action warn|stop]` stores an expiry checked from `sessions.json` on every invocation; no daemon or timer is installed, and it does not change the server-side assignment. `--ttl-action stop` makes a best-effort unassign on expiry.
+- **`--max-cu` is account-level.** `run --max-cu N [--enforce]` samples `GET /tun/m/ccu-info`, which reports compute units for the **account**, not for one session; `--enforce` interrupts a foreground run when the reserve is breached. No prices are computed. `cost [--since --json]` reports the observed CU samples.
+- **Detached runs are remote.** `run --detach --ttl D` requires a positive `--ttl`, starts a child on the VM, and leaves the VM allocated and billable; `--ttl` is recorded and displayed by `jobs` but is advisory (it does not stop the VM). `jobs`, `logs ID [-f]` and `wait` poll on demand; there is no local daemon. See [ADR-001](adr-001-detached-runs.md).
+- All of these are fake-tested additions; no live e2e proof is claimed for them.
 
 ## `--public-api` vs `--no-public-api`
 

@@ -243,6 +243,32 @@ WSL/Termux device execution remains an open L6 human-only proof (§6 item 7).
 
 ## Change log
 
+- 2026-11-26 — **Six feature tiers landed on `main`; all are fake-tested only and
+  none has live proof.** Tier 1 adds spend safety (`reap`, `new --ttl` /
+  `--ttl-action`, `--wait-capacity`, `cost`, `run --max-cu --enforce`):
+  `ccu-info` is account-level, TTL is a local check with no daemon. Tier 2 adds
+  VM inspection (`ps`/`top`, `cat`, `tail`, `grep`, `du`, `find`, `fetch`) via
+  server-side polling; `tail -f` is not byte-perfect under rotation. Tier 3 adds
+  detached runs (`run --detach --ttl`, `jobs`, `logs ID [-f]`, `wait`,
+  `sync --watch`): the job is remote, there is no local daemon, the VM stays
+  allocated, and `--ttl` is mandatory but advisory — the decision and non-goals
+  are recorded in [ADR-001](adr-001-detached-runs.md). Tier 4 adds reproducibility
+  (`env freeze`, `run --lockfile`, `-p`/`--params-file`, `run --bundle`,
+  `bundle verify --env`); metadata-only verification is RECORDED, only `--env`
+  executes in a fresh VM. Tier 5 adds ergonomics (`config`, `init`, `use` /
+  `GOLAB_SESSION`, `status --watch`, `log -f`, `run --json/--secret/--env-file/
+  --output-image`). Tier 6 adds honesty tooling (`GOLAB_TRACE` / `trace -- ...`
+  with keys-only queries and an `--unsafe-bodies` opt-in, `compat report` against
+  an embedded self-snapshot, `doctor --fix` with a dry-run default,
+  `state migrate` preserving unknown fields, `update --verify-only PATH`, and
+  `install.sh` / `install.ps1` with checksum + cosign verification). New
+  fake-tested gate packages (`cost`, `vmstat`, `detach`, `envlock`, `nbparams`,
+  `compat`, `doctorfix`, `trace`) exist; the coverage gate still checks the
+  original seven. **L3/L4/L5 remain unproven for these commands**: a human must
+  run the billable e2e, including a detached-job audit that checks the advisory
+  TTL record and manually stops the VM, before any tier is called done. See §6
+  and [USAGE.md](USAGE.md).
+
 - 2026-11-26 — Reviewed upstream issue #289 (`googlecolab/google-colab-cli`).
   Upstream plans a 1.0 release candidate in ~2 weeks whose breaking change is a
   switch to Colab's Public API; users will have to re-run `colab auth` and set a

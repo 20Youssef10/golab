@@ -5,7 +5,7 @@ This is the day-to-day reference for `golab`, the unofficial Go Colab CLI. It as
 ## Conventions used throughout
 
 - **stdout is data, stderr is chatter.** Anything another program should consume — session lists, source output, URLs, JSON events — goes to stdout. Every `[colab] …` progress or diagnostic line goes to stderr. This is a deliberate deviation from the Python CLI and is what makes piping safe.
-- **`-s NAME` selects a session.** Most commands accept `-s` / `--session`. If you omit it and exactly one session exists, `golab` uses it and prints `Using unique session '<name>'` to stderr. With zero sessions it prints `No active sessions found. Create one with 'golab new'.` With several, it lists the names and asks you to pass `-s`.
+- **`-s NAME` selects a session.** Most commands accept `-s` / `--session`. Resolution order is **`-s` flag → `GOLAB_SESSION` → the default set by `golab use` → the unique-session fallback**. If a name resolves from `GOLAB_SESSION` or `golab use`, it is used without the unique-session check; a name that does not exist locally still errors. With no configured name and exactly one session, `golab` uses it and prints `Using unique session '<name>'` to stderr. With zero sessions it prints `No active sessions found. Create one with 'golab new'.` With several, it lists the names and asks you to pass `-s`.
 - **Remote paths are Linux paths.** The VM is Linux even when your host is Windows or Termux. Use `content/foo.csv`, not `content\foo.csv`. Local paths use your host's conventions.
 - **Session names** must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` and must not be Windows reserved names. Validation happens before any network call. If you do not name a session, `golab` generates a random six-character hex name.
 
@@ -20,6 +20,9 @@ golab new                              # CPU, randomly generated name
 golab new -s train --gpu t4            # named T4 session
 golab new -s llm --gpu A100 --high-mem # accelerators are case-insensitive
 golab new -s tpu --tpu v5e1
+golab new -s batch --ttl 2h                 # local expiry warning after 2h
+golab new -s batch --ttl 2h --ttl-action stop
+golab new -s train --wait-capacity 5m       # retry 503 capacity refusals for up to 5m
 ```
 
 | Flag | Meaning |
@@ -28,6 +31,9 @@ golab new -s tpu --tpu v5e1
 | `--gpu {t4,l4,g4,h100,a100}` | Request a GPU. Validated before any request. |
 | `--tpu {v5e1,v6e1}` | Request a TPU. **If both `--tpu` and `--gpu` are given, `--tpu` silently wins** (upstream behaviour). |
 | `--high-mem` | Request a high-RAM machine shape. For L4, V5E1 and V6E1 there is only one shape, so `golab` prints `--high-mem ignored` to stderr and continues. |
+| `--ttl DURATION` | Positive local lifetime (e.g. `2h`) stored on the session. **No daemon or timer is installed**: the check is a local `sessions.json` read on every invocation. It does not extend or shorten the server-side assignment. |
+| `--ttl-action warn\|stop` | On expiry, `warn` (default) prints to stderr; `stop` additionally makes a best-effort unassign and removes the local record. An expired credential is not a reason to fail an unrelated command. |
+| `--wait-capacity DURATION` | Retry capacity refusals for at most this duration before failing. |
 
 Allocation failures get friendly messages: a `412` becomes advice to stop a session or try another accelerator; an accelerator your account is not entitled to becomes advice to try `--gpu T4` or omit the flag.
 
@@ -40,7 +46,26 @@ Reconcile local state with the server, prune sessions that are gone, refresh exp
 [?] m-s-def456 | Hardware: CPU | Shape: Standard | Variant: DEFAULT
 ```
 
-A `[?]` in the name column is a server-side assignment with no matching local record — usually an orphan to clean up explicitly with `golab stop` on the server side or by editing your state file. If nothing is active, the message goes to stderr and stdout stays empty.
+A `[?]` in the name column is a server-side assignment with no matching local record — usually an orphan to clean up explicitly. If nothing is active, the message goes to stderr and stdout stays empty.
+
+### `golab reap`
+
+Unassign server runtimes that have no local session record (the `[?]` rows), and prune stale local records:
+
+```bash
+golab reap --dry-run                 # preview only, no mutation
+golab reap --older-than 2h --yes     # unassign orphans, prune stale records
+golab reap --json                    # machine-readable result
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dry-run` | off | Preview without any mutation. |
+| `--older-than DURATION` | `2h` | Prune stale local records older than this duration. A server assignment with no local record is an orphan regardless of this value. |
+| `--yes` | off | Confirm without the stderr prompt (non-interactive). |
+| `--json` | off | Emit the result as JSON on stdout. |
+
+This is a billable cleanup command: it calls the unassign endpoint, so preview with `--dry-run` before confirming.
 
 ### `golab attach`
 
@@ -60,6 +85,8 @@ golab status -s train
 ```
 
 Each line shows name, endpoint, hardware, shape, variant and `IDLE` / `BUSY (<what>)`. The shape shown is the one reported by the server (overlaid on the locally requested value at print time); the on-disk record is unchanged. A separately indented `Last Execution:` line shows the most recent execution kind, cell label (for notebooks) and timestamp. A `-s` name that does not exist locally prints `Session '<name>' not found.` to stderr.
+
+`golab status --watch [--interval 5s]` refreshes until interrupted; `--interval DURATION` sets the poll period (default `5s`). This is bounded client-side polling, not a server push or a background service.
 
 ### `golab stop`
 
@@ -88,6 +115,36 @@ golab restart-kernel -s train
 ```
 
 Restarts the kernel through the runtime's `/restart` endpoint. It does not change the assignment.
+
+### `golab use`, `config`, `init` and `state migrate`
+
+```bash
+golab use train                      # persist default_session in settings.json
+golab use --clear                    # clear it
+GOLAB_SESSION=train golab status     # per-shell override, no state write
+golab config get default_session
+golab config set enable_update_check false
+golab config unset default_session
+golab config list                    # all supported keys and their values
+golab config path                    # settings.json location
+golab init [--force]                 # scaffold golab.yaml + .golabignore
+golab state migrate --dry-run        # report only (the default)
+golab state migrate --apply --json   # stamp schema_version, preserve records
+```
+
+`config` writes go through the same locked, temp-file + fsync + rename path as other state, and printed values are redacted. Supported keys: `use_public_api`, `enable_update_check` (alias `update_check`), `update_url`, `public_api_supported`, `tunnel_api_supported`, `default_session`. `init` refuses to overwrite existing scaffolding unless `--force` is given.
+
+`state migrate` adds an additive top-level `schema_version` (currently `1`) to `sessions.json`: a legacy file reads as version `0`, a newer version aborts rather than being downgraded, and `--apply` only stamps the key — session records and any unknown fields are preserved verbatim. `--dry-run` is the default; nothing is deleted.
+
+### `golab wait`
+
+```bash
+golab wait -s train --for kernel --timeout 60
+golab wait -s train --for idle
+golab wait --for ready               # default
+```
+
+`--for` accepts `kernel`, `idle` or `ready` (default `ready`); `--timeout SECONDS` defaults to `300`. It polls the existing readiness checks with a bounded deadline and allocates nothing.
 
 ## 2. Executing code
 
@@ -156,6 +213,14 @@ golab run analysis.ipynb --gpu t4      # code cells only; outputs saved to analy
 | `--env KEY=VALUE` | Repeatable; also accepted after the script name. |
 | `--timeout SECONDS` | Idle timeout, default `30`; `0` means no limit. |
 | `--keep` | Leave the session running after the script finishes. |
+| `--max-cu FLOAT` | Minimum compute-unit balance to maintain during the run (`0` disables). Samples `GET /tun/m/ccu-info`, which is **account-level, not per-session**; no prices are computed. |
+| `--enforce` | Interrupt and stop the run when `--max-cu` is breached. Without it a breach is only reported. |
+| `--detach`, `--ttl DURATION` | Start the script remotely detached; `--ttl` (strictly positive) is **required** with `--detach`. See "Detached runs" below and [ADR-001](adr-001-detached-runs.md). |
+| `--lockfile PATH` | Verify and install this environment lockfile before running. |
+| `-p`, `--param NAME=VALUE` | Notebook parameter, repeatable. |
+| `--params-file PATH` | JSON/YAML notebook parameters file. |
+| `--bundle`, `--out PATH` | Record a provenance manifest (`--out` defaults to `run.json`). |
+| `--json`, `--secret NAME`, `--env-file PATH`, `--output-image PATH` | Same semantics as `exec` (per-cell NDJSON, local-only secret bridge, saved image). |
 
 Script semantics:
 
@@ -166,6 +231,41 @@ Script semantics:
 - Exit codes follow CPython: `sys.exit()` / `sys.exit(0)` → 0, `sys.exit(N)` → N, `sys.exit("message")` → 1 with the message on stderr, an uncaught exception → 1 with a traceback.
 - SIGINT, SIGTERM and SIGHUP tear the runtime down; an interrupt while piped exits 130. `--keep` disables teardown.
 - A transport interruption (connection lost or timeout) does **not** tear the runtime down: the command reports a typed output-gap error with a `colab resume -s NAME` hint and keeps the session for recovery. See `golab resume` below.
+
+### Spend guard for `run`
+
+```bash
+golab run train.py --max-cu 10 --enforce
+```
+
+`--max-cu FLOAT` is a **minimum reserve** sampled from `GET /tun/m/ccu-info`. That endpoint is **account-level**, so the sampled balance and any delta belong to the account, not to this one VM; no price is inferred. Without `--enforce`, a breach is reported; with it, the run is interrupted and the session stopped. `--max-cu 0` disables the monitor. The guard monitors a foreground `run` only: `run --detach` returns after submitting the remote child and does **not** keep the in-run monitor alive.
+
+### Detached runs
+
+```bash
+golab run --detach --ttl 1h train.py     # --ttl is mandatory
+golab jobs                               # status, exit code, duration
+golab logs <ID>                          # remote log
+golab logs <ID> -f --interval 2s --max 30  # bounded follow
+```
+
+The job is a **remote** child process on the VM. There is no local daemon, no keep-alive thread and no WebSocket held open after submission; `jobs`, `logs` and `wait` poll on demand. The VM **stays allocated and billable** until you `golab stop` it.
+
+`--ttl` must be strictly positive (otherwise exit 2). It is written to the VM's `meta.json` and to a small credential-free local manifest and shown by `jobs`, but in this change it is **advisory only**: it does not itself terminate the VM or enforce a deadline. Plan to stop the session yourself. The local manifest can drift from VM reality; a missing remote file is reported as unknown/stale, never as success. Follow mode is bounded by `--interval` × `--max`; remote output is visible only on the next poll. The design and explicit non-goals are in [ADR-001](adr-001-detached-runs.md). All of this is fake-tested; the remote behaviour has no live e2e proof yet.
+
+### Reproducibility
+
+```bash
+golab env freeze -s train -o env.lock.json        # Python, pip freeze, GPU
+golab run train.py --lockfile env.lock.json
+golab run notebook.ipynb -p EPOCHS=3 --params-file params.json
+golab run train.py --bundle --out run.json
+golab bundle record --out run.json --file train.py --file data.csv --env KEY=VALUE
+golab bundle verify run.json --files-root .
+golab bundle verify run.json --env              # re-check in a FRESH VM
+```
+
+`env freeze -s NAME -o FILE` records the session's Python version, `pip freeze` output and GPU into a deterministic lockfile. `run --lockfile` verifies and installs it before the script runs. `-p` / `--params-file` set notebook parameters. `bundle record` writes a deterministic manifest of local inputs; `bundle verify` without `--env` checks **recorded metadata only** (and re-hashes local files when `--files-root` is given). `--env` actually allocates a fresh VM and re-checks the environment there — that is the only form that executes anything. No VM is allocated by `record` or metadata-only `verify`.
 
 ## 3. Files
 
@@ -186,6 +286,33 @@ golab edit -s train content/notes.txt
 - `download` writes to a private temporary file in the destination directory and renames it into place, so an interrupted transfer cannot leave a partial file. Directories require `-r` / `--recursive`.
 - `edit` downloads to a private temp file (keeping the remote extension), opens `$VISUAL`, then `$EDITOR`, or a platform default (`notepad` on Windows, `nano` on Termux, `vi` elsewhere), compares SHA-256 before and after, and uploads only if the file actually changed. Only a 404 is treated as "new file"; any other download error aborts rather than risking overwriting the remote file with an empty buffer.
 - These operations record `file_operation` events in the session history.
+
+### VM inspection
+
+These commands read the running VM through server-side execution/polling; they do not mount a local filesystem or hold a WebSocket open.
+
+```bash
+golab ps -s train --json                     # alias: golab top
+golab cat -s train content/out.txt
+golab tail -s train content/train.log -n 50 -f --interval 2s
+golab grep -s train ERROR content/ -i --glob '*.log' --max-matches 50
+golab du -s train content/ --max-entries 100
+golab find -s train checkpoint --max-results 50
+golab fetch -s train https://example.com/data.zip content/data.zip \
+      --sha256 <hex> --timeout 600
+```
+
+| Command | Flags (beyond `-s`) |
+|---|---|
+| `ps` / `top` | `--json`, `--timeout` (idle seconds, default `20`). Processes, GPU, memory and disk snapshot. |
+| `cat REMOTE` | none; binary-safe. |
+| `tail REMOTE` | `-n`/`--lines` (default `10`), `-f`/`--follow`, `--interval` (default `2s`), `--timeout` (default `15`). |
+| `grep PATTERN PATH` | `-i`/`--ignore-case`, `--glob`, `--max-matches` (default `200`). |
+| `du PATH` | `--max-entries` (default `200`). |
+| `find NAME` | `--max-results` (default `200`); searches under remote `/content`. |
+| `fetch URL [DEST]` | `--sha256 HEX`, `--timeout` (seconds, default `600`); `wget` with a `curl` fallback. |
+
+`tail -f` polls server-side with a byte offset; it is **not byte-perfect across log rotation** — a truncated or replaced file can skip early lines or re-read unrelated bytes. Treat it as a live tail for observing new output, not as a complete log archive. `fetch --sha256` verifies the downloaded bytes against the expected digest. All output is sanitised before it reaches the terminal.
 
 ## 4. Remote access: `ssh`
 
@@ -243,6 +370,7 @@ Both `auth` and `drivemount` are interactive flows that still need a human live 
 | Command | What it does |
 |---|---|
 | `golab usage` | Print compute-unit balance, hourly rate and active assignments. |
+| `golab cost [--since DURATION] [--json]` | Report observed compute-unit samples (CU only, no prices) from a private local ledger fed by `GET /tun/m/ccu-info`; account-level, not per-session. `--since` defaults to `24h`. |
 | `golab url -s train [--host URL] [--open]` | Print the browser URL that connects to a session; `--open` also launches it via `termux-open-url`, `wslview`, `xdg-open`, `open` or `rundll32`. |
 | `golab log -s train [-n 20] [-t execution] [-o report.md]` | View history. `-o` chooses the exporter by extension: `.ipynb`, `.md`, `.txt` or `.jsonl`. |
 | `golab pay` | Open the Colab compute-unit sign-up page. |
@@ -251,7 +379,7 @@ Both `auth` and `drivemount` are interactive flows that still need a human live 
 | `golab help [COMMAND]` | Help for a command; unknown names exit 2. |
 | `golab completion bash\|zsh\|fish\|powershell` | Generate shell completion scripts. |
 | `golab version` | `golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)`. |
-| `golab update [--install]` | Check GitHub Releases; with `--install`, verify checksums, cosign signature and signed SBOM before replacing the binary. |
+| `golab update [--install] [--verify-only PATH]` | Check GitHub Releases; with `--install`, verify checksums, cosign signature and signed SBOM before replacing the binary. `--verify-only PATH` verifies a **local** artifact (checksum + cosign + SBOM; `--checksums`, `--signature`, `--sbom` override the sibling defaults) without installing anything. |
 | `golab logout` | Clear the local OAuth token, cached proxy tokens and capability probes so you can switch accounts. Under `--auth=adc`, print `gcloud auth application-default revoke` guidance instead. |
 | `golab test-public-api` | *(hidden)* Probe Public and Tunnel API reachability and cache the result. |
 
@@ -261,11 +389,13 @@ These are additive commands with no Python counterpart:
 
 | Command | What it does |
 |---|---|
-| `golab doctor [--live] [--json] [--section SECTION] [--timeout D] [--fixtures DIR]` | GET-only, redacting connectivity and configuration probe. `--live` additionally requires `GOLAB_LIVE_PROBES=1` and is disabled when `LIVE_E2E_ENABLED=false`. Sections: `config`, `auth`, `api`, `update`, `wire`. |
+| `golab doctor [--live] [--json] [--section SECTION] [--timeout D] [--fixtures DIR] [--fix [--apply]]` | GET-only, redacting connectivity and configuration probe. `--live` additionally requires `GOLAB_LIVE_PROBES=1` and is disabled when `LIVE_E2E_ENABLED=false`. Sections: `config`, `auth`, `api`, `update`, `wire`. `--fix` plans exact local remediations; it is **dry-run by default and makes no network call**. `--apply` applies only the safe, reversible fixes it identifies (never deletes files or widens permissions). |
 | `golab audit [--json]` | Local-only report on token-store tier, file modes, API capability cache and update verification; no request is made and no credential value is printed. |
 | `golab budget [--profile F] [--profile-name N] [--max-balance N] [--max-hourly N] [--enforce] [--json]` | Advisory compute-unit decision from `GET /tun/m/ccu-info`; never allocates. Without a profile it reports the current usage. `--max-balance` is a minimum reserve floor (deny at or below); `--max-hourly` is a rate ceiling (deny at or above). |
-| `golab bundle record --out F --file P [--env K=V …]` / `golab bundle verify MANIFEST [--files-root DIR]` | Create and verify a deterministic provenance manifest of local inputs; fully offline. |
-| `golab sync LOCAL REMOTE [-s NAME] [--direction up\|down\|both] [--apply] [--delete] [--diff] [--include-outputs]` | One-shot directory sync with conflict detection. Dry-run is the default; `--apply` writes. Conflicts fail without changing anything. `--diff` compares two notebooks with volatile metadata and outputs stripped. |
+| `golab bundle record [--out F] [--file P …] [--env K=V …] [--root DIR] [--shape S] [--variant V] [--accelerator A]` / `golab bundle verify MANIFEST [--files-root DIR] [--env]` | Create and verify a deterministic provenance manifest of local inputs. Verify is metadata-only unless `--env` is given, which allocates a fresh VM to re-check the recorded environment. |
+| `golab sync LOCAL REMOTE [-s NAME] [--direction up\|down\|both] [--apply] [--delete] [--diff] [--include-outputs] [--watch] [--interval D] [--iterations N]` | One-shot directory sync with conflict detection. Dry-run is the default; `--apply` writes. Conflicts fail without changing anything. `--diff` compares two notebooks with volatile metadata and outputs stripped. `--watch` re-runs sync with bounded polling (no fsnotify). |
+| `golab compat report [--json]` | Compare the live command tree against an **embedded self-snapshot** baked into this binary. It performs no network I/O and is not a comparison with the Python CLI or a live upstream release; the report labels the snapshot kind and source. |
+| `golab trace -- <command> [args] [-o FILE] [--unsafe-bodies]` | Wrap a command and append a redacted wire trace as NDJSON. Headers and **query values are never written**; only query *keys*, body shape and a SHA-256 hash are recorded. `--unsafe-bodies` additionally includes redacted JSON bodies and labels those events `UNSAFE` — review the file before sharing it. |
 | `golab agentout [--format text\|json\|ndjson] [--type info\|output\|error] [text …]` | Emit one typed structured-output event; handy for testing a schema pipeline without a VM. |
 
 ## 7. Structured output, plans and confirmations
@@ -331,6 +461,9 @@ TTY behaviour matters in exactly three places: `exec` with no input errors when 
 | `COLAB_OUTPUT` | `text` | Default for `--output`. |
 | `COLAB_ASSUME_YES` | unset | Default for `--yes`. |
 | `GOLAB_BUDGET_PROFILE` | `default` | Named `golab.yaml` profile used by the budget guard on `new`/`run`/`ssh`; the persistent `--budget-profile` flag overrides it. |
+| `GOLAB_SESSION` | unset | Default session name, between an explicit `-s` and the `golab use` setting in resolution order (`-s` > env > default > unique). |
+| `GOLAB_TRACE` | unset | Path to an NDJSON wire trace; any command appends redacted events when this is set. `trace -- <cmd>` passes the same configuration without mutating the process environment. |
+| `GOLAB_TRACE_UNSAFE_BODIES` | unset | `1`/`true`/`yes`/`on` adds redacted JSON bodies to the trace; every such event is labelled `UNSAFE`. Never share an unsafe trace unreviewed. |
 | `COLAB_CONFIG_DIR` | OS-specific | Override the `colab-cli` configuration directory. |
 | `COLAB_SESSIONS_FILE` | `<config dir>/sessions.json` | Override the session-state file. |
 | `COLAB_CLI_REQUEST_TIMEOUT` | `60` (seconds) | Per-request timeout, clamped to `[1, 86400]`. |
@@ -393,4 +526,19 @@ golab stop --all
 golab audit --json                           # credential/file-mode report, offline
 ```
 
-All stdout in that pipeline is `golab/1` JSON; `[colab] …` progress stays on stderr, so `jq`, a log shipper or an agent can consume the stream without filtering chatter.
+### Spend-safe batch run
+
+```bash
+golab reap --dry-run                          # inspect orphans before doing anything
+golab new -s batch --ttl 2h --ttl-action warn
+golab run validate.py --max-cu 10 --enforce   # guarded foreground run
+golab run --detach --ttl 1h train.py          # remote child; no local monitor
+golab jobs                                    # find the detached run ID
+golab logs <ID> -f --interval 2s --max 30
+golab stop -s batch                           # the VM does NOT stop itself at TTL
+golab sessions                                # should be empty
+```
+
+`cost` can be consulted at any time for the account-level CU history; `wait --for ready --timeout 120` is a bounded readiness check that allocates nothing.
+
+All stdout in the JSON pipeline above is `golab/1` JSON; `[colab] …` progress stays on stderr, so `jq`, a log shipper or an agent can consume the stream without filtering chatter.
