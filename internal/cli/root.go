@@ -139,6 +139,11 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 			// the root too so execute() can finalise the structured writer.
 			cmd.SetContext(ctx)
 			cmd.Root().SetContext(ctx)
+			// Tier 1 item 2: local-only session-expiry check on every
+			// invocation. --explain is a no-network dry run, so skip it there.
+			if !explainRequested(cmd) {
+				checkExpiredSessions(ctx, d)
+			}
 			return nil
 		},
 	}

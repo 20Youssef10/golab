@@ -94,7 +94,8 @@ func guardBudgetWithPolicy(ctx context.Context, d *app.Deps, policy budget.Polic
 	if err != nil {
 		return budgetUsageUnavailable(policy, err)
 	}
-	usage, err := client.Usage(ctx)
+	// Tier 1 item 3: every ccu-info fetch is sampled into the private ledger.
+	usage, err := sampleCCU(ctx, d, client, "guard")
 	if err != nil {
 		return budgetUsageUnavailable(policy, err)
 	}

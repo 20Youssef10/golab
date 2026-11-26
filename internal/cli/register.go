@@ -30,4 +30,5 @@ func registerCommands(root *cobra.Command) {
 	RegisterTraceCommands(root)
 	RegisterCompatCommands(root)
 	RegisterStateCommands(root)
+	RegisterTier1Commands(root) // Tier 1 spend-safety commands (additive hook).
 }

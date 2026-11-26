@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -24,6 +25,9 @@ type runtimeOptions struct {
 	variant     colabapi.Variant
 	accelerator colabapi.Accelerator
 	shape       colabapi.Shape
+	// Tier 1 items 2/5: additive TTL metadata and the capacity wait bound.
+	ExpiresAt *time.Time
+	TTLAction string
 }
 
 // resolveRuntimeOptions validates GPU/TPU flags *before* any network call.
@@ -118,6 +122,9 @@ func createSession(ctx context.Context, d *app.Deps, name string, opts runtimeOp
 		Token: res.RuntimeProxyInfo.Token, TokenExpiresAt: &expiry,
 		Variant: string(opts.variant), Accelerator: string(opts.accelerator),
 		MachineShape: opts.shape.String(),
+		// Tier 1 item 2: persisted before the record is written so an expiry
+		// check can never race with a session that exists without a TTL.
+		ExpiresAt: opts.ExpiresAt, TTLAction: opts.TTLAction,
 	}
 	if err := d.Store.Put(s); err != nil {
 		// Assign already created a billable runtime. Release it before
@@ -156,6 +163,9 @@ func mapAssignFailure(err error, opts runtimeOptions) error {
 func newSessionCommand() *cobra.Command {
 	var name, gpu, tpu string
 	var highMem bool
+	// Tier 1 items 2 and 5: TTL and bounded capacity wait.
+	var ttl, waitCapacity time.Duration
+	var ttlAction string
 	cmd := &cobra.Command{
 		Use:   "new",
 		Short: "Create a new session",
@@ -168,6 +178,21 @@ func newSessionCommand() *cobra.Command {
 			opts, err := resolveRuntimeOptions(gpu, tpu, highMem)
 			if err != nil {
 				return err
+			}
+			// Tier 1 item 2: validate before any allocation; a bad TTL value
+			// must never cost a runtime.
+			if ttl < 0 || (cmd.Flags().Changed("ttl") && ttl == 0) {
+				return usagef("[colab] --ttl must be a positive duration.")
+			}
+			opts.TTLAction, err = parseTTLAction(ttlAction)
+			if err != nil {
+				return err
+			}
+			if ttl > 0 {
+				opts.ExpiresAt = ttlExpiry(ttl)
+			}
+			if waitCapacity < 0 {
+				return usagef("[colab] --wait-capacity must not be negative.")
 			}
 			if name == "" {
 				name = randomName("")
@@ -188,7 +213,8 @@ func newSessionCommand() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(d.Stderr, "[colab] Creating session '%s'...\n", name)
-			if _, err := createSession(cmd.Context(), d, name, opts); err != nil {
+			// Tier 1 item 5: bounded retry on capacity refusal only.
+			if _, err := createSessionWithCapacityWait(cmd.Context(), d, name, opts, waitCapacity); err != nil {
 				return mapAssignFailure(err, opts)
 			}
 			fmt.Fprintln(d.Stderr, "[colab] Session READY.")
@@ -199,6 +225,10 @@ func newSessionCommand() *cobra.Command {
 	cmd.Flags().StringVar(&gpu, "gpu", "", "GPU accelerator variant (T4, L4, G4, H100, A100)")
 	cmd.Flags().StringVar(&tpu, "tpu", "", "TPU accelerator variant (V5E1, V6E1)")
 	cmd.Flags().BoolVar(&highMem, "high-mem", false, "Request a high-RAM machine shape")
+	// Tier 1 items 2 and 5 (surgical additions; keep this block together).
+	cmd.Flags().DurationVar(&ttl, "ttl", 0, "Local session lifetime (e.g. 2h); checked on every invocation")
+	cmd.Flags().StringVar(&ttlAction, "ttl-action", ttlActionWarn, "On expiry: warn (default) or stop")
+	cmd.Flags().DurationVar(&waitCapacity, "wait-capacity", 0, "Retry capacity refusals for at most this duration")
 	return cmd
 }
 

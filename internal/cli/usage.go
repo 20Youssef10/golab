@@ -17,7 +17,8 @@ func usageCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := client.Usage(cmd.Context())
+			// Tier 1 item 3: sample ccu-info into the private CU ledger.
+			result, err := sampleCCU(cmd.Context(), d, client, "usage")
 			if err != nil {
 				// A failed ccu-info fetch is a recoverable advisory, not a command
 				// failure: keep the [colab] diagnostic on stderr but exit 0 so it

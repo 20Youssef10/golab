@@ -42,7 +42,8 @@ func NewBudgetCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			consumption, err := client.Usage(cmd.Context())
+			// Tier 1 item 3: sample ccu-info into the private CU ledger.
+			consumption, err := sampleCCU(cmd.Context(), d, client, "budget")
 			if err == nil {
 				usage = consumption
 			}

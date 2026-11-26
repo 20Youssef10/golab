@@ -71,6 +71,11 @@ type Session struct {
 	LastExecution  *LastExecution    `json:"last_execution,omitempty"`
 	Running        *string           `json:"running,omitempty"`
 	Pending        *PendingExecution `json:"pending,omitempty"`
+
+	// Tier 1 item 2: optional local session lifetime and its expiry action.
+	// Additive and omitempty so legacy sessions.json files stay valid.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	TTLAction string     `json:"ttl_action,omitempty"`
 }
 
 // Settings is the JSON schema of settings.json.

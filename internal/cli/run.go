@@ -223,6 +223,9 @@ func runCommand() *cobra.Command {
 	var paramsFlag []string
 	var paramsFileFlag, lockfile, bundleOut string
 	var bundleFlag bool
+	// Tier 1 item 4: in-run compute-unit ceiling (advisory unless --enforce).
+	var maxCU float64
+	var runEnforce bool
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a Python script on a fresh Colab VM, then release it",
@@ -349,12 +352,25 @@ func runCommand() *cobra.Command {
 				return mapAssignFailure(err, opts)
 			}
 			writeEvent(d, name, "session_created", map[string]any{"via": "run"})
+			// Tier 1 item 4: start the bounded in-run CU monitor after the
+			// billable runtime exists, so a breach can interrupt and stop it.
+			monCtx, cuMon, cuErr := startRunCUMonitor(ctx, d, cmd, maxCU, runEnforce)
+			if cuErr != nil {
+				return cuErr
+			}
+			if cuMon != nil {
+				ctx = monCtx
+				defer cuMon.Stop()
+			}
 			fmt.Fprintf(d.Stderr, "[colab] Session READY (%s). Executing %s...\n", name, script)
 
 			kernel, err := d.RuntimeFor(ctx, &s)
 			if err != nil {
 				if !keep {
-					teardown(ctx, d, name, s, "run_failed")
+					// A CU-breach cancellation must still release the runtime:
+					// cleanup runs on a detached context (already the case in
+					// the deferred teardown below).
+					teardown(context.Background(), d, name, s, "run_failed")
 				}
 				return pruneLost(d, name, err)
 			}
@@ -529,6 +545,9 @@ func runCommand() *cobra.Command {
 	cmd.Flags().StringVar(&lockfile, "lockfile", "", "Verify and install this environment lockfile before running")
 	cmd.Flags().BoolVar(&bundleFlag, "bundle", false, "Record a provenance manifest for this run")
 	cmd.Flags().StringVar(&bundleOut, "out", "", "Provenance manifest path for --bundle (default run.json)")
+	// Tier 1 item 4 (surgical additions; keep this block together).
+	cmd.Flags().Float64Var(&maxCU, "max-cu", 0, "Minimum compute-unit balance to maintain during the run (0 disables)")
+	cmd.Flags().BoolVar(&runEnforce, "enforce", false, "Interrupt and stop the run when --max-cu is breached")
 	// Unknown options after SCRIPT belong to the script, not to golab.
 	cmd.Flags().SetInterspersed(false)
 	return cmd
