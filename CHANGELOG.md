@@ -74,6 +74,16 @@ on-disk schema or persisted token format (per AGENTS.md).
   sync apply; the auto-update notice skips `--explain` and joins its async
   writer before exit.
 
+- Final gap-report fixes: `stop --all` now refuses to act without `--yes` when
+  stdin is not a TTY (matching the documented contract); `golab.yaml` is parsed
+  with strict `yaml.v3` (document markers, quoted/block scalars, flow maps,
+  duplicate and unknown keys all handled); the secret-redaction gate scans the
+  whole tree for more credential families; `filepath.Dir` replaces the hand-rolled
+  dirname; temporary rendered images (including REPL) are cleaned up; markdown
+  export emits valid fences; notebook multiline lists are validated; the audit
+  history-directory finding has its own ID; and two unused gosec exclusions were
+  removed. Batch 7's new security tests were made portable to Windows runners.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even
