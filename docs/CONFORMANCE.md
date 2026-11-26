@@ -252,10 +252,12 @@ WSL/Termux device execution remains an open L6 human-only proof (§6 item 7).
   in golab:** the full Public API lifecycle (LRO create/poll/delete, persisted
   `runtime_name`), `--public-api` / `--no-public-api`, `COLAB_CLI_PUBLIC_API`,
   hidden `test-public-api`, `logout`, WS reconnect/resume and bounded timeouts.
-  **Planned, not done here:** quota-project / re-consent diagnostics, migration
-  docs for the re-auth + quota-project prerequisite, and a web-session attach
-  command; there is no `init-gcp-project` helper or documented quota-project
-  prerequisite yet. **Not claimed:** golab does not claim upstream 1.0 support,
+  **Readiness landed later in the same round:** quota-project / re-consent
+  diagnostics in `doctor --section api` / `test-public-api` (local signals only,
+  no GCP mutation), migration docs for the re-auth + quota-project prerequisite,
+  and `golab attach --runtime NAME [--session NAME]` for browser-created runtimes.
+  There is deliberately no `init-gcp-project` helper — GCP provisioning and
+  browser consent stay human-controlled. **Not claimed:** golab does not claim upstream 1.0 support,
   and the CLI default stays the tunnel API — `version.Upstream` remains
   `0.8.x+HEAD` and this ledger still targets 0.8.x+HEAD. No default flip or 1.0
   support claim without live proof; tunnel shutdown would remove the opt-out, so

@@ -114,20 +114,23 @@ passed both seeds. Coverage gate misses the 80% target for `state`/`sshx`
 server restart and is not claimed. Fake-kernel tests cover all six fixes; a
 live re-run of the fixed cases follows this commit.
 
-### Planned
+### Added
 
 - Upstream `googlecolab/google-colab-cli` issue #289 (reviewed 2026-11-26, tracked
   in [CONFORMANCE.md](docs/CONFORMANCE.md)): the planned 1.0 release candidate
   switches the control plane to Colab's Public API and requires users to re-run
-  `colab auth` and set a GCP quota project. golab already implements the full
-  Public API lifecycle, `--public-api` / `--no-public-api` / `COLAB_CLI_PUBLIC_API`,
-  hidden `test-public-api`, `logout`, WS reconnect/resume and bounded timeouts,
-  but the CLI default is still the tunnel API and no 1.0 support is claimed.
-  Planned: quota-project / re-consent diagnostics, migration docs and a
-  web-session attach command; no `init-gcp-project` helper or documented
-  quota-project prerequisite exists yet. The default stays the tunnel API
-  (`version.Upstream` = `0.8.x+HEAD`) until live proof; note the tunnel API may be
-  turned down soon, removing the `--no-public-api` / 0.8.0 opt-out.
+  auth and set a GCP quota project. In readiness, `golab doctor --section api`
+  and hidden `golab test-public-api` now report quota-project/re-consent
+  prerequisites from local signals only (no GCP mutation), migration docs cover
+  the public-API switch, and a new `golab attach --runtime NAME [--session NAME]`
+  records browser-created runtimes as local sessions (Public API required, zero
+  allocation POSTs). golab already had the full Public API lifecycle, both
+  control-plane flags, `logout`, WS reconnect/resume and bounded timeouts.
+  Deliberately NOT done: no `init-gcp-project` helper (GCP provisioning stays
+  human-controlled), no default flip, and no upstream 1.0 support claim —
+  `version.Upstream` remains `0.8.x+HEAD` and the CLI default stays the tunnel
+  API until live proof. The tunnel API may be turned down soon, removing the
+  `--no-public-api` / 0.8.0 opt-out.
 
 ## [0.2.0] - 2026-11-24
 
