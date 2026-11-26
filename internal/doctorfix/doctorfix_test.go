@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -123,11 +124,29 @@ func TestApplyOnlySafeReversibleOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.chmods) != 2 || rec.chmods[0] != cfg.ConfigDir || rec.chmods[1] != cfg.SessionsPath {
+	if goruntime.GOOS == "windows" {
+		// Windows reports loose modes (0666) for every writable file, so
+		// Inspect legitimately plans chmods for all four files there. Assert
+		// that no unrelated path is touched rather than the Unix target set.
+		allowed := map[string]bool{
+			cfg.ConfigDir: true, cfg.SessionsPath: true, cfg.SettingsPath: true,
+			cfg.OAuthTokenPath: true, cfg.LegacyTokenPath: true,
+		}
+		for _, p := range rec.chmods {
+			if !allowed[p] {
+				t.Fatalf("chmod touched unrelated path %q: %v", p, rec.chmods)
+			}
+		}
+	} else if len(rec.chmods) != 2 || rec.chmods[0] != cfg.ConfigDir || rec.chmods[1] != cfg.SessionsPath {
 		t.Fatalf("chmod targets = %v", rec.chmods)
 	}
 	if len(rec.renames) != 2 {
 		t.Fatalf("renames = %v", rec.renames)
+	}
+	for _, r := range rec.renames {
+		if !strings.HasSuffix(r[1], ".stale") && !strings.HasSuffix(r[1], ".golab-backup") {
+			t.Fatalf("non-reversible rename: %v", r)
+		}
 	}
 	for _, r := range results {
 		if r.Status != "applied" {

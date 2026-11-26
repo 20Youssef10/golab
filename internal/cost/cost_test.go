@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,10 @@ func TestLedgerAppendIsPrivateJSONL(t *testing.T) {
 
 	fi, err := os.Stat(path)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	// Windows reports 0666 for writable files; ACLs are the real control.
+	if goruntime.GOOS != "windows" {
+		require.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	}
 
 	samples, err := Read(path)
 	require.NoError(t, err)

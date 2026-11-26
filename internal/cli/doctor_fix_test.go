@@ -6,6 +6,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,11 @@ func TestDoctorFixDryRunAndApplyBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	before, err := os.ReadFile(sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	if code := runNewCommand(t, h, "doctor", "--fix"); code != 0 {
 		t.Fatalf("dry-run exit = %d, stderr = %s", code, h.stderr.String())
 	}
@@ -44,7 +50,14 @@ func TestDoctorFixDryRunAndApplyBounds(t *testing.T) {
 	if !strings.Contains(out, "mv "+legacy+" "+legacy+".golab-backup") {
 		t.Fatalf("legacy remediation missing: %s", out)
 	}
-	if fi, err := os.Stat(sessions); err != nil || fi.Mode().Perm() != 0o644 {
+	after, err := os.ReadFile(sessions)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("dry run changed sessions.json content: %q -> %q (%v)", before, after, err)
+	}
+	// Windows reports 0666 for every writable file, so chmod is not observable
+	// there; keep the exact Unix assertion and check content on Windows.
+	if fi, err := os.Stat(sessions); err != nil ||
+		(goruntime.GOOS != "windows" && fi.Mode().Perm() != 0o644) {
 		t.Fatalf("dry run changed mode: %v %v", fi, err)
 	}
 	if _, err := os.Stat(legacy); err != nil {
@@ -54,7 +67,11 @@ func TestDoctorFixDryRunAndApplyBounds(t *testing.T) {
 	if code := runNewCommand(t, h, "doctor", "--fix", "--apply"); code != 0 {
 		t.Fatalf("apply exit = %d, stderr = %s", code, h.stderr.String())
 	}
-	if fi, err := os.Stat(sessions); err != nil || fi.Mode().Perm() != 0o600 {
+	if applied, err := os.ReadFile(sessions); err != nil || string(applied) != string(before) {
+		t.Fatalf("apply changed sessions.json content: %q -> %q (%v)", before, applied, err)
+	}
+	if fi, err := os.Stat(sessions); err != nil ||
+		(goruntime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("apply did not narrow mode: %v %v", fi, err)
 	}
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {

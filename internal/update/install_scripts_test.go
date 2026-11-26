@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,14 @@ func TestInstallScriptVerificationGate(t *testing.T) {
 	}
 	if strings.Contains(s, "curl -fsSL") && strings.Contains(s, "| bash") {
 		t.Fatal("install.sh fetches and runs unverified content")
+	}
+	if runtime.GOOS == "windows" {
+		// install.sh is a Unix installer: its own OS switch says "use
+		// install.ps1 on Windows". Git Bash's CRLF handling and sha256sum
+		// output differ from Unix, so the shell-level checksum/cosign gate
+		// is exercised on Unix runners only. The static policy assertions
+		// above and TestPowerShellInstallScriptPolicy still run everywhere.
+		t.Skip("install.sh --verify-only requires a Unix shell")
 	}
 
 	dir := t.TempDir()

@@ -41,12 +41,30 @@ func reapFixture(t *testing.T) (*testHarness, state.Session, time.Time) {
 	require.NoError(t, h.deps.Store.Put(s))
 
 	// A stale local record points at nothing on the server.
-	old := time.Now().UTC().Add(-3 * time.Hour)
+	old := time.Now().Add(-3 * time.Hour)
 	require.NoError(t, h.deps.Store.Put(state.Session{
 		Name: "stale", Endpoint: "gone-endpoint",
-		LastExecution: &state.LastExecution{Kind: "run", At: old.Format("2006-01-02 15:04:05")},
+		LastExecution: &state.LastExecution{Kind: "run", At: reapWallClock(t, 3*time.Hour)},
 	}))
 	return h, s, old
+}
+
+// reapWallClock formats a last_execution timestamp that reapRecordTime reads
+// as exactly `ago` before now. Production intentionally takes the later of the
+// local and UTC interpretations of a timezone-less wall clock; on runners with
+// a negative UTC offset (observed on windows-11-arm) a naive UTC string is
+// read as a future time, so a genuinely stale record is never pruned. This
+// helper compensates for that offset, keeping the 2h threshold test identical
+// on every platform without weakening the "never prune recent records" rule.
+func reapWallClock(t *testing.T, ago time.Duration) string {
+	t.Helper()
+	now := time.Now()
+	_, offset := now.In(time.Local).Zone()
+	wall := now.UTC().Add(-ago)
+	if offset < 0 {
+		wall = wall.Add(time.Duration(offset) * time.Second)
+	}
+	return wall.Format("2006-01-02 15:04:05")
 }
 
 func mustNBH(t *testing.T) colabapi.NotebookHash {
@@ -120,10 +138,9 @@ func TestReapOlderThanSkipsRecentLocalRecords(t *testing.T) {
 	h, _, _ := reapFixture(t)
 	// Default --older-than 2h: the 3h-old stale record is pruned. A 30m-old
 	// stale record must be left alone even though it has no assignment.
-	recent := time.Now().UTC().Add(-30 * time.Minute)
 	require.NoError(t, h.deps.Store.Put(state.Session{
 		Name: "recent", Endpoint: "recent-gone",
-		LastExecution: &state.LastExecution{Kind: "run", At: recent.Format("2006-01-02 15:04:05")},
+		LastExecution: &state.LastExecution{Kind: "run", At: reapWallClock(t, 30*time.Minute)},
 	}))
 
 	code := h.run(t, "", "reap", "--yes")

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -122,7 +123,8 @@ func TestRecorderRedactionNeverEmitsCanaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if fi.Mode().Perm() != 0o600 {
+		// Windows reports 0666 for writable files; ACLs are the real control.
+		if goruntime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 			t.Fatalf("trace mode = %04o, want 0600", fi.Mode().Perm())
 		}
 	}

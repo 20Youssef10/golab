@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -107,7 +108,8 @@ func TestEnvFreezeIsDeterministicAndRedacted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows reports 0666 for writable files; ACLs carry owner-only access.
+	if goruntime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("lockfile mode = %o, want 600", info.Mode().Perm())
 	}
 }

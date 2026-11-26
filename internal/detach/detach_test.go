@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,8 @@ func TestManifestRoundTripAndCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(p)
-	if err != nil || info.Mode().Perm()&0o077 != 0 {
+	// Windows reports 0666 for writable files; privacy comes from NTFS ACLs.
+	if err != nil || (goruntime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
 		t.Fatalf("manifest must be 0600, got %v / %v", info, err)
 	}
 	got, err := LoadManifest(p)

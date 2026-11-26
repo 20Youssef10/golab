@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -24,7 +25,9 @@ func TestInitScaffoldsValidBudgetProfile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s not created: %v", name, err)
 		}
-		if info.Mode().Perm() != 0o600 {
+		// Windows reports 0666 for writable files; NTFS ACLs are the real
+		// owner-only control there. Keep the exact assertion on Unix.
+		if goruntime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 			t.Fatalf("%s mode = %04o, want 0600", name, info.Mode().Perm())
 		}
 	}
