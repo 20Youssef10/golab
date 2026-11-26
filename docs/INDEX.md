@@ -1,8 +1,10 @@
 # golab documentation index
 
-> **Implementation status of this pack: 2026-11-23 (v0.1.0).** The notes added at
-> the top of docs 01–04 and 07 record what the code actually does at this release.
-> Where a design doc and the code disagree, **the code wins** (AGENTS.md).
+> **Current release: v0.2.0 (2026-11-24).** The dated notes at the top of docs
+> 01–04 and 07 were written for v0.1.0 (2026-11-23) and are not an up-to-date
+> account of v0.2.0; for that, read [CHANGELOG.md](../CHANGELOG.md) and
+> [CONFORMANCE.md](CONFORMANCE.md). Where a design doc and the code disagree,
+> **the code wins** (AGENTS.md).
 
 ## Project in one paragraph
 
@@ -16,18 +18,30 @@ unsigned self-update) and adding Go-only commands (`doctor`, `audit`, `budget`,
 `bundle`, `sync`, `agentout`). There is no daemon: each command authenticates,
 does one job and exits.
 
-**Compatibility target:** `googlecolab/google-colab-cli` **0.8.x**, re-checked
-against live upstream HEAD `0abf82d` (v0.8.0 + 5 commits) on 2026-11-23.
+**Compatibility target:** `googlecolab/google-colab-cli` **0.8.x+HEAD**, re-checked
+against upstream HEAD `0abf82d` (v0.8.0 + 5 commits) on 2026-11-23.
 Module path: `github.com/20Youssef10/golab`; binary: `golab`; Go 1.27.4 with
 `CGO_ENABLED=0`. See [COMPAT.md](COMPAT.md) for the exact drift status and
-[CHANGELOG.md](../CHANGELOG.md) for what shipped in v0.1.0.
+[CHANGELOG.md](../CHANGELOG.md) for what shipped in v0.2.0.
 
-> ⚠️ **Known unverified — read before trusting any "done" claim.** No live Colab
-> e2e has been run. Wire details still marked 🔴 in
-> [02-protocol-spec.md](02-protocol-spec.md) §7 and the human-only checklist in
-> [**AUDIT-INDEX.md §5**](AUDIT-INDEX.md) are *not* proved by fake-server tests.
-> The honest layer-by-layer ledger is [CONFORMANCE.md](CONFORMANCE.md).
-> "Fakes are necessary, not sufficient" (AGENTS.md #3).
+> ⚠️ **Proof status — read before trusting any "done" claim.** A billable CPU-VM
+> live e2e *has* been run for v0.2.0 (v0.2.0 Verification in
+> [CHANGELOG.md](../CHANGELOG.md)): `new`, `status`, `ls`, `exec`
+> (text/JSON/secrets), `run` (script and notebook), `ssh`, piped `repl`,
+> upload/download, `install`, `restart-kernel`, `log`, `stop --verify` and
+> `resume` error paths, ending with an empty `golab sessions`. Release run
+> `45489842618` published 13 archives with signatures and SBOMs, and a signed
+> `v0.1.9` → `v0.2.0` self-update was proven. The full CI matrix is green,
+> `golangci-lint` reports 0 issues and `govulncheck` is clean; across 664
+> test/fuzz functions in 103 `_test.go` files (25 packages, 23 with tests),
+> total statement coverage is 75.8% — above the 70% CI floor, short of the 80%
+> target. This is one machine class, not blanket certification: OAuth
+> re-consent, Drive browser approval, interactive-TTY `repl`/`ssh`, real
+> Windows/Termux devices and induced WS-drop recovery remain human-only, and
+> wire details still marked 🔴 in [02-protocol-spec.md](02-protocol-spec.md) §7
+> and the checklist in [**AUDIT-INDEX.md §5**](AUDIT-INDEX.md) are *not* proved
+> by fake-server tests. [CONFORMANCE.md](CONFORMANCE.md) is the per-layer ledger
+> but is still dated 2026-11-23 and does not yet record this live pass.
 
 ## Track 1 — Users (install, use, switch)
 
@@ -50,10 +64,10 @@ Optional follow-ups: [COMPAT.md](COMPAT.md) (exact upstream drift) and
 4. [07-testing-and-conformance.md](07-testing-and-conformance.md) — test layers
    and how to port an upstream test.
 5. [AUDIT-INDEX.md](AUDIT-INDEX.md) — the findings the code was remediated against.
-6. [REMEDIATION.md](REMEDIATION.md) — v0.1.0 finding-by-finding status and the
-   remaining human-only checks.
+6. [REMEDIATION.md](REMEDIATION.md) — the v0.1.0 finding-by-finding tracker and
+   its remaining human-only checks; v0.2.0 changes are in CHANGELOG.md.
 
-Companions: [CONFORMANCE.md](CONFORMANCE.md) (current test/coverage ledger),
+Companions: [CONFORMANCE.md](CONFORMANCE.md) (per-layer ledger, dated 2026-11-23),
 [05-command-parity.md](05-command-parity.md) (command surface),
 [06-roadmap.md](06-roadmap.md) (sequencing).
 
@@ -71,6 +85,7 @@ Companions: [CONFORMANCE.md](CONFORMANCE.md) (current test/coverage ledger),
    [AUDIT-02-protocol-security.md](AUDIT-02-protocol-security.md) — the live
    upstream snapshot and the unresolved 🔴 wire/security probes.
 
-Reminder: docs/01–08 are design documents. For what actually shipped at
-v0.1.0, start with the dated notes at the top of docs 01–04 and 07, then
-[COMPAT.md](COMPAT.md) and [CONFORMANCE.md](CONFORMANCE.md).
+Reminder: docs/01–08 are design documents whose dated notes describe v0.1.0.
+For what actually shipped at v0.2.0, start with [CHANGELOG.md](../CHANGELOG.md)
+and [README.md](../README.md), then [COMPAT.md](COMPAT.md) and
+[CONFORMANCE.md](CONFORMANCE.md).

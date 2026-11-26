@@ -12,11 +12,13 @@ This is a community port, not a Google product. “Google” and “Colab” are
 - **Safe to pipe.** Program output goes to stdout; every `[colab] …` status line goes to stderr. `golab exec < code.py`, `golab ssh -- CMD` and `--output json|ndjson` produce clean, byte-exact streams.
 - **Loud about failures.** Atomic state writes, corrupt-state aborts, explicit HTTP timeouts and typed errors instead of string matching.
 
-## Status (v0.1.0)
+## Status (v0.2.0)
 
-`v0.1.0` is released and is the first feature-complete port of the upstream command surface. Unit tests, race tests, lint, `govulncheck` and cross-builds are green.
+`v0.2.0` is published (release run `45489842618`: 13 archives with signatures and SBOMs). The full CI matrix is green, `golangci-lint` reports 0 issues and `govulncheck` is clean. The tree has 664 test/fuzz functions in 103 `_test.go` files across 25 packages (23 with tests), at 75.8% total statement coverage — above the CI floor of 70%, short of the 80% target (notably for `state`/`sshx`). A real signed self-update from `v0.1.9` → `v0.2.0` was verified and installed an executable binary.
 
-**What is not yet proven:** no live Colab virtual machine was allocated during implementation. Interactive auth/OAuth consent, interactive `repl`/`ssh`, Drive mounting, large (>75 MiB) uploads, signed-release verification against a real tag, and Termux/Windows device checks still require a human. These are tracked in [docs/REMEDIATION.md](docs/REMEDIATION.md); nothing here should be read as a claim of live end-to-end certification. See also [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
+**Live proof, with its limits.** A billable CPU-VM live e2e has been run (recorded in [CHANGELOG.md](CHANGELOG.md) under v0.2.0): `new`, `status`, `ls`, `exec` (text/JSON/secrets), `run` (script and notebook), `ssh`, piped `repl`, upload/download, `install`, `restart-kernel`, `log`, `stop --verify` and `resume` error paths; the final `golab sessions` was empty. That is a real end-to-end pass on one machine class — it is not certification of every platform, feature or failure mode.
+
+**Still human-only / not proven:** OAuth re-consent, Drive browser approval, interactive-TTY `repl`/`ssh`, real Windows and Termux devices, and induced WebSocket-drop recovery. These are tracked in [docs/REMEDIATION.md](docs/REMEDIATION.md) and the layered ledger in [docs/CONFORMANCE.md](docs/CONFORMANCE.md); nothing here should be read as blanket live certification.
 
 ## Install
 
@@ -55,10 +57,10 @@ With only one active session you can omit `-s`; `golab` selects it automatically
 
 | Area | Commands |
 |---|---|
-| Sessions | `new`, `sessions`, `status`, `stop`, `restart-kernel` |
-| Execution | `exec` (`-f`, `--env`, `--timeout`), `repl`, `run` |
+| Sessions | `new`, `sessions`, `status`, `stop` (`--all`, `--verify`), `restart-kernel` |
+| Execution | `exec` (`-f`, `--env`, `--timeout`, `--secret`, `--env-file`, `--json`), `repl`, `run` (script or `.ipynb`), `resume` (`--timeout`) |
 | Files | `ls`, `rm`, `upload` / `download` (`-r`), `edit` |
-| Remote access | `ssh` (`-- CMD`, `--proxy-mode`, `--rm`, `--force`) |
+| Remote access | `ssh` (`-- CMD`, `--proxy-mode`, `--rm`, `--force`, `--colab-internal-mode` [hidden/internal]) |
 | Automation | `install`, `drivemount`, `auth` (hidden) |
 | Account & info | `usage`, `url`, `log`, `pay`, `whoami` (hidden), `version`, `help`, `completion` |
 | Maintenance | `update`, `logout`, `readme`, `skill`, `test-public-api` (hidden) |
@@ -75,6 +77,7 @@ These flags work on every command (Cobra also provides `-h`/`--help`).
 | `-c`, `--client-oauth-config` | `~/.colab-cli-oauth-config.json` | — | Custom OAuth client JSON; a missing file falls back to the bundled client. |
 | `--config` | `<config dir>/sessions.json` | `COLAB_SESSIONS_FILE` | Alternate session-state file. |
 | `--auth` | `oauth2` | `COLAB_AUTH` | `oauth2` or `adc` (case-insensitive). |
+| `--scopes` | `full` | `COLAB_SCOPES` | `full` (default) or `minimal` OAuth scope set; `minimal` cannot mount Drive, and changing mode forces re-consent. |
 | `--public-api` / `--no-public-api` | tunnel API | `COLAB_CLI_PUBLIC_API` | Choose the control-plane path. |
 | `--output` | `text` | `COLAB_OUTPUT` | `text`, `json` or `ndjson`; diagnostics stay on stderr. |
 | `--explain` | off | — | Print a redacted dry-run plan for billable commands and exit. |
