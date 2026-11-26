@@ -4,7 +4,7 @@
 > **Status legend:** 🟢 read directly in source · 🟡 inferred or taken from library defaults · 🔴 must be confirmed by live capture in Phase 0 (doc 06, spike **S0**).
 > These endpoints are **undocumented and unstable**. Treat this file as a *conformance target*, never as a contract Google has published.
 
-> **Implementation status — 2026-11-23 (v0.1.0).** Fake-server conformance
+> **Implementation status — 2026-11-26 (v0.2.0).** Fake-server conformance
 > (`fakecolab` / `fakekernel` / `fakesshd`, doc 07 §3) has settled part of the
 > §7 🔴 checklist at the *harness* level, but fakes are not live proof:
 > - **Settled in code + fake-server tests:** §7.3 — no `kernel_info_request`
@@ -37,7 +37,7 @@
 | Colab session backend ("domain") | `https://colab.research.google.com` 🟢 |
 | Control-plane prefix | `/tun/m` 🟢 |
 | XSSI prefix | `)]}'\n` (strip if present) 🟢 |
-| Client-agent header | `X-Colab-Client-Agent: colab-cli` 🟢 (a Go build should send its **own** value, e.g. `colab-go/<ver>`; see doc 08 R-03) |
+| Client-agent header | `X-Colab-Client-Agent: colab-cli` 🟢 (a Go build should send its **own** value; golab sends the single honest identity `github.com/20Youssef10/golab/<ver>` on every plane; see doc 08 R-03 / audit S-3) |
 | XSRF header | `X-Goog-Colab-Token: <token>` 🟢 |
 | Proxy-token header | `X-Colab-Runtime-Proxy-Token: <token>` 🟢 |
 | Proxy-token query key | `colab-runtime-proxy-token` 🟢 |

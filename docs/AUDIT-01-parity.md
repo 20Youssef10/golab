@@ -113,7 +113,7 @@ counted as a gap unless a string differs beyond the `[colab]` prefix/stream.
 | 19 | `url` | `-s --host --open`; pipeable URL; `--open` opens browser | `internal/cli/utility.go:21-56` | PARTIAL | `--open` is a **no-op** (`utility.go:259-265`) | `utility.py:50-60,123-126`; `tests/test_url.py:213-232` |
 | 20 | `log` | `-s -n/--lines -t/--type -o/--output`; suffix picks exporter | `internal/cli/utility.go:58-147` | FULL | Header/no-history lines go to stderr (Δ1); `-n` default 0 vs upstream `None` (equivalent) | `utility.py:129-206`; `tests/test_cli_log.py:21-105` |
 | 21 | `pay` | no flags; print URL + `webbrowser.open` | `internal/cli/utility_extra.go:57-69` | FULL | — | `utility.py:25-31`; `tests/test_pay.py:21` |
-| 22 | `version` | no flags; `Version: <v>` | `internal/cli/utility.go:191-201`; `version/version.go:13-15` | DELIBERATE Δ | Prints `golab 0.0.1-dev (compatible with …)` | `utility.py:307-309`; `tests/test_version.py:24-55` |
+| 22 | `version` | no flags; `Version: <v>` | `internal/cli/utility.go:195-203`; `internal/version/version.go:7,17-19` | DELIBERATE Δ | Prints `golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)` | `utility.py:307-309`; `tests/test_version.py:24-55` |
 | 23 | `update [--install]` | PyPI check + pip/uv self-install | `internal/cli/update.go:19-110` | DELIBERATE Δ | Signed GitHub-Releases verification; different message strings; no pip/uv hint | `utility.py:312-345`; `tests/test_update.py:110-569` |
 | 24 | `whoami` (hidden) | no flags; tokeninfo identity/scopes/expiry | `internal/cli/utility_extra.go:193-208` | FULL | Error text omits tokeninfo body (security-motivated Δ) | `utility.py:209-304`; `tests/test_whoami.py:53-160` |
 | 25 | `test-public-api` (hidden, added `602462f`) | no flags; prints two `OK`/`FAILED` lines | `internal/cli/utility_extra.go:220-248` | FULL | — | `utility.py:390-400`; `tests/test_cli.py:728` |
@@ -212,7 +212,7 @@ it is a documented decision (Δ1 / DEC-07), not a bug.
 | Unknown accelerator | `unsupported value 'A10O'. Supported: T4, L4, G4, H100, A100.` (`session.py:56-67`; `tests/test_cli.py:121`) | `[colab] Invalid value for --gpu: unsupported value 'A10O'. Supported: …` (`session.go:70-71`) | P2 |
 | Unknown help command | `No such command 'nope'.` (`cli.py:157`) | `[colab] No such command 'nope'.` (`utility.go:216`) | P2 |
 | No sessions | `Create one with 'colab new'.` (`common.py:177,197`) | `Create one with 'golab new'.` (`app.go:298,306,313`) | P2 (or document) |
-| `version` | `Version: 0.2.0` (`tests/test_version.py:29`) | `golab 0.0.1-dev (compatible with …)` | Δ — accepted |
+| `version` | `Version: 0.2.0` (`tests/test_version.py:29`) | `golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)` | Δ — accepted (different prefix/format, current version) |
 | `update` up-to-date | `Colab CLI is up to date (version: 1.0.0)` (`tests/test_update.py:261`) | `[colab] Colab CLI is up to date (version: …).` (`update.go:43`) | Δ — accepted |
 | `update` upgrade | `available: 1.1.0 (current: 1.0.0)` + `You can run 'colab update --install' …` + pip/uv hint (`tests/test_update.py:131-133`) | `Run 'golab update --install' …`, no pip/uv hint (`update.go:45-46`) | Δ — accepted |
 | `whoami` tokeninfo error | `tokeninfo returned HTTP 400: {body}` (`utility.py:272-275`, `tests/test_whoami.py:94`) | `whoami: tokeninfo returned HTTP 400.` (`utility_extra.go:153`) | Δ — security-motivated |

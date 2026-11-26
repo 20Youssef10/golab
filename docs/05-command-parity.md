@@ -1,13 +1,14 @@
 # 05 · Command Parity Matrix
 
-> **Implementation note (2026-11-23):** all commands listed below are implemented
+> **Implementation note (2026-11-26, v0.2.0):** all commands listed below are implemented
 > in `internal/cli` and exercised against the fake control plane / kernel / sshd.
 > Upstream HEAD additions (`stop --all`, `--public-api/--no-public-api`,
 > `test-public-api`) are included, as is `ssh --force` (upstream `cda02bc`) and
 > the community PR features `logout` and `upload/download -r`. New Go-only
 > commands (`doctor`, `audit`, `budget`, `bundle`, `sync`, `agentout`) are
-> additive. Live e2e against a real billable VM has **not** been run and requires
-> a human; see `docs/REMEDIATION.md` for the v0.1.0 status.
+> additive. A billable-VM live e2e pass is recorded in `CHANGELOG.md` `[0.2.0]`
+> Verification; the remaining human-gated items are listed in
+> `docs/REMEDIATION.md` (v0.2.0 status).
 
 > Flags and defaults below were extracted programmatically (AST) from `src/colab_cli/commands/*.py` at upstream `v0.8.0+2`. Exact message strings are **not** reproduced here: harvest them from `tests/` into golden files (doc 07 §Golden outputs) so they cannot drift.
 > **Priority:** P0 = MVP (Phase 1–2) · P1 = parity-complete (Phase 3) · P2 = nice-to-have.
@@ -29,13 +30,13 @@ Auto-update background check runs for every command **except** `update version l
 ## Session management
 | Command | Flags / args | Behaviour to match | Go notes | Pri |
 |---|---|---|---|---|
-| `new` | `-s NAME`, `--gpu {t4,l4,g4,a100,h100}`, `--tpu {v5e1,v6e1}`, `--high-mem` | validate accelerator **before** any network call; generate `nbh` UUID; assign (C1→C2) with retry/reconcile; persist session (token, url, endpoint, expiry, variant, accelerator, shape); log `session_created`; friendly 412/400 messages; **`--tpu` silently wins if both `--tpu` and `--gpu` are given** (no error upstream); default name = first 6 hex chars of a random UUID; `--high-mem` for L4/V5E1/V6E1 prints a notice to stderr and is ignored | accelerator tables are case-insensitive; Δ consider erroring on `--gpu`+`--tpu` (DEC-08) | P0 |
+| `new` | `-s NAME`, `--gpu {t4,l4,g4,a100,h100}`, `--tpu {v5e1,v6e1}`, `--high-mem` | validate accelerator **before** any network call; generate `nbh` UUID; assign (C1→C2) with retry/reconcile; persist session (token, url, endpoint, expiry, variant, accelerator, shape); log `session_created`; friendly 412/400 messages; **`--tpu` silently wins if both `--tpu` and `--gpu` are given** (no error upstream); default name = first 6 hex chars of a random UUID; `--high-mem` for L4/V5E1/V6E1 prints a notice to stderr and is ignored | accelerator tables are case-insensitive; DEC-08 **rejected** — match upstream, both flags accepted and `--tpu` silently wins (no error) | P0 |
 | `sessions` | – | reconcile local state with `GET /assignments`; prune stale; list name, hardware label, status; mark server-only assignments as orphans (`[?]`) | typed table writer; stable column order | P0 |
 | `status` | `-s` | print state, hardware, shape, endpoint-derived info, `running`/`last_execution`, remaining token life | resolve session rule: explicit `-s`, else the unique session, else error listing names | P0 |
 | `stop` | `-s` | shut down kernel (ignore 404) → unassign (GET+POST) → remove local → log `session_terminated` | tolerate "already gone"; always remove local state | P0 |
 | `restart-kernel` | `-s` | `POST …/restart` | | P0 |
 
-**Session resolution rule (shared):** `-s` wins; else if exactly one session exists use it and print `Using unique session '<n>'`; zero ⇒ error "No active sessions… `colab new`"; many ⇒ error listing names. Missing/expired-token sessions refresh via C3; gone ⇒ prune + `Session '<n>' not found.` exit 1.
+**Session resolution rule (shared):** `-s` wins; else if exactly one session exists use it and print `Using unique session '<n>'`; zero ⇒ error "No active sessions… `colab new`"; many ⇒ error listing names. Missing/expired-token sessions refresh via C3; gone ⇒ prune; `status`/`stop` print `Session '<n>' not found.` to stderr and **exit 0** (idempotent), while other commands use the shared error table (exit 1; `ssh` exit 2).
 
 ## Execution
 | Command | Flags / args | Behaviour to match | Go notes | Pri |
@@ -73,7 +74,7 @@ Auto-update background check runs for every command **except** `update version l
 | `url` | `-s`, `--host`, `--open` | doc 02 §5 URL; print; optionally open browser | | P0 |
 | `log` | `-s`, `-n/--lines N`, `-t/--type TYPE`, `-o/--output FILE` | view session history; `-o` suffix selects `.ipynb`, `.md`, `.txt`, `.jsonl` exporter | exporters in `history`; notebook export uses `nb` | P1 |
 | `pay` | – | open the Colab sign-up page (compute units) | | P2 |
-| `version` | – | print version | Δ `colab-go X (compatible with google-colab-cli 0.8.x)` | P0 |
+| `version` | – | print version | Δ `golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)` | P0 |
 | `update` | `--install` | check latest; with `--install` upgrade | Δ GitHub Releases + signature verification; works on all OSes incl. Windows running-exe replace | P1 |
 | `whoami` *(hidden)* | – | print credentials identity, scopes, expiry (debug) | never prints tokens | P1 |
 | `readme` / `README` / `skill` / `SKILL` *(hidden)* | – | print bundled markdown | `go:embed`; **write our own SKILL.md** (do not copy upstream's drifted one) | P2 |

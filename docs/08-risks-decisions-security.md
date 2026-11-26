@@ -8,7 +8,7 @@ Likelihood (L) / Impact (I): **H**igh · **M**edium · **L**ow.
 |---|---|---|---|---|---|
 | **R-01** | **Undocumented, unstable API.** `/tun/m/*` and the proxy can change without notice; a port breaks silently. | H | H | golden wire fixtures; nightly read-only live probe; upstream-sync policy (doc 06 §5); typed errors with clear "protocol changed?" message | nightly probe fails; upstream release touches `client.py`/`runtime.py` |
 | **R-02** | **OAuth client reuse.** Upstream's own comment says the bundled client is Google's *cloud-SDK* client, and the required redirect is registered to it. A third-party binary using it may be blocked, rate-limited or flagged, and sends users' consent through someone else's client identity. | M | H | ship **ADC-first** docs and `-c` BYO-client as first-class paths; keep the bundled client behind a clear disclosure (DEC-02); isolate in one package so it can be swapped; ask Google/upstream whether a third-party reuse is acceptable | `redirect_uri_mismatch`, `invalid_client`, consent-screen warnings |
-| **R-03** | **Client identity checks.** The server may allow-list `X-Colab-Client-Agent: colab-cli` or the OAuth client. A Go client sending its own agent could be rejected, while impersonating the official agent is dishonest. | M | H | spike S0/S1 tests both; default to an **honest** `colab-go/<ver>` string; if rejected, discuss with upstream rather than spoof (DEC-03) | 4xx on first call from Go but not Python |
+| **R-03** | **Client identity checks.** The server may allow-list `X-Colab-Client-Agent: colab-cli` or the OAuth client. A Go client sending its own agent could be rejected, while impersonating the official agent is dishonest. | M | H | spike S0/S1 tests both; use the single **honest** identity `github.com/20Youssef10/golab/<ver>` (`version.ClientAgent()`) on every plane; if rejected, discuss with upstream rather than spoof (DEC-03; S-3 closed) | 4xx on first call from Go but not Python |
 | **R-04** | **Colab terms / abuse detection / quota.** Automated allocation and live CI tests could trip limits or risk the test account. | M | M | low volume; single concurrent runtime; throw-away account; sweeper; kill switch (doc 07 §9); read the current terms before enabling nightly jobs | 429/412 spikes, account warnings |
 | **R-05** | **Upstream churn.** ~35 PRs/month (third-party snapshot); commands appear/disappear; docs drift (doc 01 §9). | H | M | compat declaration; monthly re-capture; triage rubric; keep Δ list short | parity diff in nightly L4 |
 | **R-06** | **Jupyter protocol edge cases:** lost iopub on connect, reconnect, giant messages, interleaved executions. | M | M | optional `kernel_info` handshake; read-limit config; fuzz decoder; per-execution parent filtering; reconnect tests | flaky e2e, truncated outputs |
@@ -22,18 +22,23 @@ Likelihood (L) / Impact (I): **H**igh · **M**edium · **L**ow.
 | **R-14** | **Name collisions / typosquatting** (`colab-cli` on PyPI and crates.io; `colab` binary shadowing). | M | M | distinctive repo name; `colab version` shows implementation; install docs explain PATH order | user confusion reports |
 | **R-15** | **Terminal-escape injection from remote output.** Code running on the VM (or a notebook it executes) can print OSC-52 clipboard writes, title changes, or query sequences that make the *local* terminal respond. | M | M | sanitiser in `render`: allow SGR colour, strip OSC/DCS/APC and terminal-query CSI; `--raw` opt-out | security review finding |
 
-## 2. Decision log (needs owner input)
+## 2. Decision log
+
+Status note (2026-11-26, v0.2.0): DEC-01 is settled in code
+(`github.com/20Youssef10/golab`, binary `golab`); DEC-03 is settled on one honest
+identity on all planes; DEC-08 was **rejected** in favour of upstream behaviour.
+The remaining rows are design decisions recorded for traceability.
 
 | ID | Decision | Options | **Recommended default** | Decide by |
 |---|---|---|---|---|
-| DEC-01 | Project name, module path, licence | `colab-go` / other; Apache-2.0 | `github.com/<owner>/colab-go`, binary `colab`, **Apache-2.0 + NOTICE** | kickoff |
+| DEC-01 | Project name, module path, licence | `colab-go` / other; Apache-2.0 | **Resolved:** `github.com/20Youssef10/golab`, binary `golab`, **Apache-2.0 + NOTICE** | kickoff |
 | DEC-02 | OAuth client strategy | (a) embed upstream's client; (b) BYO only; (c) ADC-first + embedded fallback with disclosure | **(c)** | before M1 |
-| DEC-03 | `X-Colab-Client-Agent` value | `colab-cli` vs own | **own**, unless S1 proves rejection, then ask upstream | S1 |
+| DEC-03 | `X-Colab-Client-Agent` value | `colab-cli` vs own | **own:** `github.com/20Youssef10/golab/<ver>` on all planes; ask upstream if a live probe proves rejection | S1 |
 | DEC-04 | Headless token fallback | plaintext 0600 vs passphrase vs refuse | **0600 file + notice; optional passphrase** | S4 |
 | DEC-05 | SIGINT behaviour | match Python (just exit) vs interrupt remote kernel | **interrupt, then stop; 2nd Ctrl-C forces** | Phase 2 |
 | DEC-06 | REPL library | readline fork / Bubble Tea / go-prompt fork | decide after **S7** | Phase 3 |
 | DEC-07 | Chatter stream | keep stdout (parity) vs stderr | **stderr** (agents pipe stdout) | Phase 1 |
-| DEC-08 | `--gpu` + `--tpu` together | silent `--tpu` precedence (upstream) vs error | **error (exit 2)** | Phase 1 |
+| DEC-08 | `--gpu` + `--tpu` together | silent `--tpu` precedence (upstream) vs error | **REJECTED** — match upstream: both accepted, `--tpu` silently wins (no error); see docs/USAGE.md | Phase 1 |
 | DEC-09 | Public library | `pkg/colab` now vs later | **later** (after v1.0) | v1.0 |
 | DEC-10 | Scopes | keep all 6 vs minimise (`cloud-platform` is very broad) | keep for parity; **test minimal set in S5** and document | S5 |
 | DEC-11 | Single binary vs plugin for REPL/markdown | single | **single** (simplicity) | Phase 3 |

@@ -3,7 +3,7 @@
 > **Evidence labels:** ✅ verified in the research sandbox · 📚 reported by independent sources (links in doc 08 §Sources) · ❓ plausible, **must be verified** in Phase 0/4.
 > The sandbox had Go **1.22.2** only and no access to the Go module proxy; real dependencies (x/sys, keyring, term…) can narrow the matrix, so **CI must build the full binary for every target**, not a stub.
 
-> **Implementation status — 2026-11-23 (v0.1.0).**
+> **Implementation status — 2026-11-26 (v0.2.0).**
 > - **Implemented / green in CI:** every Tier-1 target cross-builds with
 >   `CGO_ENABLED=0` (GoReleaser snapshot, 11 cross-builds); `go test -race`
 >   runs on 6 OS runners; embedded SSH, platform path/TTY/signal handling, the
@@ -11,18 +11,24 @@
 >   and a single cross-platform URL launcher (`termux-open-url` / `wslview` /
 >   `xdg-open` / `open` / `rundll32`) with a print-URL fallback are in the tree.
 >   No `GOOS=android` artefact is shipped (ADR-002).
-> - **Not yet proven (human-required):** live CPU e2e on any platform, real
->   Termux devices (DNS/CA/`faccessat2`), Windows console/ACL/`.old` cleanup,
->   macOS keychain timing and notarisation, and enablement of the QEMU/Termux
->   jobs. No Tier-1 per-OS §9 acceptance pass is recorded. See
->   [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and
+> - **Recorded live proof:** a billable CPU e2e pass covering `new`, `status`,
+>   `ls`, `exec`, `run`, `ssh`, piped `repl`, upload/download, `stop --verify`,
+>   `resume` error paths and cleanup (final `golab sessions` empty) is recorded
+>   in `CHANGELOG.md` `[0.2.0]` Verification; a real signed v0.1.9 → v0.2.0
+>   self-update installed an executable ELF.
+> - **Not yet proven (human-required):** real Termux devices
+>   (DNS/CA/`faccessat2`), Windows console/ACL/`.old` cleanup, macOS keychain
+>   timing and notarisation, and a real-device pass for the `qemu-smoke` /
+>   `termux-nightly` jobs. The cross-build smoke run was interrupted by a server
+>   restart and is not claimed; no Tier-1 per-OS §9 acceptance pass is recorded.
+>   See [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and
 >   [CONFORMANCE.md](CONFORMANCE.md) §1/§6.
 > - **Distribution actually configured:** GitHub Releases (archives + SHA-256
 >   checksums + cosign signatures + signed SBOMs) via `.goreleaser.yaml` and
 >   `.github/workflows/release.yml`, plus
->   `go install github.com/20Youssef10/golab/cmd/colab@latest`. The remaining §7 channels
+>   `go install github.com/20Youssef10/golab/cmd/golab@latest`. The remaining §7 channels
 >   (`install.sh`, `install.ps1`, Homebrew, Scoop, winget, nfpm packages, AUR,
->   Termux TUR, Docker/Nix) are **planned, not configured** at v0.1.0.
+>   Termux TUR, Docker/Nix) are **planned, not configured** at v0.2.0.
 
 ---
 
@@ -153,7 +159,7 @@ Optional later improvement: Tailscale's `androiddns` approach (query Android's `
 | `.deb` / `.rpm` / `.apk` | Linux | `nfpm` | 4 |
 | AUR `colab-go-bin` | Arch | PKGBUILD | 5 |
 | Termux (`go install`, tarball, TUR) | Termux | see §3.3 | 4 |
-| `go install github.com/<owner>/colab-go/cmd/colab@latest` | all with Go | source | 1 |
+| `go install github.com/20Youssef10/golab/cmd/golab@latest` | all with Go | source | 1 (configured) |
 | Nix flake / Docker `scratch` image | optional | community | 5+ |
 
 ## 8. Build & CI matrix

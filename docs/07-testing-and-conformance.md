@@ -2,15 +2,16 @@
 
 > Upstream's own rule, which we keep: **mocks are not enough; a feature is not done until it has passed against a live Colab runtime.** Upstream has 38 test files (~360 tests) and 7 live suites. We port the *intent* of every one and add layers the Python project lacks.
 
-> **Implementation status — 2026-11-23 (v0.1.0).** **L1 Unit** and **L2
+> **Implementation status — 2026-11-26 (v0.2.0).** **L1 Unit** and **L2
 > Component** (fake Colab control plane + fake Jupyter kernel + fake sshd) are
-> green and blocking in CI. **L3 Golden, L4 Differential and L5 Live e2e are
-> scaffolding only**: `scripts/golden.sh`, `scripts/differential.sh` and
-> `.github/workflows/live-e2e.yml` exist (kill switch, secrets gate, sweeper),
-> but there are zero scenario fixtures and no recorded live pass — fakes are
-> not live proof. The authoritative, up-to-date layer/porting/coverage matrix
+> green and blocking in CI. **L3 Golden and L4 Differential are scaffolding
+> only**: `scripts/golden.sh` and `scripts/differential.sh` exist, but there are
+> zero scenario fixtures. `.github/workflows/live-e2e.yml` exists (kill switch,
+> secrets gate, sweeper) and one billable CPU e2e pass is recorded in
+> `CHANGELOG.md` `[0.2.0]` Verification — but no wire capture has been made and
+> fakes are not live proof. The authoritative, up-to-date layer/porting/coverage matrix
 > is [CONFORMANCE.md](CONFORMANCE.md); the tables below are the design target.
-> The §11 coverage gates are **advisory** at v0.1.0:
+> The §11 coverage gates are **advisory** at v0.2.0:
 > `scripts/coverage-gate.sh` floors at 70 % via `vars.COVERAGE_MIN`, and
 > `scripts/goleak-check.sh` runs in ADVISORY mode. Human-only blockers are in
 > [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and [CONFORMANCE.md](CONFORMANCE.md) §6.
@@ -61,10 +62,10 @@ WebSocket server speaking the **default** protocol: kernel REST (`/api/kernels�
 `x/crypto/ssh` server behind a WS↔TCP bridge. Accepts ed25519/ecdsa, **rejects RSA with HTTP 400 at upgrade**, records `pty-req`, `window-change`, `env`, `exec`, `shell`, and returns scripted exit statuses (0, 7, signal-killed ⇒ 255). Emits the 400/401/403/404/429/502 upgrade failures with the upstream JSON bodies.
 
 ## 4. Golden outputs
-* Run every command through the **Python CLI against the fakes** (via §6) to produce `testdata/golden/<scenario>/{stdout,stderr,exit,state.json,history.jsonl}`.
+* Run every command through the **Python CLI against the fakes** (via §6) to produce `testdata/golden/<scenario>/{cmd,stdout,stderr,exit}` — the layout `scripts/golden.sh` consumes.
 * **Normalise** before comparing: timestamps, UUIDs, session auto-names (6 hex), tokens, temp paths, line endings.
-* Known intentional differences are listed in `testdata/golden/DELTAS.yaml` (mirrors doc 05 Δ-table); a golden test fails if an *unlisted* difference appears.
-* Update with `go test ./... -update` and a mandatory human review of the diff.
+* Known intentional differences are to be recorded in `DELTAS.yaml` (mirrors doc 05 Δ-table); a golden run fails on an *unlisted* difference. The ledger does not exist yet — `testdata/golden/` currently holds only `README.md`.
+* Generate/review fixtures with `COLAB_BIN=./golab bash scripts/golden.sh --scenario <name> --update` and a mandatory human review of the diff. `bash scripts/golden.sh --scenario wire` secret-scans wire fixtures. There is no `go test ./... -update` flag.
 
 ## 5. Live capture (Phase 0 / S0) — how, safely
 

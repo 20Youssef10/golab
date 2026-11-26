@@ -1,8 +1,8 @@
 # 03 · Go Architecture & Decision Records
 
-> **Implementation status — 2026-11-23 (v0.1.0).** The canonical module path is
+> **Implementation status — 2026-11-26 (v0.2.0).** The canonical module path is
 > `github.com/20Youssef10/golab` (binary `golab`, Go 1.27.4, `CGO_ENABLED=0`),
-> enabling `go install github.com/20Youssef10/golab/cmd/colab@latest`; the
+> enabling `go install github.com/20Youssef10/golab/cmd/golab@latest`; the
 > `github.com/<owner>/colab-go` placeholder in ADR-001 (§9) is historical.
 > **ADR-014 is now fully implemented:** GoReleaser (`.goreleaser.yaml`) builds
 > the CGO-free Tier-1 archives, SHA-256 checksums and a GitHub Release for
@@ -32,13 +32,13 @@
 ## 2. Repository layout
 
 ```text
-colab-go/
-├── cmd/colab/main.go              # 30 lines: wire deps, run root command
+golab/
+├── cmd/golab/main.go              # entry point: calls cli.Execute (internal/cli/root.go)
 ├── internal/
-│   ├── cli/                       # cobra commands (one file per command), flag parsing, help
+│   ├── cli/                       # cobra commands (one file per command); register.go is the single registration point
 │   ├── app/                       # composition root: Deps{Auth,Colab,State,History,Render,Clock,…}
 │   ├── auth/                      # providers (adc, oauth2), scopes, tokenstore (keyring|file)
-│   ├── colabapi/                  # /tun/m/* client: assign, unassign, list, ccu, credprop; XSSI; retry
+│   ├── colabapi/                  # /tun/m/* + Public API client: assign, unassign, list, ccu, credprop; XSSI; retry
 │   ├── runtime/                   # Jupyter REST+WS client, execute, outputs, stdin, colab_request
 │   ├── contents/                  # Contents API (chunked)
 │   ├── sshx/                      # WS net.Conn, embedded ssh client, proxy bridge, key resolution
@@ -48,15 +48,22 @@ colab-go/
 │   ├── render/                    # ANSI, markdown, html→md, kitty images, TTY/NO_COLOR logic
 │   ├── repl/                      # interface + implementation
 │   ├── platform/                  # paths, termux/android detect, netfix, perms, browser, tty, signals
-│   ├── update/                    # version, throttled check, signed self-update
+│   ├── update/                    # version check, signed self-update (sigstore-go)
+│   ├── version/                   # Number = "0.2.0", Upstream = "0.8.x+HEAD", ClientAgent()
 │   ├── logx/                      # slog setup, redaction, rotation
-│   └── version/
-├── internal/testutil/             # fake Colab control plane, fake Jupyter kernel, ws helpers
-├── testdata/{wire,golden,notebooks}/
-├── scripts/                       # live-capture, conformance, release helpers
+│   ├── doctor/ auditsec/ budget/ bundle/ agentout/   # Go-only commands
+│   └── testutil/                  # fakecolab, fakekernel, fakesshd
+├── testdata/wire/README.md        # capture target only — no fixtures yet
+├── testdata/golden/README.md      # golden target only — no fixtures yet
+├── scripts/                       # golden.sh, differential.sh, live-capture.sh, live-sweeper.sh, coverage-gate.sh, …
 ├── docs/                          # this pack
 ├── .goreleaser.yaml
-└── .github/workflows/{ci,release,live-e2e,termux}.yml
+└── .github/workflows/
+    ├── ci.yml
+    ├── live-e2e.yml
+    ├── qemu-smoke.yml
+    ├── release.yml
+    └── termux-nightly.yml
 ```
 Rule: **`internal/cli` may import everything; nothing imports `internal/cli`.** `colabapi`, `runtime`, `contents`, `sshx` never import `state` or `cli` (they take plain values), which keeps them promotable to a public module.
 
@@ -158,7 +165,7 @@ Compatibility promises: read/write `sessions.json` and `settings.json` with the 
 ### ADR-001 · Naming, module and Go version
 **Decision.** Repo/module `github.com/<owner>/colab-go`; binary **`colab`** (drop-in) with an install-time alias option `colab-go`. Latest stable Go at kickoff, pinned with a `toolchain` directive; CI also builds with the previous minor.
 **Why.** Agents/scripts call `colab` and shebangs resolve via `$PATH`. The names `colab-cli` are already taken on PyPI and crates.io, so avoid them as the *distribution* name.
-**Caveat.** If Python `colab` is also installed, PATH order decides who wins (upstream's `AGENTS.md` #8 describes exactly this trap); `colab version` prints the implementation (`colab-go 0.x (compatible with google-colab-cli 0.8.x)`).
+**Caveat.** If Python `colab` is also installed, PATH order decides who wins (upstream's `AGENTS.md` #8 describes exactly this trap); `golab version` prints the implementation (`golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)`). The original `colab-go …` text above is historical.
 **Branding.** Unofficial. Must not imply Google endorsement ("Colab" is Google's mark).
 
 ### ADR-002 · Static builds, `CGO_ENABLED=0`, everywhere including Termux

@@ -1,17 +1,20 @@
 # 09 · Implementation contracts (orchestration)
 
-> **Implementation note (2026-11-23):** all packages in the ownership map below
-> have been implemented and pass `go test -race ./...`. The CLI root wires them
-> through `internal/app`. Remaining work: the second CLI command batch (SSH,
-> automation, updater, utility), full cosign bundle verification, upstream
-> conformance goldens, and the human-only live e2e checklist. No live VM was
-> allocated during implementation.
+> **Implementation note (2026-11-26, v0.2.0):** all packages in the ownership map
+> below have been implemented and pass `go test -race ./...`. The CLI root wires
+> them through `internal/app`. The second command batch (SSH, automation,
+> updater, utility) and full cosign/SBOM bundle verification are implemented;
+> the signed-update path was exercised by a real v0.1.9 → v0.2.0 self-update.
+> Remaining work is human-gated (OAuth consent, Drive browser approval,
+> interactive TTY, real devices, induced WS-drop) plus the still-empty
+> wire/golden fixture layer. A billable live e2e pass is recorded in
+> `CHANGELOG.md` `[0.2.0]` Verification.
 >
-> Dated: 2026-11-23. This file is the **integration contract** between packages.
+> Dated: 2026-11-26. This file is the **integration contract** between packages.
 > It is intentionally short. The authoritative behaviour specs remain docs/01–08 and
 > the upstream Python source cloned at `/tmp/opencode/google-colab-cli` (HEAD).
 > Module path: `github.com/20Youssef10/golab`. Binary: `golab`. Go 1.27.4,
-> `CGO_ENABLED=0`. Current release: `v0.1.0`.
+> `CGO_ENABLED=0`. Current release: `v0.2.0`.
 
 ## Ground rules for every package
 
@@ -51,9 +54,10 @@ func Redact(s string) string               // defensive free-form redaction pass
 
 ### `internal/version`
 ```go
-const Number = "0.0.1-dev"
-const Upstream = "0.8.x"
-func String() string   // "golab 0.0.1-dev (compatible with google-colab-cli 0.8.x; HEAD+)"
+const Number = "0.2.0"
+const Upstream = "0.8.x+HEAD"
+func String() string   // "golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)"
+func ClientAgent() string // "github.com/20Youssef10/golab/0.2.0" (single honest identity)
 ```
 
 ### `internal/platform`

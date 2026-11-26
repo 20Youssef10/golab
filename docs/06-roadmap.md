@@ -99,7 +99,7 @@ flowchart LR
 |---|---|---|---|
 | **0** Spikes | S0–S8, repo skeleton | M0 go/no-go recorded in `docs/ADR/` | none |
 | **1** Core slice | WP-01…07 (partial), `new → exec → stop` on Linux | live: create CPU runtime, `echo 'print(1)' \| colab exec`, stop; no tokens in logs | `v0.0.x` dev snapshots |
-| **2** P0 parity | WP-08…13 | all **P0** rows of doc 05 green on Linux, macOS, Windows (fake server) + one live smoke each | `v0.1.0-alpha` |
+| **2** P0 parity | WP-08…13 | all **P0** rows of doc 05 green on Linux, macOS, Windows (fake server) + one live smoke each | `v0.2.0` (shipped) |
 | **3** Parity-complete | WP-14…16 | all **P1** rows green; `ssh` interactive + `-- CMD` + proxy-mode verified on Linux/Windows; REPL decided | `v0.2.0-beta` |
 | **4** Platforms & packaging | WP-17…19 | doc 04 §9 satisfied for all Tier-1; Termux nightly green; install channels live | `v0.3.0-rc` |
 | **5** Hardening | WP-20…22 | conformance clean, security findings closed, docs complete | **`v1.0.0`** |

@@ -21,8 +21,8 @@
 | C-1 | XSSI stripping | `client.py:224`, `274-277` strips exact `)]}'\n` | `client.go:34`, `198-210` strips exact prefix on `[]byte` | ✅ |
 | C-2 | XSRF GET→POST handshake | `client.py:423-429` (unassign), `431-473` (assign), `505-517` | `client.go:283-319`, `360-418`, `421-432`; `X-Goog-Colab-Token` set at `client.go:172-174` | ✅ |
 | C-3 | `authuser=0` on Colab-host requests | `client.py:288-293` — substring host test (`hostname in colab_domain.hostname`) | `client.go:214-243` — added structurally via `colab bool` on tunnel URLs only; no hostname matching at all | ✅ fixes D-7; no substring hazard |
-| C-4 | `Accept: application/json` + client agent on every request | `client.py:294-298` (`colab-cli`) | `client.go:170-171` (`golab/0.0.1-dev`) | ⚠️ value differs — **R-03/D-DEC-03**, see S-3; **HUMAN REQUIRED** |
-| C-5 | `X-Colab-Client-Agent` value | `client.py:39-42` `colab-cli` | `version.go:17-18` `golab/<ver>` for control plane, `sshx/wire.go:28-30` `colab-go/<ver>` for SSH | ⚠️ two different honest identities, upstream has one. Low, but inconsistent; see S-3 |
+| C-4 | `Accept: application/json` + client agent on every request | `client.py:294-298` (`colab-cli`) | `client.go:170-171` (`github.com/20Youssef10/golab/0.2.0`, `version.ClientAgent()`) | ⚠️ value differs by design — **R-03/DEC-03**; live allow-list probe still **HUMAN REQUIRED** (S-3 identity finding closed) |
+| C-5 | `X-Colab-Client-Agent` value | `client.py:39-42` `colab-cli` | `internal/version/version.go:22` `version.ClientAgent()` = `github.com/20Youssef10/golab/<ver>` on every plane (SSH: `sshx/wire.go:30,50`) | ✅ one honest identity (S-3 closed); upstream uses a different value, allow-list still live-unverified |
 | C-6 | `nbh` encoding | `client.py:60-64`: UUID with `-`→`_`, pad with `.` to 44 | `types.go:83-103` | ✅ |
 | C-7 | `variant`/`accelerator` on `/assign` | `session.py:95-113` always passes `DEFAULT`/`NONE`; `client.py:482-493` emits both | `client.go:268-278`, `321-329` | ✅ |
 | C-8 | `shape=hm` only when high-mem is meaningful | `client.py:95-116` (`HIGH_MEM_ONLY_ACCELERATORS = L4,V5E1,V6E1`) | `types.go:176-189` | ✅ |
@@ -76,7 +76,7 @@
 
 | # | Topic | Upstream evidence | Our evidence | Verdict |
 |---|---|---|---|---|
-| H-1 | WS URL | `ssh.py:240-251`: `/colab/ssh?colab-runtime-proxy-token=…&colab-client-agent=colab-cli&colab-client-agent=ssh-mode-<mode>` | `sshx/wire.go:34-56` same shape, agent `colab-go/<ver>` unencoded | ✅ modulo S-3; token/agent inserted raw in both |
+| H-1 | WS URL | `ssh.py:240-251`: `/colab/ssh?colab-runtime-proxy-token=…&colab-client-agent=colab-cli&colab-client-agent=ssh-mode-<mode>` | `sshx/wire.go:34-56` same shape, agent `github.com/20Youssef10/golab/0.2.0` (`version.ClientAgent()`) unencoded | ✅ model matches, with one honest identity (S-3 closed); token/agent inserted raw in both; live allow-list probe still human-gated |
 | H-2 | Pubkey header | `ssh.py:64`, `374-378` `X-Colab-Ssh-Pubkey` verbatim | `sshx/wire.go:22-26`, `82-92` | ✅ |
 | H-3 | Modes | `ssh.py:68-70` interactive/proxy/cmd | `sshx/command.go:11-29` + `cli/ssh.go:23-34` | ✅ |
 | H-4 | Key discovery/order | `ssh.py:33-37`, `111-153`: `--identity` → `id_ed25519.pub` → `id_ecdsa.pub`, `ssh-keygen -y` fallback; RSA rejected server-side | `sshx/keys.go:30-100`, `167-255`: agent first (Δ ADR-005), then `id_ed25519`/`id_ecdsa`; native pubkey derivation, RSA rejected locally | ✅/Δ2; key *order* differs (agent first) — deliberate |
@@ -138,9 +138,9 @@ Severity is residual risk in the current code, not a claim of exploitability.
 **Severity: HIGH (data loss).** `contents.go:197-246` streams `chunk:1..N` then an empty `chunk:-1`; the single-shot fallback (`contents.go:248-254`) triggers **only** on an explicit 4xx/501 from the first chunk. A server that ignores the `chunk` field would treat each PUT as a full save and the final empty PUT as a whole-file overwrite. docs/02 §3.8/S6 marks this 🔴 and our fakes do not prove live behaviour (AGENTS.md #3).
 **Remediation:** **HUMAN REQUIRED** §2 item 4. Until proven, gate streaming behind a verified capability: for files below a threshold use one `chunk:1` PUT (upstream's proven behaviour); for large files, verify remote size via a GET after finalisation and abort/report on mismatch. Add a fake-server test where the server accepts chunk fields but writes each body verbatim.
 
-### S-3 — Client-agent identity: unverified allow-list and two different values
-**Severity: MEDIUM (availability/trust).** Control plane/runtime/contents send `golab/0.0.1-dev` (`version.go:17-18`, used at `app.go:117`, `183`, `245`); SSH sends `colab-go/0.0.1-dev` (`sshx/wire.go:28-30`, `config.go:71-73`). Upstream uses one value `colab-cli` (`client.py:39-42`, `ssh.py:249`). R-03/DEC-03 require an honest value but the allow-list is unknown.
-**Remediation:** unify on one honest value (`golab/<ver>`) across all four planes; run §2 item 8. If the server rejects it, do not spoof — escalate per DEC-03 and document a BYO-agent build option only under `testhooks`.
+### S-3 — Client-agent identity: unified on one honest value (CLOSED 2026-11-26)
+**Severity: LOW (residual, documented).** The two-identity inconsistency is gone: every plane — control, runtime, contents and SSH — now sends one honest value, `version.ClientAgent()` = `github.com/20Youssef10/golab/0.2.0` (`internal/version/version.go:22`). SSH takes it via `sshx/wire.go:30,50` (`DefaultClientAgent()`) rather than a second hard-coded string. Upstream still uses the single different value `colab-cli` (`client.py:39-42`, `ssh.py:249`), so DEC-03's honesty choice stands.
+**Residual / follow-up:** the server-side allow-list is still unknown and cannot be checked without a live probe (§2 item 8, **HUMAN REQUIRED**). If the server rejects our identity, do not spoof — escalate per DEC-03 and document a BYO-agent build option only under `testhooks`. Historical finding retained for traceability.
 
 ### S-4 — OAuth token file stores more than the documented "refresh token only"
 **Severity: MEDIUM.** `auth/oauth2.go:57-66` and `376-398` persist `access_token`, `refresh_token`, `client_secret`, `token_uri`, and client id. AGENTS.md platform rules state "Store the refresh token only"; docs/08 §3 R-09 mitigation repeats "refresh-token-only storage". Upstream stores `Credentials.to_json()` (`auth.py:252`), so we are at least no worse, but we diverge from our own control. The file is 0600 (`tokenstore.go:188-223`) and keyring tier is preferred (`:89-105`), which limits exposure.
