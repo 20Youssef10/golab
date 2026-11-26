@@ -86,6 +86,10 @@ func newHarness(t *testing.T) *testHarness {
 	t.Cleanup(ctrl.Close)
 	kernel := fakekernel.New(t)
 	dir := t.TempDir()
+	// Isolate the config dir per test: SSH TOFU pins are stored there, and a
+	// reused ephemeral port with a fresh fake host key would otherwise trip a
+	// later test with a spurious "host key changed" failure.
+	t.Setenv("COLAB_CONFIG_DIR", dir)
 	store, err := state.NewStore(filepath.Join(dir, "sessions.json"))
 	if err != nil {
 		t.Fatal(err)
