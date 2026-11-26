@@ -42,6 +42,16 @@ Reconcile local state with the server, prune sessions that are gone, refresh exp
 
 A `[?]` in the name column is a server-side assignment with no matching local record — usually an orphan to clean up explicitly with `golab stop` on the server side or by editing your state file. If nothing is active, the message goes to stderr and stdout stays empty.
 
+### `golab attach`
+
+A runtime created in the Colab browser UI has no local `golab` record. On the Public API control plane you can attach it by runtime name and record it locally:
+
+```bash
+golab attach --runtime NAME [--session NAME]
+```
+
+`--runtime NAME` is the runtime name from the Public API (`runtime.name`); `--session NAME` is the local name you will pass to `-s` / `--session` on other commands. This requires `COLAB_CLI_PUBLIC_API=1` or `--public-api`, plus the GCP quota-project prerequisites in [MIGRATION.md](MIGRATION.md#migrating-to-the-public-api). It attaches to the existing runtime; it does not allocate a new one. Run `golab attach --help` to confirm the flag surface in your build.
+
 ### `golab status`
 
 ```bash
@@ -317,7 +327,7 @@ TTY behaviour matters in exactly three places: `exec` with no input errors when 
 | `COLAB_AUTH` | `oauth2` | Auth provider: `oauth2` or `adc`. |
 | `COLAB_SCOPES` | `full` | Default for `--scopes`: `full` or `minimal`. |
 | `COLAB_DEBUG` | unset | `1`/`true` enables debug logging on stderr. |
-| `COLAB_CLI_PUBLIC_API` | `0` | Use the Public API control plane; `--public-api` / `--no-public-api` override it. |
+| `COLAB_CLI_PUBLIC_API` | `0` (tunnel API) | Use the Public API control plane; `--public-api` / `--no-public-api` override it. Prerequisites: [MIGRATION.md](MIGRATION.md#migrating-to-the-public-api). |
 | `COLAB_OUTPUT` | `text` | Default for `--output`. |
 | `COLAB_ASSUME_YES` | unset | Default for `--yes`. |
 | `GOLAB_BUDGET_PROFILE` | `default` | Named `golab.yaml` profile used by the budget guard on `new`/`run`/`ssh`; the persistent `--budget-profile` flag overrides it. |

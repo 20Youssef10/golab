@@ -111,6 +111,17 @@ Upstream is mid-migration to the Colab Public API (`colaboratory.googleapis.com/
 - `golab test-public-api` (hidden) records `public_api_supported` / `tunnel_api_supported` in `settings.json`. `golab doctor --section api` reports reachability without allocating.
 - Live behaviour of both paths is **unverified** in this release; treat a probe result as local evidence, not a guarantee. See [REMEDIATION.md](REMEDIATION.md) §Human-required items.
 
+### Migrating to the Public API
+
+Upstream issue #289 announces a breaking change to the Public API and the likely retirement of the tunnel API. To move `golab` onto the Public API control plane:
+
+1. Export `COLAB_CLI_PUBLIC_API=1`, or pass `--public-api` to the commands you want on that path. The default stays on the tunnel API; a command-level `--no-public-api` forces the tunnel path when you have exported the variable globally.
+2. Complete the **GCP-side prerequisites for the credentials `golab` uses**: enable `colaboratory.googleapis.com` in your Google Cloud project and configure a billing/quota project for it. Upstream has announced a `colab init-gcp-project` helper, but enabling the API, selecting a quota project and granting billing access are human actions in your own GCP account. `golab` does not provision any of them.
+3. Upstream's change **may require you to re-run authentication** and complete browser consent again with the same Google account. If a command reports an auth or scope error, finish that consent flow; `golab logout` clears local token state if you need a fresh grant (it does not revoke the token at Google).
+4. Check reachability before relying on the switch: `golab test-public-api` (hidden) probes both planes and caches the result in `settings.json`; `golab doctor --section api` is a GET-only, redacting check that does not allocate. Both are probes, not live proof.
+
+`--no-public-api` is the escape hatch until the tunnel API is shut down: use it per command or unset `COLAB_CLI_PUBLIC_API` to keep your existing workflow. None of the prerequisites above are created by `golab`, and no flag bypasses the browser or GCP-side setup.
+
 ## Upstream drift and what we fix
 
 The design docs were written against `v0.8.0+2`; upstream has since moved. The [compatibility declaration](COMPAT.md) and [audit index](AUDIT-INDEX.md) catalogue this in detail. Highlights:
