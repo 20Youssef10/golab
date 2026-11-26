@@ -280,4 +280,6 @@ func registerExtraUtilityCommands(root *cobra.Command) {
 	root.AddCommand(printResourceCommand("README", true, bundledReadme))
 	root.AddCommand(printResourceCommand("skill", false, bundledSkill))
 	root.AddCommand(printResourceCommand("SKILL", true, bundledSkill))
+	// Tier 2 VM inspection commands (ps/cat/tail/grep/du/find/fetch).
+	registerVMCommands(root)
 }
