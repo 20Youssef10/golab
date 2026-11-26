@@ -10,9 +10,12 @@ package doctor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"time"
@@ -41,12 +44,15 @@ type Client interface {
 	CheckAPIAccess(context.Context) (publicOK, tunnelOK bool, err error)
 }
 
-// Config configures Probe. Getenv is injectable for the kill-switch tests.
+// Config configures Probe. Getenv is injectable for the kill-switch tests and
+// also feeds the local-only prerequisite signals when Prerequisites.Getenv is
+// unset. Prerequisites defaults to real, read-only local lookups.
 type Config struct {
-	Live       bool
-	Timeout    time.Duration
-	FixtureDir string
-	Getenv     func(string) string
+	Live          bool
+	Timeout       time.Duration
+	FixtureDir    string
+	Getenv        func(string) string
+	Prerequisites PrerequisiteConfig
 }
 
 // Check is one stable, machine-readable result.
@@ -75,13 +81,211 @@ func LiveEnabled(getenv func(string) string) bool {
 		!strings.EqualFold(strings.TrimSpace(getenv("LIVE_E2E_ENABLED")), "false")
 }
 
+// Public API prerequisites (issue #289). The new Public API can require a GCP
+// quota project and a fresh OAuth consent. Everything here is local and
+// read-only: golab reports the signals, it never creates or sets a quota
+// project, changes billing, or refreshes consent on its own. No value read
+// from the environment, an ADC file or gcloud is ever copied into a detail -
+// only fixed source labels are reported, so credential material cannot leak.
+const (
+	quotaProjectEnv   = "GOOGLE_CLOUD_QUOTA_PROJECT"
+	adcCredentialsEnv = "GOOGLE_APPLICATION_CREDENTIALS"
+	scopesEnv         = "COLAB_SCOPES"
+	authEnv           = "COLAB_AUTH"
+
+	quotaSourcesChecked = "GOOGLE_CLOUD_QUOTA_PROJECT, ADC quota_project_id, gcloud config quota/project"
+	quotaMissingDetail  = "no local GCP quota-project signal detected; the new Public API may require one"
+	quotaMissingFix     = "have a maintainer create/set a quota project (GOOGLE_CLOUD_QUOTA_PROJECT, ADC quota_project_id, or gcloud config quota/project); golab only diagnoses and never mutates GCP"
+)
+
+// gcloudProbeTimeout bounds the optional `gcloud config get-value` probe so a
+// diagnostic can never inherit a long/hanging CLI wait.
+const gcloudProbeTimeout = 1200 * time.Millisecond
+
+// GCloudRunner is the read-only command seam used by the quota-project probe.
+// Callers pass the fixed args below; DefaultGCloudRunner deliberately ignores
+// them and runs only `config get-value quota/project` so no mutation verb can
+// reach gcloud even if a caller supplies one.
+type GCloudRunner func(ctx context.Context, args ...string) (string, error)
+
+// DefaultGCloudRunner performs the short-bounded, read-only gcloud config
+// probe. A missing gcloud binary is a normal "no signal" outcome, not an error
+// worth surfacing as a failed check.
+func DefaultGCloudRunner(ctx context.Context, _ ...string) (string, error) {
+	path, err := exec.LookPath("gcloud")
+	if err != nil {
+		return "", err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, gcloudProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(probeCtx, path, "config", "get-value", "quota/project").CombinedOutput()
+	return string(out), err
+}
+
+// PrerequisiteConfig holds injectable, local-only inputs for the Public API
+// prerequisite diagnosis. Nil functions get read-only production defaults.
+type PrerequisiteConfig struct {
+	Getenv       func(string) string
+	ReadFile     func(string) ([]byte, error)
+	UserHomeDir  func() (string, error)
+	RunGCloud    GCloudRunner
+	AuthProvider string // when empty, falls back to COLAB_AUTH then oauth2
+	ScopeMode    string // when empty, falls back to COLAB_SCOPES then full
+}
+
+// Prerequisites is the local-only diagnosis. QuotaSource is a fixed label
+// ("GOOGLE_CLOUD_QUOTA_PROJECT", "adc:quota_project_id",
+// "gcloud:config/quota/project"); the observed value is never stored.
+type Prerequisites struct {
+	QuotaProjectDetected bool
+	QuotaSource          string
+	ReconsentHint        string
+}
+
+// InspectPrerequisites reads only local indicators: the quota-project env
+// var, ADC JSON files, and (last) a short-bounded read-only gcloud config
+// probe. It performs no network I/O and no GCP mutation.
+func InspectPrerequisites(ctx context.Context, cfg PrerequisiteConfig) Prerequisites {
+	getenv := cfg.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	readFile := cfg.ReadFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	homeDir := cfg.UserHomeDir
+	if homeDir == nil {
+		homeDir = os.UserHomeDir
+	}
+	runGCloud := cfg.RunGCloud
+	if runGCloud == nil {
+		runGCloud = DefaultGCloudRunner
+	}
+
+	var p Prerequisites
+
+	if strings.TrimSpace(getenv(quotaProjectEnv)) != "" {
+		p.QuotaProjectDetected = true
+		p.QuotaSource = quotaProjectEnv
+	}
+
+	if !p.QuotaProjectDetected {
+		var paths []string
+		if cred := strings.TrimSpace(getenv(adcCredentialsEnv)); cred != "" {
+			paths = append(paths, cred)
+		}
+		if home, err := homeDir(); err == nil && home != "" {
+			paths = append(paths, filepath.Join(home, ".config", "gcloud", "application_default_credentials.json"))
+		}
+		for _, path := range paths {
+			data, err := readFile(path)
+			if err != nil || len(data) == 0 {
+				continue
+			}
+			// Decode only the one field we need. Any token, refresh token or
+			// client secret in the same file is never read into a variable.
+			var adc struct {
+				QuotaProjectID string `json:"quota_project_id"`
+			}
+			if err := json.Unmarshal(data, &adc); err != nil {
+				continue
+			}
+			if strings.TrimSpace(adc.QuotaProjectID) != "" {
+				p.QuotaProjectDetected = true
+				p.QuotaSource = "adc:quota_project_id"
+				break
+			}
+		}
+	}
+
+	if !p.QuotaProjectDetected {
+		out, err := runGCloud(ctx, "config", "get-value", "quota/project")
+		if err == nil {
+			for _, line := range strings.Split(out, "\n") {
+				value := strings.TrimSpace(line)
+				if value == "" || strings.EqualFold(value, "(unset)") {
+					continue
+				}
+				// A project ID is one token; skip any multi-word warning line.
+				if len(strings.Fields(value)) != 1 {
+					continue
+				}
+				p.QuotaProjectDetected = true
+				p.QuotaSource = "gcloud:config/quota/project"
+				break
+			}
+		}
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(cfg.AuthProvider))
+	if provider == "" {
+		provider = strings.ToLower(strings.TrimSpace(getenv(authEnv)))
+	}
+	if provider == "" {
+		provider = "oauth2" // auth.DefaultAuthProvider
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.ScopeMode))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(getenv(scopesEnv)))
+	}
+	if provider == "oauth2" && mode == "minimal" {
+		p.ReconsentHint = "OAuth2 scope mode is minimal (changed from the default full); re-consent may be required for the Public API — re-run 'golab auth' if calls return 401/403"
+	}
+	return p
+}
+
+// Notes renders the diagnosis as short, fixed-text diagnostic lines. Values
+// are never interpolated; only source labels are included.
+func (p Prerequisites) Notes() []string {
+	var notes []string
+	if p.QuotaProjectDetected {
+		notes = append(notes, "Quota project signal detected via "+p.QuotaSource+" (value not printed).")
+	} else {
+		notes = append(notes, quotaMissingDetail+"; checked "+quotaSourcesChecked+". "+quotaMissingFix)
+	}
+	if p.ReconsentHint != "" {
+		notes = append(notes, p.ReconsentHint)
+	}
+	return notes
+}
+
+// PrerequisiteChecks converts the diagnosis into stable, machine-readable
+// report checks. Missing quota project is a non-fatal "skip" (it may be
+// configured by a path golab cannot see); a detected signal is a "pass".
+func PrerequisiteChecks(p Prerequisites) []Check {
+	check := Check{Name: "api.quota-project", Status: "skip"}
+	if p.QuotaProjectDetected {
+		check.Status = "pass"
+		check.Detail = "quota project signal detected via " + p.QuotaSource + "; value not printed"
+	} else {
+		check.Detail = quotaMissingDetail + "; checked " + quotaSourcesChecked
+		check.Remediation = quotaMissingFix
+	}
+	checks := []Check{check}
+	if p.ReconsentHint != "" {
+		checks = append(checks, Check{Name: "api.reconsent", Status: "skip", Detail: p.ReconsentHint})
+	}
+	return checks
+}
+
 // Probe gathers offline checks and, only when explicitly enabled, GET-only
 // API checks. It never writes state and never calls a mutating endpoint.
 func Probe(ctx context.Context, cfg Config, client Client) (Report, error) {
 	if cfg.Live && !LiveEnabled(cfg.Getenv) {
 		return Report{}, ErrLiveDisabled
 	}
+	// Keep prerequisite inspection lazy so a hard API deadline (or an early
+	// error) is never spent on the optional read-only gcloud probe.
+	prereqCfg := cfg.Prerequisites
+	if prereqCfg.Getenv == nil {
+		prereqCfg.Getenv = cfg.Getenv
+	}
 	rep := Report{Schema: schema, Live: cfg.Live, Checks: []Check{}}
+	appendPrerequisites := func() {
+		rep.Checks = append(rep.Checks, PrerequisiteChecks(InspectPrerequisites(ctx, prereqCfg))...)
+	}
+
 	rep.Checks = append(rep.Checks, environmentCheck())
 	rep.Checks = append(rep.Checks, fixtureCheck(cfg.FixtureDir))
 
@@ -105,6 +309,7 @@ func Probe(ctx context.Context, cfg Config, client Client) (Report, error) {
 				Remediation: "re-run with --live and GOLAB_LIVE_PROBES=1 for a GET-only probe",
 			})
 		}
+		appendPrerequisites()
 		return rep, nil
 	}
 	if client == nil {
@@ -153,6 +358,7 @@ func Probe(ctx context.Context, cfg Config, client Client) (Report, error) {
 	if err := probeCtx.Err(); err != nil {
 		return rep, err
 	}
+	appendPrerequisites()
 	return rep, nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/20Youssef10/golab/internal/app"
+	"github.com/20Youssef10/golab/internal/doctor"
 	"github.com/20Youssef10/golab/internal/logx"
 )
 
@@ -212,6 +214,22 @@ func printResourceCommand(use string, hidden bool, content string) *cobra.Comman
 	}
 }
 
+// publicAPIGCloudRunner is a test seam (nil in production) for the bounded,
+// read-only quota-project probe. It lets CLI tests prove no real gcloud is
+// spawned and no mutation verb is ever issued.
+var publicAPIGCloudRunner doctor.GCloudRunner
+
+// publicAPIPrerequisites reports only locally available indicators and never
+// provisions anything. Results stay on stdout; these notes are diagnostics.
+func publicAPIPrerequisites(ctx context.Context, d *app.Deps) doctor.Prerequisites {
+	return doctor.InspectPrerequisites(ctx, doctor.PrerequisiteConfig{
+		Getenv:       os.Getenv,
+		AuthProvider: string(d.Config.AuthProvider),
+		ScopeMode:    string(d.Config.Scopes),
+		RunGCloud:    publicAPIGCloudRunner, // nil -> doctor's bounded read-only default
+	})
+}
+
 func testPublicAPICommand() *cobra.Command {
 	return &cobra.Command{
 		Use: "test-public-api", Short: "Probe Public and Tunnel API access",
@@ -237,6 +255,11 @@ func testPublicAPICommand() *cobra.Command {
 			}
 			fmt.Fprintf(d.Stdout, "Public API (colaboratory.googleapis.com): %s\n", okLabel(publicOK))
 			fmt.Fprintf(d.Stdout, "Tunnel API (colab.research.google.com):   %s\n", okLabel(tunnelOK))
+			// Diagnostics are stderr only; the two result lines above stay on
+			// stdout so machine consumers see unchanged output (issue #289).
+			for _, note := range publicAPIPrerequisites(cmd.Context(), d).Notes() {
+				fmt.Fprintf(d.Stderr, "[colab] public-api: %s\n", note)
+			}
 			return nil
 		},
 	}

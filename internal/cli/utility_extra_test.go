@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -157,6 +159,122 @@ func TestPublicAPIProbePersistsSettings(t *testing.T) {
 	if settings.TunnelAPISupported == nil || !*settings.TunnelAPISupported {
 		t.Fatalf("TunnelAPISupported = %v", settings.TunnelAPISupported)
 	}
+}
+
+// --- Public API prerequisite diagnostics (issue #289) ---------------------
+// These CLI tests fake env/filesystem/gcloud; no real gcloud is spawned and
+// no GCP resource can be mutated. Issue #289 is human-in-the-loop (re-auth +
+// quota project), so there is no upstream Python unit test to port.
+
+type recordingGCloud struct {
+	calls [][]string
+	out   string
+}
+
+func (r *recordingGCloud) run(_ context.Context, args ...string) (string, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	return r.out, nil
+}
+
+func useFakeGCloud(t *testing.T, out string) *recordingGCloud {
+	t.Helper()
+	r := &recordingGCloud{out: out}
+	prev := publicAPIGCloudRunner
+	publicAPIGCloudRunner = r.run
+	t.Cleanup(func() { publicAPIGCloudRunner = prev })
+	return r
+}
+
+func assertOnlyReadOnlyGCloud(t *testing.T, r *recordingGCloud, want int) {
+	t.Helper()
+	if len(r.calls) != want {
+		t.Fatalf("gcloud calls = %d, want %d: %v", len(r.calls), want, r.calls)
+	}
+	for _, args := range r.calls {
+		if got := strings.Join(args, " "); got != "config get-value quota/project" {
+			t.Fatalf("gcloud args = %q; must be the read-only quota/project probe", got)
+		}
+	}
+}
+
+// TestPublicAPIProbeAddsStderrDiagnostics pins requirement (a) at the CLI:
+// reachability results stay on stdout, the actionable quota-project hint is a
+// [colab] diagnostic on stderr, and gcloud is only ever asked to read config.
+func TestPublicAPIProbeAddsStderrDiagnostics(t *testing.T) {
+	t.Setenv("GOOGLE_CLOUD_QUOTA_PROJECT", "")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("COLAB_SCOPES", "full")
+	gc := useFakeGCloud(t, "(unset)\n")
+
+	h := newHarness(t)
+	code := h.run(t, "", "test-public-api")
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%q", code, h.stderr.String())
+	}
+	for _, want := range []string{
+		"Public API (colaboratory.googleapis.com): OK",
+		"Tunnel API (colab.research.google.com):   OK",
+	} {
+		if !strings.Contains(h.stdout.String(), want) {
+			t.Fatalf("stdout result changed/missing %q: %q", want, h.stdout.String())
+		}
+	}
+	if strings.Contains(h.stdout.String(), "[colab]") {
+		t.Fatalf("diagnostic leaked into stdout: %q", h.stdout.String())
+	}
+	stderr := h.stderr.String()
+	for _, want := range []string{"[colab]", "quota", "GOOGLE_CLOUD_QUOTA_PROJECT", "maintainer"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q: %q", want, stderr)
+		}
+	}
+	assertOnlyReadOnlyGCloud(t, gc, 1)
+}
+
+// TestPublicAPIProbeDetectsQuotaProjectAndReconsent pins requirement (b) plus
+// the re-consent note on stderr, while proving ADC credential material is
+// never printed and no gcloud process is needed when a local signal exists.
+func TestPublicAPIProbeDetectsQuotaProjectAndReconsent(t *testing.T) {
+	dir := t.TempDir()
+	adc := filepath.Join(dir, "application_default_credentials.json")
+	const tokenCanary = "PLANTED_CLI_REFRESH_TOKEN_DO_NOT_PRINT"
+	if err := os.WriteFile(adc, []byte(`{"quota_project_id":"cli-project","refresh_token":"`+tokenCanary+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("GOOGLE_CLOUD_QUOTA_PROJECT", "")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
+	t.Setenv("COLAB_AUTH", "oauth2")
+	t.Setenv("COLAB_SCOPES", "minimal")
+	gc := useFakeGCloud(t, "unused\n")
+
+	h := newHarness(t)
+	code := h.run(t, "", "test-public-api")
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%q", code, h.stderr.String())
+	}
+	for _, want := range []string{
+		"Public API (colaboratory.googleapis.com): OK",
+		"Tunnel API (colab.research.google.com):   OK",
+	} {
+		if !strings.Contains(h.stdout.String(), want) {
+			t.Fatalf("stdout result changed/missing %q: %q", want, h.stdout.String())
+		}
+	}
+	stderr := h.stderr.String()
+	for _, want := range []string{"detected via adc:quota_project_id", "re-consent"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q: %q", want, stderr)
+		}
+	}
+	if strings.Contains(h.stdout.String()+stderr, tokenCanary) {
+		t.Fatalf("token leaked: %q", h.stdout.String()+stderr)
+	}
+	if strings.Contains(h.stdout.String()+stderr, "cli-project") {
+		t.Fatalf("quota project value should not be echoed: %q", h.stdout.String()+stderr)
+	}
+	assertOnlyReadOnlyGCloud(t, gc, 0)
 }
 
 // Ports upstream tests/test_readme.py / tests/test_cli.py (utility cases): the
