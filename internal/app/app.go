@@ -26,6 +26,7 @@ import (
 	"github.com/20Youssef10/golab/internal/render"
 	"github.com/20Youssef10/golab/internal/runtime"
 	"github.com/20Youssef10/golab/internal/state"
+	"github.com/20Youssef10/golab/internal/trace"
 	"github.com/20Youssef10/golab/internal/update"
 	"github.com/20Youssef10/golab/internal/version"
 )
@@ -70,6 +71,8 @@ type Deps struct {
 	Runtime       runtime.Runtime
 	HistoryDir    string
 	RenderConfig  render.Config
+	// Trace is the optional redacted wire recorder (GOLAB_TRACE / trace cmd).
+	Trace *trace.Recorder
 
 	Stdin  io.Reader
 	Stdout io.Writer
@@ -113,6 +116,24 @@ func New(ctx context.Context, cfg Config) (*Deps, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Wire tracing is opt-in via GOLAB_TRACE on any command, or via an
+	// explicit context config set by `golab trace -- <cmd>`. No recorder is
+	// created (and no file is opened) otherwise.
+	traceCfg := trace.FromContext(ctx)
+	if traceCfg.Path == "" {
+		traceCfg = trace.ConfigFromEnv()
+	}
+	recorder, err := trace.New(traceCfg)
+	if err != nil {
+		return nil, err
+	}
+	var frameObserver func(runtime.FrameEvent)
+	if recorder != nil {
+		frameObserver = func(e runtime.FrameEvent) {
+			recorder.CountFrame(e.Channel, e.Direction, e.MsgType)
+		}
+	}
+
 	authProvider, err := auth.New(auth.Config{
 		Provider:              cfg.AuthProvider,
 		ScopeMode:             cfg.Scopes,
@@ -127,9 +148,10 @@ func New(ctx context.Context, cfg Config) (*Deps, error) {
 		return nil, err
 	}
 	rt, err := runtime.New(runtime.Config{
-		Logger:      logx.Logger(),
-		HTTPClient:  cfg.RuntimeHTTPClient,
-		ClientAgent: version.ClientAgent(),
+		Logger:        logx.Logger(),
+		HTTPClient:    cfg.RuntimeHTTPClient,
+		ClientAgent:   version.ClientAgent(),
+		FrameObserver: frameObserver,
 	})
 	if err != nil {
 		return nil, err
@@ -146,6 +168,7 @@ func New(ctx context.Context, cfg Config) (*Deps, error) {
 		Runtime:       rt,
 		HistoryDir:    histDir,
 		RenderConfig:  render.Config{Markdown: true},
+		Trace:         recorder,
 		Stdin:         os.Stdin,
 		Stdout:        os.Stdout,
 		Stderr:        os.Stderr,
@@ -190,6 +213,13 @@ func (d *Deps) ColabClient(ctx context.Context) (colabapi.Client, error) {
 		}
 		v := settings.UsePublicAPI
 		usePublic = &v
+	}
+	// Wrap a COPY of the authenticated client so the tracer sits directly
+	// above the OAuth bearer transport and never mutates a shared client.
+	if d.Trace != nil {
+		wrapped := *httpClient
+		wrapped.Transport = d.Trace.Wrap(httpClient.Transport)
+		httpClient = &wrapped
 	}
 	client, err := colabapi.New(colabapi.Config{
 		Domain:       d.Config.ColabDomain,

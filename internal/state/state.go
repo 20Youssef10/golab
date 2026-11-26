@@ -196,7 +196,8 @@ func (s *Store) Put(v Session) error {
 			return err
 		}
 		sessions[v.Name] = v
-		return writeJSON(s.path, sessions)
+		// tier6 hunk: stamp the additive schema version on every write.
+		return writeJSON(s.path, sessionFile{SchemaVersion: CurrentSchemaVersion, Sessions: sessions})
 	})
 }
 
@@ -213,7 +214,8 @@ func (s *Store) Delete(name string) error {
 			return nil
 		}
 		delete(sessions, name)
-		return writeJSON(s.path, sessions)
+		// tier6 hunk: preserve the version stamp across deletes.
+		return writeJSON(s.path, sessionFile{SchemaVersion: CurrentSchemaVersion, Sessions: sessions})
 	})
 }
 
@@ -359,14 +361,16 @@ func readSessions(p string) (map[string]Session, error) {
 	if len(strings.TrimSpace(string(b))) == 0 {
 		return map[string]Session{}, nil
 	}
-	var out map[string]Session
-	if err := json.Unmarshal(b, &out); err != nil {
+	// tier6 hunk: decode the additive schema_version key without treating it
+	// as a session. The version type itself lives in schema.go.
+	var file sessionFile
+	if err := json.Unmarshal(b, &file); err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", ErrCorrupt, p, err)
 	}
-	if out == nil {
-		out = map[string]Session{}
+	if file.Sessions == nil {
+		file.Sessions = map[string]Session{}
 	}
-	return out, nil
+	return file.Sessions, nil
 }
 
 // syncParentDir flushes the directory entry created by os.Rename. Without it
@@ -448,6 +452,11 @@ var windowsReserved = map[string]bool{
 func ValidateName(name string) error {
 	if !nameRE.MatchString(name) {
 		return fmt.Errorf("invalid session name %q: expected ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name)
+	}
+	// tier6 hunk: reserve the top-level metadata key so a session cannot
+	// shadow schema_version when the store is written.
+	if name == schemaVersionKey {
+		return fmt.Errorf("invalid session name %q: reserved for state metadata", name)
 	}
 	base := strings.ToUpper(strings.SplitN(name, ".", 2)[0])
 	if windowsReserved[base] {

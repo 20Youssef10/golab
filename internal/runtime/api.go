@@ -23,12 +23,24 @@ type Target struct {
 	SessionID string
 }
 
+// FrameEvent is the redacted label of one WebSocket frame. Payloads are never
+// carried: the observer is used for frame COUNTS in wire traces only.
+type FrameEvent struct {
+	Channel   string
+	Direction string // in | out
+	MsgType   string
+}
+
 // Config configures a Runtime. Zero values are usable; HTTPClient is primarily
 // for tests that need to trust a fake server's TLS certificate.
 type Config struct {
 	Logger      *slog.Logger
 	HTTPClient  *http.Client
 	ClientAgent string
+
+	// FrameObserver, when set, receives one event per decoded inbound frame
+	// and one per outbound frame. It is optional and never sees frame data.
+	FrameObserver func(FrameEvent)
 
 	// RequestTimeout bounds each REST call (default 30s).
 	RequestTimeout time.Duration

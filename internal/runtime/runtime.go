@@ -67,7 +67,7 @@ func (r *runtimeImpl) Attach(ctx context.Context, target Target, opts AttachOpti
 		if err != nil {
 			return err
 		}
-		wsConn = newConn(ws, r.cfg.Logger)
+		wsConn = newConn(ws, r.cfg.Logger, r.cfg.FrameObserver)
 		return nil
 	}); err != nil {
 		return nil, err

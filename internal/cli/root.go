@@ -188,6 +188,11 @@ func execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	root := NewRootCommand(in, out, errOut)
 	root.SetArgs(args)
 	err := root.ExecuteContext(ctx)
+	// tier6 hunk: emit any accumulated WebSocket frame summary so a redacted
+	// wire trace is complete when the command returns.
+	if d, ok := depsFromContext(root.Context()); ok && d != nil && d.Trace != nil {
+		_ = d.Trace.FlushWS()
+	}
 	// The notice runs asynchronously; join it before returning so its stderr
 	// write completes while the command's writers are still alive.
 	if join, ok := root.Context().Value(updateJoinKey{}).(func()); ok && join != nil {
@@ -261,7 +266,7 @@ func suppressed(command string) bool {
 	switch command {
 	case "update", "version", "log", "pay", "help", "url", "whoami",
 		"test-public-api", "readme", "README", "skill", "SKILL",
-		"doctor", "audit", "budget":
+		"doctor", "audit", "budget", "trace", "compat", "state":
 		return true
 	default:
 		return false

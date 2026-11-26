@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -92,6 +93,7 @@ func runUpdate(ctx context.Context, d *app.Deps, cfg update.Config, doInstall bo
 
 func updateCommand() *cobra.Command {
 	var install bool
+	var verifyOnly, checksumFile, signatureFile, sbomFile string
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Check for a newer version (and optionally install it)",
@@ -102,10 +104,29 @@ func updateCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if verifyOnly != "" {
+				// CI gate: a local artifact must pass the full checksum +
+				// cosign signature + SBOM chain. Nothing is installed and no
+				// release check or network download is performed here.
+				res, err := update.VerifyLocal(cmd.Context(), cfg, verifyOnly, update.LocalVerifyOptions{
+					ChecksumFile: checksumFile, SignatureFile: signatureFile, SBOMFile: sbomFile,
+				})
+				if err != nil {
+					return exitCausef(1, err, "[colab] Artifact verification failed: %s: %s",
+						logx.Redact(err.Error()), strings.Join(updateErrorSentinels(err), ", "))
+				}
+				fmt.Fprintf(d.Stdout, "[update] verified %s (sha256 %s)\n",
+					filepath.Base(res.Artifact), res.SHA256)
+				return nil
+			}
 			return runUpdate(cmd.Context(), d, cfg, install)
 		},
 	}
 	cmd.Flags().BoolVar(&install, "install", false, "Verify and install the newer release")
+	cmd.Flags().StringVar(&verifyOnly, "verify-only", "", "Verify a local release artifact (checksum + cosign + SBOM) without installing")
+	cmd.Flags().StringVar(&checksumFile, "checksums", "", "Checksum file for --verify-only (default: sibling checksums.txt)")
+	cmd.Flags().StringVar(&signatureFile, "signature", "", "Cosign bundle for --verify-only (default: <artifact>.sigstore.json)")
+	cmd.Flags().StringVar(&sbomFile, "sbom", "", "Signed SBOM bundle for --verify-only (default: <artifact>.sbom.sigstore.json)")
 	return cmd
 }
 

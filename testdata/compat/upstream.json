@@ -1,0 +1,51 @@
+{
+  "kind": "self-snapshot",
+  "scope": "subset of this repository's command tree (9 commands); commands outside it are not claimed to be new",
+  "source": "snapshot of this repository's own cobra command tree (NOT a live capture of the upstream Python CLI; fakes are not live proof)",
+  "captured": "2026-11-26",
+  "commands": {
+    "golab audit": [
+      "json"
+    ],
+    "golab compat report": [
+      "json"
+    ],
+    "golab doctor": [
+      "apply",
+      "fix",
+      "fixtures",
+      "json",
+      "live",
+      "section",
+      "timeout"
+    ],
+    "golab new": [
+      "gpu",
+      "high-mem",
+      "session",
+      "tpu"
+    ],
+    "golab sessions": [],
+    "golab state migrate": [
+      "apply",
+      "dry-run",
+      "json"
+    ],
+    "golab stop": [
+      "all",
+      "session",
+      "verify"
+    ],
+    "golab trace": [
+      "output",
+      "unsafe-bodies"
+    ],
+    "golab update": [
+      "checksums",
+      "install",
+      "sbom",
+      "signature",
+      "verify-only"
+    ]
+  }
+}

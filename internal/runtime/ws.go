@@ -48,6 +48,8 @@ type wsConn interface {
 type conn struct {
 	ws     wsConn
 	logger *slog.Logger
+	// frameObserver receives labels only (never payloads) for wire traces.
+	frameObserver func(FrameEvent)
 
 	channels map[string]chan *Message
 
@@ -86,9 +88,18 @@ type activeExec struct {
 	session string
 }
 
-func newConn(ws wsConn, logger *slog.Logger) *conn {
+func firstObserver(observers []func(FrameEvent)) func(FrameEvent) {
+	if len(observers) > 0 {
+		return observers[0]
+	}
+	return nil
+}
+
+// The variadic observer keeps existing tests and embedders source-compatible.
+func newConn(ws wsConn, logger *slog.Logger, observer ...func(FrameEvent)) *conn {
 	c := &conn{
 		logger:            logger,
+		frameObserver:     firstObserver(observer),
 		channels:          map[string]chan *Message{},
 		done:              make(chan struct{}),
 		hookCh:            make(chan hookTask, hookQueueSize),
@@ -193,6 +204,9 @@ func (c *conn) readLoop(ctx context.Context, ws wsConn, lost chan struct{}) {
 			c.logger.Debug("dropping malformed kernel frame", "error", err)
 			continue
 		}
+		if c.frameObserver != nil {
+			c.frameObserver(FrameEvent{Channel: msg.Channel, Direction: "in", MsgType: msg.Header.MsgType})
+		}
 		if msg.Header.MsgType == "colab_request" {
 			c.hookMu.RLock()
 			hook := c.colabHook
@@ -289,6 +303,9 @@ func (c *conn) send(ctx context.Context, msg *Message) error {
 	typ, data, err := EncodeFrame(msg)
 	if err != nil {
 		return err
+	}
+	if c.frameObserver != nil {
+		c.frameObserver(FrameEvent{Channel: msg.Channel, Direction: "out", MsgType: msg.Header.MsgType})
 	}
 	// Lock first, then snapshot the socket under the lock. Snapshotting before
 	// the lock lets a concurrent redial swap c.ws so the frame is written to a
