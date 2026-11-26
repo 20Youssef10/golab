@@ -25,5 +25,6 @@ Each direct dependency needs a one-line justification (AGENTS.md).
 | `github.com/kballard/go-shellquote` | POSIX quoting for `ssh -- CMD` argv forwarding. |
 | `github.com/mattn/go-isatty` | Mockable TTY detection across Unix, Windows and Termux. |
 | `github.com/stretchr/testify` | Test assertions (stdlib `testing` preferred where sufficient). |
+| `go.yaml.in/yaml/v3` | Strict `KnownFields(true)` decoding of `golab.yaml` budget profiles, replacing a hand-rolled YAML subset parser. |
 
 Policy: `govulncheck` clean, `go mod verify` green, no new dependency without a row above.

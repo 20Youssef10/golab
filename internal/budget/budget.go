@@ -9,15 +9,18 @@
 package budget
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/20Youssef10/golab/internal/colabapi"
+	"go.yaml.in/yaml/v3"
 )
 
 var (
@@ -110,13 +113,85 @@ func Check(ctx context.Context, usage *colabapi.Consumption, policy Policy) (Dec
 	return d, nil
 }
 
-// LoadProfile reads the small, strict subset of golab.yaml that describes a
-// budget. It supports `version: 1`, `defaults.budget` and named
-// `profiles.<name>.budget` blocks with `max_balance` / `max_hourly` / `enforce`
-// only. `max_balance` is the legacy key name for the minimum reserve floor; it
-// is kept for backward compatibility. A named profile overrides defaults,
-// including an explicit `enforce: false`. Paths are local; the profile never
-// contains a price table.
+// versionField accepts schema version 1 in either plain or quoted form.
+// Anything else (including a missing version) is an unsupported version.
+type versionField int
+
+func (v *versionField) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode {
+		return fmt.Errorf("%w: expected a scalar on line %d", ErrUnsupportedVersion, n.Line)
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(n.Value))
+	if err != nil || parsed != 1 {
+		return fmt.Errorf("%w: %q on line %d", ErrUnsupportedVersion, n.Value, n.Line)
+	}
+	*v = versionField(parsed)
+	return nil
+}
+
+// positiveFloat is a CU threshold. Native YAML numbers, quoted scalars and
+// block scalars are all accepted, but the value must still be a positive,
+// finite number. `set` distinguishes an absent key from a valid threshold.
+type positiveFloat struct {
+	value float64
+	set   bool
+}
+
+func (p *positiveFloat) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode {
+		return fmt.Errorf("%w: expected a scalar on line %d", ErrInvalidThreshold, n.Line)
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(n.Value), 64)
+	if err != nil || parsed <= 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return fmt.Errorf("%w: %q on line %d", ErrInvalidThreshold, n.Value, n.Line)
+	}
+	p.value, p.set = parsed, true
+	return nil
+}
+
+// strictBool records whether `enforce` was present so an explicit false can
+// override the defaults value during named-profile inheritance.
+type strictBool struct {
+	value bool
+	set   bool
+}
+
+func (b *strictBool) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.ScalarNode {
+		return fmt.Errorf("%w: expected a scalar on line %d", ErrInvalidBoolean, n.Line)
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(n.Value))
+	if err != nil {
+		return fmt.Errorf("%w: %q on line %d", ErrInvalidBoolean, n.Value, n.Line)
+	}
+	b.value, b.set = parsed, true
+	return nil
+}
+
+// profileFile is the complete, strict schema of the budget portion of
+// golab.yaml. Decoding with KnownFields(true) rejects any key outside it.
+type profileFile struct {
+	Version  versionField             `yaml:"version"`
+	Defaults profileConfig            `yaml:"defaults"`
+	Profiles map[string]profileConfig `yaml:"profiles"`
+}
+
+type profileConfig struct {
+	Budget budgetConfig `yaml:"budget"`
+}
+
+type budgetConfig struct {
+	MaxBalance positiveFloat `yaml:"max_balance"`
+	MaxHourly  positiveFloat `yaml:"max_hourly"`
+	Enforce    strictBool    `yaml:"enforce"`
+}
+
+// LoadProfile reads the strict YAML schema that describes a budget:
+// `version: 1`, `defaults.budget` and named `profiles.<name>.budget` blocks with
+// `max_balance` / `max_hourly` / `enforce` only. `max_balance` is the legacy
+// key name for the minimum reserve floor and is kept for backward
+// compatibility. A named profile overrides defaults, including an explicit
+// `enforce: false`. Paths are local; price/rate tables are rejected.
 func LoadProfile(ctx context.Context, path, profile string) (Policy, error) {
 	if err := ctx.Err(); err != nil {
 		return Policy{}, err
@@ -125,132 +200,123 @@ func LoadProfile(ctx context.Context, path, profile string) (Policy, error) {
 	if err != nil {
 		return Policy{}, err
 	}
-	versionSeen := false
-	defaults := Policy{}
-	profiles := map[string]Policy{}
-	// A bool's zero value cannot distinguish "not configured" from an explicit
-	// `enforce: false`, so track which named profiles set the key themselves.
-	enforceSet := map[string]bool{}
-	section, sub, named := "", "", ""
-	for i, raw := range strings.Split(string(b), "\n") {
-		if err := ctx.Err(); err != nil {
-			return Policy{}, err
-		}
-		line := strings.TrimSpace(strings.ReplaceAll(raw, "\t", "    "))
-		if strings.Contains(raw, "\t") {
-			return Policy{}, fmt.Errorf("%w: tab indentation on line %d", ErrUnknownKey, i+1)
-		}
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if j := strings.Index(line, " #"); j >= 0 {
-			line = strings.TrimSpace(line[:j])
-		}
-		indent := len(raw) - len(strings.TrimLeft(raw, " "))
-		if indent%2 != 0 {
-			return Policy{}, fmt.Errorf("%w: odd indentation on line %d", ErrUnknownKey, i+1)
-		}
-		key, value, _ := strings.Cut(line, ":")
-		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		hasValue := value != ""
-		if strings.Contains(strings.ToLower(key), "price") ||
-			strings.Contains(strings.ToLower(key), "rate") ||
-			strings.Contains(strings.ToLower(key), "cost") {
-			return Policy{}, fmt.Errorf("%w: %q", ErrPriceTable, key)
-		}
-		if indent == 0 {
-			if hasValue && key == "version" {
-				v, err := strconv.Atoi(value)
-				if err != nil || v != 1 {
-					return Policy{}, fmt.Errorf("%w: %q", ErrUnsupportedVersion, value)
-				}
-				versionSeen = true
-				section, sub, named = "", "", ""
-				continue
-			}
-			switch key {
-			case "defaults", "profiles":
-				if hasValue {
-					return Policy{}, fmt.Errorf("%w: %q", ErrUnknownKey, key)
-				}
-				section, sub, named = key, "", ""
-			default:
-				return Policy{}, fmt.Errorf("%w: %q", ErrUnknownKey, key)
-			}
-			continue
-		}
-		if section == "defaults" && indent == 2 && key == "budget" && !hasValue {
-			sub, named = "budget", ""
-			continue
-		}
-		if section == "profiles" && indent == 2 && !hasValue {
-			sub, named = "", key
-			profiles[key] = Policy{}
-			continue
-		}
-		if section == "profiles" && indent == 4 && key == "budget" && !hasValue {
-			sub = "budget"
-			continue
-		}
-		if sub != "budget" || !hasValue {
-			return Policy{}, fmt.Errorf("%w: %q on line %d", ErrUnknownKey, key, i+1)
-		}
-		if key == "enforce" {
-			b, err := strconv.ParseBool(value)
-			if err != nil {
-				return Policy{}, fmt.Errorf("%w: %q on line %d", ErrInvalidBoolean, value, i+1)
-			}
-			if named != "" {
-				p := profiles[named]
-				p.Enforce = b
-				profiles[named] = p
-				enforceSet[named] = true
-			} else {
-				defaults.Enforce = b
-			}
-			continue
-		}
-		if key != "max_balance" && key != "max_hourly" {
-			return Policy{}, fmt.Errorf("%w: %q on line %d", ErrUnknownKey, key, i+1)
-		}
-		n, err := strconv.ParseFloat(value, 64)
-		if err != nil || n <= 0 || math.IsNaN(n) || math.IsInf(n, 0) {
-			return Policy{}, fmt.Errorf("%w: %q", ErrInvalidThreshold, value)
-		}
-		if named != "" {
-			p := profiles[named]
-			setThreshold(&p, key, n)
-			profiles[named] = p
-		} else {
-			setThreshold(&defaults, key, n)
-		}
+	if err := ctx.Err(); err != nil {
+		return Policy{}, err
 	}
-	if !versionSeen {
+
+	// Parse the document once to reject price tables and valueless keys by
+	// name regardless of where they appear. yaml.v3 does all of the actual
+	// YAML parsing here (document markers, quoting, block and flow styles).
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return Policy{}, fmt.Errorf("%w: %w", ErrUnknownKey, err)
+	}
+	if err := validateProfileNodes(&doc); err != nil {
+		return Policy{}, err
+	}
+
+	// Strict decoding into the typed schema rejects unknown keys and duplicate
+	// keys. The scalar types above preserve the package's typed value errors.
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	var cfg profileFile
+	if err := dec.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return Policy{}, fmt.Errorf("%w: missing version", ErrUnsupportedVersion)
+		}
+		return Policy{}, mapDecodeError(err)
+	}
+	if cfg.Version != 1 {
 		return Policy{}, fmt.Errorf("%w: missing version", ErrUnsupportedVersion)
 	}
+
+	defaults := policyFrom(cfg.Defaults.Budget)
 	if profile == "" {
 		return defaults, nil
 	}
-	p, ok := profiles[profile]
+	named, ok := cfg.Profiles[profile]
 	if !ok {
 		return Policy{}, fmt.Errorf("%w: %q", ErrProfileNotFound, profile)
 	}
-	if p.MaxBalance == 0 {
-		p.MaxBalance = defaults.MaxBalance
+	got := policyFrom(named.Budget)
+	if !named.Budget.MaxBalance.set {
+		got.MaxBalance = defaults.MaxBalance
 	}
-	if p.MaxHourly == 0 {
-		p.MaxHourly = defaults.MaxHourly
+	if !named.Budget.MaxHourly.set {
+		got.MaxHourly = defaults.MaxHourly
 	}
-	if !enforceSet[profile] {
-		p.Enforce = defaults.Enforce
+	if !named.Budget.Enforce.set {
+		got.Enforce = defaults.Enforce
 	}
-	return p, nil
+	return got, nil
 }
 
-func setThreshold(p *Policy, key string, n float64) {
-	if key == "max_balance" {
-		p.MaxBalance = n
-	} else {
-		p.MaxHourly = n
+func policyFrom(b budgetConfig) Policy {
+	return Policy{
+		MaxBalance: b.MaxBalance.value,
+		MaxHourly:  b.MaxHourly.value,
+		Enforce:    b.Enforce.value,
 	}
+}
+
+// mapDecodeError converts yaml.v3's structural errors (unknown fields,
+// duplicate keys and type mismatches) into the package's ErrUnknownKey, while
+// leaving the typed errors raised by the scalar unmarshalers untouched.
+func mapDecodeError(err error) error {
+	for _, sentinel := range []error{
+		ErrUnknownKey, ErrPriceTable, ErrUnsupportedVersion, ErrProfileNotFound,
+		ErrInvalidThreshold, ErrInvalidBoolean,
+	} {
+		if errors.Is(err, sentinel) {
+			return err
+		}
+	}
+	var typeErr *yaml.TypeError
+	if errors.As(err, &typeErr) {
+		return fmt.Errorf("%w: %s", ErrUnknownKey, strings.Join(typeErr.Errors, "; "))
+	}
+	return fmt.Errorf("%w: %w", ErrUnknownKey, err)
+}
+
+// validateProfileNodes preserves two semantics of the old strict subset:
+// price/rate/cost keys are never accepted anywhere, and a scalar key that
+// requires a value cannot be left empty.
+func validateProfileNodes(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.DocumentNode, yaml.SequenceNode:
+		for _, child := range n.Content {
+			if err := validateProfileNodes(child); err != nil {
+				return err
+			}
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key, value := n.Content[i], n.Content[i+1]
+			name := strings.ToLower(key.Value)
+			if isPriceKey(name) {
+				return fmt.Errorf("%w: %q on line %d", ErrPriceTable, key.Value, key.Line)
+			}
+			if requiresValue(name) && value.ShortTag() == "!!null" {
+				return fmt.Errorf("%w: %q requires a value on line %d", ErrUnknownKey, key.Value, key.Line)
+			}
+			if err := validateProfileNodes(value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func isPriceKey(name string) bool {
+	return strings.Contains(name, "price") ||
+		strings.Contains(name, "rate") ||
+		strings.Contains(name, "cost")
+}
+
+func requiresValue(name string) bool {
+	switch name {
+	case "version", "max_balance", "max_hourly", "enforce":
+		return true
+	}
+	return false
 }
