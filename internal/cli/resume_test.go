@@ -133,7 +133,7 @@ func TestRunTransportErrorKeepsSessionAndWritesPending(t *testing.T) {
 	if code := h.run(t, "", "run", "-s", "sess", script); code != 1 {
 		t.Fatalf("exit=%d stderr=%q", code, h.stderr.String())
 	}
-	if !strings.Contains(h.stderr.String(), "colab resume -s sess") {
+	if !strings.Contains(h.stderr.String(), "golab resume -s sess") {
 		t.Fatalf("missing resume hint: %q", h.stderr.String())
 	}
 	if strings.Contains(h.stderr.String(), "Session terminated.") {

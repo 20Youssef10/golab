@@ -117,7 +117,7 @@ func DialWS(ctx context.Context, u, pubkey, agent string, client *http.Client) (
 		// url.Error from net/http embeds the full request URL — including the
 		// proxy token in the query. Redact before it can reach a log or a user.
 		return nil, fmt.Errorf("WebSocket connection failed: %s. "+
-			"Check your network and that the runtime is healthy (`colab status`).",
+			"Check your network and that the runtime is healthy (`golab status`).",
 			logx.Redact(err.Error()))
 	}
 	// A NetConn-style adapter is required by x/crypto/ssh. Unlike

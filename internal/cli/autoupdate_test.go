@@ -140,7 +140,7 @@ func TestUpdateNoticeWriterJoinedBeforeReturn(t *testing.T) {
 	if !strings.Contains(snapshot, "[colab] Update available: 9.9.9.") {
 		t.Fatalf("stderr write did not complete before command return: %q", snapshot)
 	}
-	if !strings.Contains(snapshot, "Run 'colab update --install' to upgrade.") {
+	if !strings.Contains(snapshot, "Run 'golab update --install' to upgrade.") {
 		t.Fatalf("notice text changed: %q", snapshot)
 	}
 }

@@ -191,7 +191,7 @@ func runErrorReason(d *app.Deps, name string, err error) (string, error) {
 		return "run_failed", pruneLost(d, name, err)
 	}
 	if isTransportError(err) {
-		fmt.Fprintf(d.Stderr, "[colab] Work may still be running. Recover with: colab resume -s %s\n", name)
+		fmt.Fprintf(d.Stderr, "[colab] Work may still be running. Recover with: golab resume -s %s\n", name)
 		return "transport_interrupted", err
 	}
 	return "run_failed", err

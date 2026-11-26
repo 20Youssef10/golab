@@ -82,7 +82,7 @@ func mapError(err error) error {
 	case errors.Is(err, colabapi.ErrTooManyAssignments):
 		return exitf(1, "[colab] Allocation refused (precondition failed). This can mean "+
 			"too many active sessions, or a temporary usage or capacity limit for "+
-			"the requested runtime. Run `colab stop` to free up a session, wait "+
+			"the requested runtime. Run `golab stop` to free up a session, wait "+
 			"and retry, or try a different accelerator.")
 	case errors.Is(err, colabapi.ErrNoQuota):
 		return exitf(1, "[colab] %s", logx.Redact(err.Error()))
@@ -91,13 +91,13 @@ func mapError(err error) error {
 		// output; both modes print this same message on stderr.
 		return exitf(1, "[colab] %s: Colab has no spare capacity for the requested runtime. "+
 			"Wait a few minutes and retry, or try a different runtime or accelerator. "+
-			"Run `colab sessions` first if an allocation may have succeeded anyway.",
+			"Run `golab sessions` first if an allocation may have succeeded anyway.",
 			colabapi.ReasonOf(err))
 	case errors.Is(err, runtime.ErrSessionLost):
-		return exitf(1, "[colab] Session appears to be lost (404/401). Run `colab sessions` to check its state.")
+		return exitf(1, "[colab] Session appears to be lost (404/401). Run `golab sessions` to check its state.")
 	case errors.Is(err, ErrNoPendingExecution):
 		return exitf(1, "[colab] No pending execution to resume for this session. "+
-			"Run `colab run -s NAME SCRIPT` first; recovery is only possible after a transport interruption.")
+			"Run `golab run -s NAME SCRIPT` first; recovery is only possible after a transport interruption.")
 	case errors.Is(err, runtime.ErrOutputGap):
 		// OutputGapError's own message carries the resume hint; keep ordering
 		// ahead of ErrTimeout because its unwrapped cause may be a TimeoutError.

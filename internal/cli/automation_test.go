@@ -271,7 +271,7 @@ func TestPropagationDetailOnlyReadsWhitelistedJSONFields(t *testing.T) {
 // and test_drive_propagation_failure_message_includes_server_detail.
 func TestDriveFailureMessagePorted(t *testing.T) {
 	m := driveFailureMessage(400, "")
-	for _, want := range []string{"HTTP 400", "colab whoami", "different Google account"} {
+	for _, want := range []string{"HTTP 400", "golab whoami", "different Google account"} {
 		if !strings.Contains(m, want) {
 			t.Fatalf("message missing %q: %q", want, m)
 		}
@@ -298,7 +298,7 @@ func TestReportDriveFailureNeverEchoesRawHTML(t *testing.T) {
 		Code: 400, Body: html, Method: "POST", Path: "/tun/m/credentials-propagation/ep",
 	})
 	out := h.stderr.String()
-	for _, want := range []string{"HTTP 400", "colab whoami"} {
+	for _, want := range []string{"HTTP 400", "golab whoami"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("message missing %q: %q", want, out)
 		}
@@ -405,7 +405,7 @@ func TestPollForConsentTimeoutIsSanitized(t *testing.T) {
 	h.putSession(t, "s1")
 	reportDriveFailure(h.deps, "s1", err)
 	out := h.stderr.String()
-	for _, want := range []string{"Drive credentials could not be propagated", "colab whoami", "different Google account"} {
+	for _, want := range []string{"Drive credentials could not be propagated", "golab whoami", "different Google account"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("message missing %q: %q", want, out)
 		}
@@ -760,7 +760,7 @@ func TestPollForConsentAllFailuresBoundedAndSanitized(t *testing.T) {
 	h.putSession(t, "s1")
 	reportDriveFailure(h.deps, "s1", err)
 	out := h.stderr.String()
-	for _, want := range []string{"Drive credentials could not be propagated", "colab whoami"} {
+	for _, want := range []string{"Drive credentials could not be propagated", "golab whoami"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("message missing %q: %q", want, out)
 		}

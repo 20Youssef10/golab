@@ -129,7 +129,7 @@ func resolveSSHTarget(ctx context.Context, d *app.Deps, cmd *cobra.Command, name
 		s, err := d.ResolveSession(ctx, name)
 		if err != nil {
 			if errors.Is(err, state.ErrNotFound) {
-				return sshTarget{}, exitf(2, "[colab] session '%s' not found. Run `colab sessions` to list active sessions.", name)
+				return sshTarget{}, exitf(2, "[colab] session '%s' not found. Run `golab sessions` to list active sessions.", name)
 			}
 			return sshTarget{}, sessionErr(name, err)
 		}
@@ -162,7 +162,7 @@ func resolveSSHTarget(ctx context.Context, d *app.Deps, cmd *cobra.Command, name
 	s, err := d.ResolveSession(ctx, name)
 	if err != nil {
 		if errors.Is(err, state.ErrNotFound) {
-			return sshTarget{}, exitf(2, "[colab] session '%s' not found. Run `colab sessions` to list active sessions.", name)
+			return sshTarget{}, exitf(2, "[colab] session '%s' not found. Run `golab sessions` to list active sessions.", name)
 		}
 		return sshTarget{}, sessionErr(name, err)
 	}
@@ -250,7 +250,7 @@ func sshCommand() *cobra.Command {
 				case len(args) > 0:
 					fmt.Fprintln(d.Stderr, "[colab] --rm ignored with -- CMD.")
 				case !target.created && mode == sshx.ModeInteractive:
-					fmt.Fprintln(d.Stderr, "[colab] --rm ignored: only a runtime auto-created by `colab ssh` is removed on exit.")
+					fmt.Fprintln(d.Stderr, "[colab] --rm ignored: only a runtime auto-created by `golab ssh` is removed on exit.")
 				}
 			}
 			var teardown func(context.Context) error

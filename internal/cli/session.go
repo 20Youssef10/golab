@@ -141,7 +141,7 @@ func mapAssignFailure(err error, opts runtimeOptions) error {
 	case errors.Is(err, colabapi.ErrTooManyAssignments):
 		return exitf(1, "[colab] Allocation refused (precondition failed). This can mean "+
 			"too many active sessions, or a temporary usage or capacity limit for "+
-			"the requested runtime. Run `colab stop` to free up a session, wait "+
+			"the requested runtime. Run `golab stop` to free up a session, wait "+
 			"and retry, or try a different accelerator.")
 	case errors.Is(err, colabapi.ErrNoQuota):
 		return exitf(1, "[colab] Backend rejected accelerator '%s'. You may not have "+

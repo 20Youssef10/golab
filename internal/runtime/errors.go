@@ -98,7 +98,7 @@ type OutputGapError struct {
 func (e *OutputGapError) Error() string {
 	msg := fmt.Sprintf("output may have been emitted while the kernel connection was down "+
 		"(execution %s): recovered %d output(s); output published during the drop cannot "+
-		"be replayed by this client. Work may still be running. Recover with: colab resume -s NAME",
+		"be replayed by this client. Work may still be running. Recover with: golab resume -s NAME",
 		e.MsgID, len(e.Recovered))
 	if e.Cause != nil {
 		msg += ": " + e.Cause.Error()

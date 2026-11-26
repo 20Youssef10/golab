@@ -93,7 +93,7 @@ func ExplainHandshakeFailure(status int, body []byte) string {
 		}
 	case 401:
 		return "Authentication failed (HTTP 401): the runtime-proxy token " +
-			"is invalid. The session may have expired - try `colab new`."
+			"is invalid. The session may have expired - try `golab new`."
 	case 403:
 		return "Forbidden (HTTP 403): the server refused this request; the " +
 			"runtime-proxy token may lack permission for this action. (A " +
@@ -102,23 +102,23 @@ func ExplainHandshakeFailure(status int, body []byte) string {
 		return "Endpoint not found (HTTP 404): this runtime does not expose " +
 			"the /colab/ssh endpoint. SSH is enabled at runtime creation, " +
 			"so an older or non-SSH runtime will not have it - run " +
-			"`colab new` for a fresh runtime with SSH."
+			"`golab new` for a fresh runtime with SSH."
 	case 429:
 		if limit, ok := SessionLimit(body); ok {
 			return fmt.Sprintf(
 				"SSH session limit reached (HTTP 429): %d of %d SSH sessions "+
-					"in use on this runtime. Close another `colab ssh` or IDE "+
+					"in use on this runtime. Close another `golab ssh` or IDE "+
 					"connection to it and retry. If the previous client died, "+
 					"retry with `--force`. The limit depends on your Colab plan.",
 				limit, limit)
 		}
-		return "Already-active SSH session (HTTP 429): another `colab ssh` " +
+		return "Already-active SSH session (HTTP 429): another `golab ssh` " +
 			"is connected to this runtime. Disconnect it and retry. " +
 			"If the previous client died, retry with `--force`."
 	case 502:
 		return "Bad gateway (HTTP 502): the runtime's local sshd is " +
-			"unreachable. The runtime may be unhealthy; try `colab " +
-			"status`, then `colab stop` + `colab new`."
+			"unreachable. The runtime may be unhealthy; try `golab " +
+			"status`, then `golab stop` + `golab new`."
 	case 0:
 		return "WebSocket upgrade failed without an HTTP status: " +
 			snippet + ". Check your network."

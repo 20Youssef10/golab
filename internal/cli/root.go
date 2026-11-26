@@ -245,7 +245,7 @@ func autoUpdateNotice(ctx context.Context, d *app.Deps, cmd *cobra.Command) func
 	// can never race with the callback's read of d.Stderr.
 	stderr := d.Stderr
 	return maybeCheckFn(ctx, cfg, func(rel *update.Release) {
-		fmt.Fprintf(stderr, "[colab] Update available: %s. Run 'colab update --install' to upgrade.\n", rel.Version)
+		fmt.Fprintf(stderr, "[colab] Update available: %s. Run 'golab update --install' to upgrade.\n", rel.Version)
 		settings, err := d.SettingsStore.Load()
 		if err != nil {
 			return

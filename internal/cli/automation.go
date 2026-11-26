@@ -443,7 +443,7 @@ func driveFailureMessage(status int, detail string) string {
 	}
 	return strings.Join(append(lines,
 		"[colab] If the browser showed an account chooser, re-run the command",
-		"[colab] and select the account reported by `colab whoami`. Approving",
+		"[colab] and select the account reported by `golab whoami`. Approving",
 		"[colab] Drive access as a different Google account makes propagation fail",
 		"[colab] even though the consent itself succeeded."), "\n")
 }
