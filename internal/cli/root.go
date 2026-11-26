@@ -140,8 +140,11 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 			cmd.SetContext(ctx)
 			cmd.Root().SetContext(ctx)
 			// Tier 1 item 2: local-only session-expiry check on every
-			// invocation. --explain is a no-network dry run, so skip it there.
-			if !explainRequested(cmd) {
+			// invocation, except --explain (a no-network dry run) and the
+			// suppressed read-only diagnostics: those must never mutate state
+			// or stop an expired session before inspecting it (e.g. doctor
+			// --fix must still see the insecure mode it is meant to remediate).
+			if !explainRequested(cmd) && !suppressed(cmd.Name()) {
 				checkExpiredSessions(ctx, d)
 			}
 			return nil
