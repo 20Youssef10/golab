@@ -1,0 +1,13 @@
+# winget version manifest for golab.
+#
+# HONESTY: metadata only; the installer manifest is where the pinned,
+# published release artifact is referenced. See the STATUS note there.
+# BUMP: publish the annotated v<version> tag first, then update PackageVersion
+# here and in the locale/installer files plus every hash and URL in the
+# installer file. Keep internal/version.Number and the brew/scoop/nfpm configs
+# on the same version. Filename must match PackageIdentifier (Publisher.Package).
+PackageIdentifier: 20Youssef10.golab
+PackageVersion: 0.2.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.12.0

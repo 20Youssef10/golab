@@ -1,0 +1,44 @@
+# nfpm config for Linux .deb / .rpm / .apk packages of golab.
+#
+# HONESTY: nfpm packages the BINARY BUILT LOCALLY from this checkout; it does
+# not download or repack any release archive, and it adds no new signature
+# claim. Build that binary from the same annotated v0.2.0 tag whose archives
+# are cosign-signed; do not use a random HEAD build with a pinned version.
+#
+# BUMP CHECKLIST: publish the annotated v<version> tag, set "version" below to
+# that version, and keep internal/version.Number and the brew/scoop/winget
+# configs aligned. nfpm has no `formats:` key: select the format per invocation.
+#
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+#     -ldflags='-s -w' -o dist/golab ./cmd/golab
+#   GOARCH=amd64 nfpm package --config packaging/nfpm.yaml --packager deb
+#   GOARCH=amd64 nfpm package --config packaging/nfpm.yaml --packager rpm
+#   GOARCH=amd64 nfpm package --config packaging/nfpm.yaml --packager apk
+#
+# Repeat with GOARCH=arm64|386|arm|riscv64 (the linux targets in .goreleaser.yaml).
+# Termux .deb is a different layout: dst must be under the Termux prefix
+# /data/data/com.termux/files/usr (docs/04 §3.3), not /usr - use a separate
+# config/override for it rather than editing this one.
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+name: golab
+arch: ${GOARCH}
+platform: linux
+version: 0.2.0
+version_schema: semver
+release: "1"
+section: utils
+priority: optional
+maintainer: 20Youssef10 <youssef2010.mahmoud@gmail.com>
+description: Unofficial Go port of the Google Colab CLI
+vendor: 20Youssef10
+homepage: https://github.com/20Youssef10/golab
+license: Apache-2.0
+contents:
+- src: dist/golab
+  dst: /usr/bin/golab
+  file_info:
+    mode: 0755
+- src: LICENSE
+  dst: /usr/share/doc/golab/LICENSE
+- src: NOTICE
+  dst: /usr/share/doc/golab/NOTICE

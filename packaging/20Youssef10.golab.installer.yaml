@@ -1,0 +1,43 @@
+# winget installer manifest for golab, pinned to the REAL signed v0.2.0 release.
+#
+# HONESTY / VERIFICATION: the three InstallerUrl values below are the actual
+# published GitHub Release assets for v0.2.0 (HTTP 200 when checked) and the
+# InstallerSha256 values are copied verbatim from that release's checksums.txt.
+# Every archive also has a cosign keyless bundle (*.tar.gz.sigstore.json) and a
+# signed CycloneDX SBOM attestation (*.tar.gz.sbom.sigstore.json).
+#
+# KNOWN BLOCKER (do not submit as-is): the release currently publishes ONLY
+# .tar.gz archives. winget's "zip" installer type is the only archive type in
+# the v1.12.0 InstallerType enum and is documented for .zip files; there is no
+# tar.gz installer type. Before a winget-pkgs PR, publish a .zip repack of the
+# SAME signed golab.exe and replace the URLs and hashes here. Never swap in an
+# unverified URL or disable the winget hash check. `winget validate` was not
+# available in the authoring environment; schema structure was checked locally.
+#
+# BUMP CHECKLIST: publish the annotated v<version> tag first, copy the
+# windows_{amd64,arm64,386} lines from its checksums.txt into InstallerSha256,
+# replace every "0.2.0" across all three winget files, and keep
+# internal/version.Number and the brew/scoop/nfpm configs on that version.
+PackageIdentifier: 20Youssef10.golab
+PackageVersion: 0.2.0
+Platform:
+- Windows.Desktop
+MinimumOSVersion: 10.0.17763.0
+ReleaseDate: "2026-11-24"
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: golab.exe
+  PortableCommandAlias: golab
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_amd64.tar.gz
+  InstallerSha256: a75742ec1e03d55cc38687f68056bff4595d639e7571349aca2f675442046af5
+- Architecture: arm64
+  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_arm64.tar.gz
+  InstallerSha256: 83350bc3c1572b9e231706845220b1b5656ebb74e8e3fc444888a70e31e97b7c
+- Architecture: x86
+  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_386.tar.gz
+  InstallerSha256: 38f874d57623179442b7f47b2860a5e3612ded2f0a6a5c27ce21c757858ec7b8
+ManifestType: installer
+ManifestVersion: 1.12.0

@@ -1,0 +1,20 @@
+# winget default-locale manifest for golab (metadata only).
+# BUMP: keep PackageVersion in sync with the version/installer manifests;
+# see the STATUS and bump notes in 20Youssef10.golab.installer.yaml.
+PackageIdentifier: 20Youssef10.golab
+PackageVersion: 0.2.0
+PackageLocale: en-US
+Publisher: 20Youssef10
+PublisherUrl: https://github.com/20Youssef10
+PackageName: golab
+PackageUrl: https://github.com/20Youssef10/golab
+License: Apache-2.0
+LicenseUrl: https://github.com/20Youssef10/golab/blob/main/LICENSE
+ShortDescription: Unofficial Go port of the Google Colab CLI
+Tags:
+- CLI
+- Colab
+- Developer-Tools
+- Utilities
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0
