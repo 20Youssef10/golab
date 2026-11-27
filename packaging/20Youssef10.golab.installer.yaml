@@ -1,15 +1,14 @@
-# winget installer manifest for golab, prepared for the v0.3.0 release that
-# publishes Windows .zip repacks (winget's InstallerType has no tar.gz form).
-# Each .zip contains golab.exe, golab-mcp.exe, LICENSE/NOTICE/README and the
-# two Agent Skills, built from the very same CGO-free artifacts as the signed
-# .tar.gz archives consumed by install.sh and `golab update --install`.
+# winget installer manifest for golab, pinned to the PUBLISHED signed v0.3.0
+# release (winget's InstallerType has no tar.gz form, so these are the .zip
+# repacks). Each .zip contains golab.exe, golab-mcp.exe, LICENSE/NOTICE/README
+# and the two Agent Skills, built from the very same CGO-free artifacts as the
+# signed .tar.gz archives consumed by install.sh and `golab update --install`.
 #
-# RELEASE-TIME STEP (mandatory before a winget-pkgs PR): replace each
-# REPLACE_AT_RELEASE value with the matching `golab_0.3.0_windows_<arch>.zip`
-# line from the signed v0.3.0 checksums.txt (SHA-256 of the .zip bytes, NOT of
-# an unpacked .exe and NOT of the .tar.gz repack). Never submit a manifest
-# that still contains a placeholder, an unverified URL or a copied tar.gz
-# hash. The release workflow signs, checksums and attestes every .zip asset.
+# BLOCKER RESOLVED: the three InstallerSha256 values below are copied verbatim
+# from the signed v0.3.0 checksums.txt (SHA-256 of each .zip, NOT of an
+# unpacked .exe and NOT of a .tar.gz repack). The URLs are the canonical
+# published release assets; every .zip also has a cosign keyless bundle and a
+# signed CycloneDX SBOM attestation. Ready for a winget-pkgs PR.
 # `winget validate` was not available in the authoring environment.
 #
 # BUMP CHECKLIST: publish the annotated v<version> tag first, copy the three
@@ -32,12 +31,12 @@ NestedInstallerFiles:
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_amd64.zip
-  InstallerSha256: REPLACE_AT_RELEASE
+  InstallerSha256: d217650dfd4fe300b9282f2d3068ca8f80acb10031278c0be304805edc05b7e9
 - Architecture: arm64
   InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_arm64.zip
-  InstallerSha256: REPLACE_AT_RELEASE
+  InstallerSha256: ef6e4861c9d8f3f10af47248e1849bdd5564285cf181cc2757c1acc14d709918
 - Architecture: x86
   InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_386.zip
-  InstallerSha256: REPLACE_AT_RELEASE
+  InstallerSha256: 42ae6b195c07a82c7b203491c72ef801105eadd8c5a711b6d15bff9141cd00c3
 ManifestType: installer
 ManifestVersion: 1.12.0

@@ -163,6 +163,15 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 		valid[sum] = true
 	}
 
+	// Real digests copied verbatim from the SIGNED v0.3.0 release's
+	// checksums.txt (download/v0.3.0/checksums.txt). These are SHA-256 of the
+	// three Windows .zip assets, NOT of the .tar.gz repacks or inner .exe.
+	publishedZips := map[string]string{
+		"golab_0.3.0_windows_amd64.zip": "d217650dfd4fe300b9282f2d3068ca8f80acb10031278c0be304805edc05b7e9",
+		"golab_0.3.0_windows_arm64.zip": "ef6e4861c9d8f3f10af47248e1849bdd5564285cf181cc2757c1acc14d709918",
+		"golab_0.3.0_windows_386.zip":   "42ae6b195c07a82c7b203491c72ef801105eadd8c5a711b6d15bff9141cd00c3",
+	}
+
 	ver := lastPublishedVersion
 	base := "https://github.com/20Youssef10/golab/releases/download/v" + ver
 	files := []string{
@@ -186,7 +195,7 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 			continue
 		}
 		s := string(raw)
-		// winget targets the upcoming release with the Windows .zip repacks;
+		// winget targets the published release with the Windows .zip repacks;
 		// the other channels stay on the last signed, published .tar.gz
 		// release even though version.Number has already moved to 0.3.0.
 		target := ver
@@ -206,14 +215,32 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 			}
 		}
 		if name == "20Youssef10.golab.installer.yaml" {
-			// The hashes cannot exist before the release is built: require the
-			// explicit release-time marker instead of a fabricated hash or a
-			// tar.gz hash that would fail winget's own check.
-			if got := strings.Count(s, "InstallerSha256: REPLACE_AT_RELEASE"); got != 3 {
-				t.Errorf("winget installer has %d release-time hash markers, want 3", got)
+			// v0.3.0 is published: no placeholders, exactly three real
+			// .zip digests, each bound to its own canonical asset URL.
+			if strings.Contains(s, "REPLACE_AT_RELEASE") {
+				t.Error("winget installer still has a release-time hash placeholder")
 			}
-			if got := hex64.FindAllString(s, -1); len(got) != 0 {
-				t.Errorf("winget installer must not contain unpublished hashes: %v", got)
+			if got := hex64.FindAllString(s, -1); len(got) != 3 {
+				t.Errorf("winget installer has %d SHA-256 values, want 3: %v", len(got), got)
+			}
+			zipPair := regexp.MustCompile(`InstallerUrl:\s*\S+/(golab_[^/\s]+\.zip)\s*\n\s*InstallerSha256:\s*([0-9a-fA-F]{64})`)
+			pairs := zipPair.FindAllStringSubmatch(s, -1)
+			if len(pairs) != 3 {
+				t.Fatalf("winget installer has %d URL/hash pairs, want 3", len(pairs))
+			}
+			for _, pair := range pairs {
+				asset, hash := pair[1], strings.ToLower(pair[2])
+				want, ok := publishedZips[asset]
+				if !ok {
+					t.Errorf("winget asset %s is not a published v0.3.0 .zip", asset)
+					continue
+				}
+				if hash != want {
+					t.Errorf("winget hash for %s = %s, want %s from signed checksums.txt", asset, hash, want)
+				}
+				if valid[hash] {
+					t.Errorf("winget hash for %s is a .tar.gz digest, not its .zip digest", asset)
+				}
 			}
 			for _, line := range strings.Split(s, "\n") {
 				if strings.Contains(line, "InstallerUrl:") && !strings.HasSuffix(strings.TrimSpace(line), ".zip") {

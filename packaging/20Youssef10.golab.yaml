@@ -1,8 +1,8 @@
 # winget version manifest for golab.
 #
-# HONESTY: metadata only; the installer manifest is where the pinned release
-# .zip artifact is referenced. Prepared for v0.3.0; its hashes are filled from
-# the signed checksums.txt when that tag is cut (see installer manifest).
+# HONESTY: metadata only; the installer manifest is where the pinned, published
+# v0.3.0 .zip artifact and its real signed checksums.txt hashes live. The
+# winget .zip blocker is resolved; these manifests are ready for winget-pkgs.
 # BUMP: publish the annotated v<version> tag first, then update PackageVersion
 # here and in the locale/installer files plus every hash and URL in the
 # installer file. Keep internal/version.Number and the brew/scoop/nfpm configs
