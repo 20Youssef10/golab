@@ -98,9 +98,9 @@ func VerifyAndInstall(ctx context.Context, cfg Config, rel *Release) error {
 
 // extractBinary returns the bytes of the executable inside a GoReleaser
 // .tar.gz release asset. Only the single expected member is read into memory;
-// no other archive member is ever written to disk. Member types and paths are
-// checked before the name so that, for example, a symlink named "golab" can
-// never be mistaken for the executable.
+// no other archive member is ever written to disk. Member types are checked
+// before names so that, for example, a symlink named "golab" can never be
+// mistaken for the executable; all names still pass the path allowlist.
 func extractBinary(archive []byte, goos string, limit int64) ([]byte, error) {
 	want := "golab"
 	if goos == "windows" {
@@ -128,16 +128,22 @@ func extractBinary(archive []byte, goos string, limit int64) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: read tar entries: %w", ErrInvalidArchive, err)
 		}
+		// Member types are checked before names so a symlink named "golab"
+		// can never be mistaken for the executable, and so special files
+		// report their real failure (unexpected type) rather than merely an
+		// unknown name.
+		switch hdr.Typeflag {
+		case tar.TypeDir, tar.TypeReg:
+			// Only regular files may supply executable bytes; directories are
+			// still path-checked below before being skipped.
+		default:
+			return nil, fmt.Errorf("%w: %q has type %d", ErrUnexpectedArchiveMember, hdr.Name, hdr.Typeflag)
+		}
 		if !safeArchivePath(hdr.Name) {
 			return nil, fmt.Errorf("%w: %q", ErrUnsafeArchivePath, hdr.Name)
 		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
+		if hdr.Typeflag == tar.TypeDir {
 			continue
-		case tar.TypeReg:
-			// Only regular files may supply executable bytes.
-		default:
-			return nil, fmt.Errorf("%w: %q has type %d", ErrUnexpectedArchiveMember, hdr.Name, hdr.Typeflag)
 		}
 		if hdr.Size > limit {
 			return nil, fmt.Errorf("%w: member %q declares %d bytes", ErrTooLarge, hdr.Name, hdr.Size)
@@ -171,15 +177,50 @@ func extractBinary(archive []byte, goos string, limit int64) ([]byte, error) {
 	return binary, nil
 }
 
-// safeArchivePath accepts only flat, relative, plain file names. GoReleaser
-// emits archives with no directory components, so separators, traversal and
-// absolute paths are all hostile regardless of the member's declared type.
+// flatArchiveFiles is the complete set of root-level files our GoReleaser
+// archives may contain: the two binaries and the four documentation files.
+// An exact allowlist (rather than "any flat name") keeps a hostile extra file
+// from being accepted just because it has no slash.
+var flatArchiveFiles = map[string]bool{
+	"LICENSE":       true,
+	"NOTICE":        true,
+	"README.md":     true,
+	"CHANGELOG.md":  true,
+	"golab":         true,
+	"golab.exe":     true,
+	"golab-mcp":     true,
+	"golab-mcp.exe": true,
+}
+
+// safeArchivePath accepts only the flat files GoReleaser emits at the archive
+// root and Markdown files under .agents/skills/ (shipped so the installers can
+// copy the Agent Skills). Every other path is hostile regardless of the
+// member's declared type: separators outside the skill prefix, absolute paths,
+// backslashes, empty/dot segments and any ".." traversal are all rejected.
 func safeArchivePath(name string) bool {
 	if name == "" || name == "." || name == ".." || path.IsAbs(name) {
 		return false
 	}
-	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+	// A backslash is a separator on Windows; never interpret it in an archive
+	// member name, including inside the otherwise allowed skill tree.
+	if strings.ContainsAny(name, `\`) {
 		return false
+	}
+	if flatArchiveFiles[name] {
+		return true
+	}
+	const skillPrefix = ".agents/skills/"
+	if !strings.HasPrefix(name, skillPrefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(name, skillPrefix)
+	if rest == "" || !strings.HasSuffix(rest, ".md") {
+		return false
+	}
+	for _, seg := range strings.Split(rest, "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.Contains(seg, "..") {
+			return false
+		}
 	}
 	return true
 }

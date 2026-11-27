@@ -141,6 +141,88 @@ func TestExtractBinaryRejectsHostileArchives(t *testing.T) {
 	}
 }
 
+// LIVE RELEASE REGRESSION (v0.2.0 -> v0.3.0 signed self-update): the new
+// release archives carry the two Agent Skills under .agents/skills/ plus the
+// flat golab-mcp binary. The updater must accept those read-only members,
+// stream them to io.Discard, and still install ONLY the platform binary.
+func TestExtractBinaryAllowsSkillMembers(t *testing.T) {
+	archive := makeTarGz(t,
+		archiveEntry{name: "golab", data: fakeExecutable, mode: 0o755},
+		archiveEntry{name: "golab-mcp", data: []byte("flat mcp binary"), mode: 0o755},
+		archiveEntry{name: "golab-mcp", data: []byte("duplicate skipped member"), mode: 0o755},
+		archiveEntry{name: ".agents/skills/golab-operations/SKILL.md", data: []byte("# skill\n")},
+		archiveEntry{name: ".agents/skills/golab-operations/references/safety.md", data: []byte("# refs\n")},
+	)
+	got, err := extractBinary(archive, "linux", maxArtifact)
+	if err != nil {
+		t.Fatalf("extractBinary(skills archive): %v", err)
+	}
+	if !bytes.Equal(got, fakeExecutable) {
+		t.Fatalf("extracted %d bytes, want only the golab member (%d bytes)", len(got), len(fakeExecutable))
+	}
+	// The same shape on Windows: golab-mcp.exe is skipped, golab.exe installed.
+	win := makeTarGz(t,
+		archiveEntry{name: "golab.exe", data: fakeExecutable, mode: 0o755},
+		archiveEntry{name: "golab-mcp.exe", data: []byte("flat mcp binary"), mode: 0o755},
+		archiveEntry{name: ".agents/skills/colab-mcp/SKILL.md", data: []byte("# skill\n")},
+	)
+	got, err = extractBinary(win, "windows", maxArtifact)
+	if err != nil {
+		t.Fatalf("extractBinary(windows skills archive): %v", err)
+	}
+	if !bytes.Equal(got, fakeExecutable) {
+		t.Fatalf("windows archive extracted %d bytes, want golab.exe only", len(got))
+	}
+}
+
+// Traversal under the newly allowed skill prefix must stay fatal.
+func TestExtractBinaryRejectsSkillTraversal(t *testing.T) {
+	good := archiveEntry{name: "golab", data: fakeExecutable, mode: 0o755}
+	for _, name := range []string{
+		".agents/skills/../evil.md",
+		".agents/skills/a/b/../../../evil",
+	} {
+		t.Run(name, func(t *testing.T) {
+			archive := makeTarGz(t, good, archiveEntry{name: name, data: []byte("pwned")})
+			got, err := extractBinary(archive, "linux", maxArtifact)
+			if !errors.Is(err, ErrUnsafeArchivePath) {
+				t.Fatalf("extractBinary error = %v, want ErrUnsafeArchivePath", err)
+			}
+			if got != nil {
+				t.Fatalf("rejected archive returned %d bytes", len(got))
+			}
+		})
+	}
+}
+
+// The allowlist is explicit: flat release files and .md skills, nothing else.
+func TestSafeArchivePathAllowlist(t *testing.T) {
+	allowed := []string{
+		"LICENSE", "NOTICE", "README.md", "CHANGELOG.md",
+		"golab", "golab.exe", "golab-mcp", "golab-mcp.exe",
+		".agents/skills/colab-mcp/SKILL.md",
+		".agents/skills/golab-operations/references/safety.md",
+	}
+	rejected := []string{
+		"", ".", "..", "../evil", "/tmp/evil", `docs\evil`,
+		"docs/evil", "golab-mcp.exe.bak",
+		".agents/skills/../evil.md", ".agents/skills/a/b/../../../evil",
+		".agents/skills/evil.txt", ".agents/skills/a/./b.md",
+		".agents/skills/", ".agents/skills/a/", `/.agents/skills/a.md`,
+		`.agents\skills\a.md`,
+	}
+	for _, name := range allowed {
+		if !safeArchivePath(name) {
+			t.Errorf("safeArchivePath(%q) = false, want true", name)
+		}
+	}
+	for _, name := range rejected {
+		if safeArchivePath(name) {
+			t.Errorf("safeArchivePath(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestExtractBinaryWindowsName(t *testing.T) {
 	archive := makeTarGz(t,
 		archiveEntry{name: "golab.exe", data: fakeExecutable, mode: 0o755},
