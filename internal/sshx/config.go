@@ -54,6 +54,13 @@ type Config struct {
 	// client. When nil, a file store in the config dir is used. It is an
 	// interface of plain values so sshx stays free of state/CLI dependencies.
 	HostKeyStore HostKeyStore
+
+	// ExpectedHostKey is the user-supplied expected SHA256 fingerprint from
+	// --accept-host-key (with or without the SHA256: prefix). Empty means plain
+	// TOFU. It never disables verification: New wraps the store so the expected
+	// value is checked against the live key at handshake BEFORE it is recorded,
+	// and against the stored pin on later uses. No env var sets this field.
+	ExpectedHostKey string
 }
 
 // Runner executes one SSH connection. Construct a fresh Runner per command.
@@ -81,6 +88,20 @@ func New(cfg Config) (*Runner, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = logx.Logger()
+	}
+	if cfg.ExpectedHostKey != "" {
+		expected, err := NormalizeHostKeyFingerprint(cfg.ExpectedHostKey)
+		if err != nil {
+			return nil, err
+		}
+		base := cfg.HostKeyStore
+		if base == nil {
+			base, err = NewFileHostKeyStore("")
+			if err != nil {
+				return nil, err
+			}
+		}
+		cfg.HostKeyStore = &expectedHostKeyStore{inner: base, expected: expected}
 	}
 	return &Runner{cfg: cfg, logger: cfg.Logger}, nil
 }

@@ -210,7 +210,7 @@ func mapSSHRunError(err error) error {
 }
 
 func sshCommand() *cobra.Command {
-	var name, identity, gpu, tpu, internalMode string
+	var name, identity, gpu, tpu, internalMode, acceptHostKey string
 	var proxyMode, highMem, rm, force bool
 	cmd := &cobra.Command{
 		Use:   "ssh [-- CMD...]",
@@ -222,6 +222,13 @@ func sshCommand() *cobra.Command {
 			}
 			if proxyMode && len(args) > 0 {
 				return usagef("[colab] --proxy-mode takes no command.")
+			}
+			// Validate the pin BEFORE resolveSSHTarget: an invalid fingerprint
+			// must never reach an allocation (which spends money).
+			if acceptHostKey != "" {
+				if _, err := sshx.NormalizeHostKeyFingerprint(acceptHostKey); err != nil {
+					return usagef("[colab] --accept-host-key: %v", err)
+				}
 			}
 			mode := selectSSHMode(proxyMode, internalMode, args)
 			if explainRequested(cmd) {
@@ -260,16 +267,17 @@ func sshCommand() *cobra.Command {
 			}
 
 			runner, err := sshx.New(sshx.Config{
-				ProxyURL: target.session.URL,
-				Token:    target.session.Token,
-				Mode:     mode,
-				Identity: identity,
-				Command:  args,
-				Stdin:    d.Stdin,
-				Stdout:   d.Stdout,
-				Stderr:   d.Stderr,
-				Teardown: teardown,
-				Logger:   d.Log,
+				ProxyURL:        target.session.URL,
+				Token:           target.session.Token,
+				Mode:            mode,
+				Identity:        identity,
+				Command:         args,
+				Stdin:           d.Stdin,
+				Stdout:          d.Stdout,
+				Stderr:          d.Stderr,
+				Teardown:        teardown,
+				Logger:          d.Log,
+				ExpectedHostKey: acceptHostKey,
 			})
 			if err != nil {
 				return err
@@ -289,6 +297,9 @@ func sshCommand() *cobra.Command {
 		"Act as an OpenSSH ProxyCommand-compatible WebSocket-stdio bridge")
 	cmd.Flags().StringVarP(&identity, "identity", "i", "",
 		"SSH key (public .pub or private key path) for the X-Colab-Ssh-Pubkey header")
+	cmd.Flags().StringVar(&acceptHostKey, "accept-host-key", "",
+		"Pin the runtime host key by SHA256 fingerprint (with or without the SHA256: prefix); "+
+			"must match the live key before first use and the stored pin afterwards")
 	cmd.Flags().StringVar(&gpu, "gpu", "", "GPU accelerator for an auto-created runtime")
 	cmd.Flags().StringVar(&tpu, "tpu", "", "TPU accelerator for an auto-created runtime")
 	cmd.Flags().BoolVar(&highMem, "high-mem", false, "Request a high-RAM machine shape")

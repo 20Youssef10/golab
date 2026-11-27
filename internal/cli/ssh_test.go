@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -521,5 +522,135 @@ func TestSignalsDisabledForTestOnlyInTestBinary(t *testing.T) {
 	t.Cleanup(func() { flag.CommandLine = original })
 	if signalsDisabledForTest() {
 		t.Fatal("escape hatch active in a release-like binary")
+	}
+}
+
+// wrongHostKeyFP is a well-formed SHA256 fingerprint of 32 zero bytes: it is
+// certainly not the fake server's key, and embeds no real key material.
+const wrongHostKeyFP = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+// TestSSHAcceptHostKeyFlagMatchesStoredPin wires --accept-host-key end to end:
+// a first connection pins the key, a later connection with the matching
+// explicit fingerprint (bare form) succeeds, and a wrong value is a hard error
+// that cannot rewrite the pin.
+func TestSSHAcceptHostKeyFlagMatchesStoredPin(t *testing.T) {
+	h := newHarness(t)
+	setStreams(h)
+	srv := newFakeSSH(t, fakesshd.Options{})
+	putSSHSession(t, h, "s1", srv.URL(), "TOK")
+	key := writeEd25519Key(t)
+	host := srv.URL() // hostIdentity(proxyURL) is scheme://host
+	pinPath := filepath.Join(h.dir, "known_hosts.json")
+
+	// A first connection without the flag learns and pins the key.
+	if code := h.run(t, "", "ssh", "-s", "s1", "-i", key, "--", "echo", "hi"); code != 0 {
+		t.Fatalf("first run exit = %d; stderr=%q stdout=%q", code, h.stderr.String(), h.stdout.String())
+	}
+	b, err := os.ReadFile(pinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pins map[string]string
+	if err := json.Unmarshal(b, &pins); err != nil {
+		t.Fatal(err)
+	}
+	fp, ok := pins[host]
+	if !ok || !strings.HasPrefix(fp, "SHA256:") {
+		t.Fatalf("no fingerprint pinned for %q: %v", host, pins)
+	}
+
+	// The same key succeeds with the bare form of the explicit pin.
+	if code := h.run(t, "", "ssh", "-s", "s1", "-i", key,
+		"--accept-host-key", strings.TrimPrefix(fp, "SHA256:"), "--", "echo", "hi"); code != 0 {
+		t.Fatalf("pinned run exit = %d; stderr=%q", code, h.stderr.String())
+	}
+	if got, err := os.ReadFile(pinPath); err != nil || !strings.Contains(string(got), fp) {
+		t.Fatalf("pin lost after matching run: %q err=%v", got, err)
+	}
+
+	// A wrong explicit value is refused and cannot overwrite the stored pin.
+	code := h.run(t, "", "ssh", "-s", "s1", "-i", key,
+		"--accept-host-key", wrongHostKeyFP, "--", "echo", "hi")
+	if code == 0 {
+		t.Fatal("wrong --accept-host-key was accepted")
+	}
+	if !strings.Contains(h.stderr.String(), "host-key") {
+		t.Fatalf("no host-key diagnostic: %q", h.stderr.String())
+	}
+	if got, err := os.ReadFile(pinPath); err != nil || !strings.Contains(string(got), fp) || strings.Contains(string(got), wrongHostKeyFP) {
+		t.Fatalf("pin changed after refused run: %q err=%v", got, err)
+	}
+}
+
+// TestSSHAcceptHostKeyValidatedBeforeAllocation pins AGENTS.md's "validate
+// flags before any allocation" rule: a malformed fingerprint never spends a
+// VM, even on a path that would otherwise auto-create a runtime.
+func TestSSHAcceptHostKeyValidatedBeforeAllocation(t *testing.T) {
+	h := newHarness(t)
+	setStreams(h)
+	key := writeEd25519Key(t)
+
+	code := h.run(t, "", "ssh", "--proxy-mode", "-s", "brandnew", "-i", key,
+		"--accept-host-key", "not-a-fingerprint")
+	if code != 2 {
+		t.Fatalf("exit = %d; want 2; stderr=%q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "--accept-host-key") {
+		t.Fatalf("no flag diagnostic: %q", h.stderr.String())
+	}
+	for _, r := range h.ctrl.Requests() {
+		if r.Method == http.MethodPost && r.Path == "/tun/m/assign" {
+			t.Fatal("allocated a runtime despite an invalid --accept-host-key")
+		}
+	}
+	if _, err := h.deps.Store.Get("brandnew"); err == nil {
+		t.Fatal("session created despite an invalid --accept-host-key")
+	}
+}
+
+// TestSSHReleaseBinaryNeverAcceptsChangedKeyImplicitly: (d) in a release-like
+// binary (no test.v flag) no environment variable can inject an expected key
+// or an insecure mode. A changed key remains a hard failure, and no accept-any
+// escape-hatch flag exists.
+func TestSSHReleaseBinaryNeverAcceptsChangedKeyImplicitly(t *testing.T) {
+	original := flag.CommandLine
+	flag.CommandLine = flag.NewFlagSet("release", flag.ContinueOnError)
+	t.Cleanup(func() { flag.CommandLine = original })
+	for _, name := range []string{
+		"GOLAB_ACCEPT_HOST_KEY", "COLAB_ACCEPT_HOST_KEY", "GOLAB_HOST_KEY",
+		"GOLAB_INSECURE", "COLAB_INSECURE_HOST_KEY", "STRICT_HOST_KEY_CHECKING",
+	} {
+		t.Setenv(name, wrongHostKeyFP)
+	}
+
+	h := newHarness(t)
+	srv := newFakeSSH(t, fakesshd.Options{})
+	putSSHSession(t, h, "s1", srv.URL(), "TOK")
+	key := writeEd25519Key(t)
+	host := srv.URL() // hostIdentity(proxyURL) is scheme://host
+	pinPath := filepath.Join(h.dir, "known_hosts.json")
+	if err := os.WriteFile(pinPath, []byte(`{"`+host+`":"SHA256:stale-pin"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code := h.run(t, "", "ssh", "-s", "s1", "-i", key, "--", "echo", "hi")
+	if code == 0 {
+		t.Fatal("changed host key was accepted implicitly")
+	}
+	if !strings.Contains(h.stderr.String(), "host key changed") {
+		t.Fatalf("no host-key-changed diagnostic: %q", h.stderr.String())
+	}
+	if got, err := os.ReadFile(pinPath); err != nil || !strings.Contains(string(got), "SHA256:stale-pin") {
+		t.Fatalf("stale pin changed: %q err=%v", got, err)
+	}
+
+	cmd := sshCommand()
+	if cmd.Flags().Lookup("accept-host-key") == nil {
+		t.Fatal("--accept-host-key flag is missing")
+	}
+	for _, name := range []string{"insecure", "accept-any", "no-host-key-check", "strict-host-key-checking"} {
+		if cmd.Flags().Lookup(name) != nil {
+			t.Fatalf("accept-any escape hatch --%s exists", name)
+		}
 	}
 }

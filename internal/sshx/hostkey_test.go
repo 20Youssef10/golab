@@ -210,3 +210,225 @@ func TestRunRejectsChangedHostKey(t *testing.T) {
 		t.Fatalf("rc = %d; want 255", rc)
 	}
 }
+
+// There is no upstream Python equivalent: upstream disables host-key checking
+// entirely (ADR-005). These tests close the flagged follow-up to defect §4.12
+// by pinning an expected fingerprint BEFORE the handshake without weakening
+// the existing TOFU pin-and-reject semantics.
+
+// knownHostKeyForTest returns a fake SSH server host key together with its
+// canonical SHA256 fingerprint. Computing it from the key under test keeps the
+// expected value available BEFORE the handshake and avoids hard-coding key
+// material (or fingerprint blobs) in the tree.
+func knownHostKeyForTest(t *testing.T) (ssh.Signer, string) {
+	t.Helper()
+	signer, err := ed25519SignerForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer, ssh.FingerprintSHA256(signer.PublicKey())
+}
+
+// handshakeWithKnownServer performs a real x/crypto/ssh handshake against a
+// one-shot in-process SSH server whose host key is hostSigner. It exercises
+// the exact callback shape the runner installs instead of calling the callback
+// directly, and returns the client-side handshake error.
+func handshakeWithKnownServer(t *testing.T, hostSigner ssh.Signer, cb ssh.HostKeyCallback) error {
+	t.Helper()
+	serverCfg := &ssh.ServerConfig{
+		PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+			return nil, nil // accept any client key; only the host key is under test
+		},
+	}
+	serverCfg.AddHostKey(hostSigner)
+	// A real loopback socket, not net.Pipe: both SSH peers write their version
+	// banner before reading, which would deadlock on an unbuffered pipe.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		serverSide, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		conn, _, _, err := ssh.NewServerConn(serverSide, serverCfg)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		<-stop // released once the client is done; no channels are opened
+	}()
+	clientSigner, err := ed25519SignerForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientSide, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, _, _, err := ssh.NewClientConn(clientSide, "test-host:22",
+		newSSHClientConfig([]ssh.Signer{clientSigner}, cb))
+	if err == nil {
+		_ = cc.Close()
+	}
+	_ = clientSide.Close()
+	close(stop)
+	<-done
+	return err
+}
+
+// TestAcceptHostKeyPinsOnFirstUse: (a) the correct explicit fingerprint is
+// accepted on first use and recorded. Both the canonical SHA256: form and a
+// bare fingerprint must work.
+func TestAcceptHostKeyPinsOnFirstUse(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		spell func(string) string
+	}{
+		{"prefixed", func(fp string) string { return fp }},
+		{"bare", func(fp string) string { return strings.TrimPrefix(fp, "SHA256:") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostSigner, fp := knownHostKeyForTest(t)
+			store := newMemHostKeyStore()
+			r, err := New(Config{ExpectedHostKey: tc.spell(fp), HostKeyStore: store})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cb := tofuHostKeyCallback(r.cfg.HostKeyStore, "test-host:22")
+			if err := handshakeWithKnownServer(t, hostSigner, cb); err != nil {
+				t.Fatalf("handshake with correct expected key failed: %v", err)
+			}
+			got, ok, err := store.KnownHost("test-host:22")
+			if err != nil || !ok {
+				t.Fatalf("first use did not pin: %q ok=%v err=%v", got, ok, err)
+			}
+			if got != fp {
+				t.Fatalf("pin = %q; want %q", got, fp)
+			}
+			if strings.Contains(got, "ssh-ed25519") || strings.Contains(got, "AAAAC3Nza") {
+				t.Fatalf("pin leaked raw key material: %q", got)
+			}
+		})
+	}
+}
+
+// TestAcceptHostKeyWrongExpectedWritesNoPin: (b) a wrong explicit fingerprint
+// is a hard error and never persists an unverified value.
+func TestAcceptHostKeyWrongExpectedWritesNoPin(t *testing.T) {
+	hostSigner, _ := knownHostKeyForTest(t)
+	other, err := ed25519SignerForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := ssh.FingerprintSHA256(other.PublicKey())
+	store := newMemHostKeyStore()
+	r, err := New(Config{ExpectedHostKey: wrong, HostKeyStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := tofuHostKeyCallback(r.cfg.HostKeyStore, "test-host:22")
+	err = handshakeWithKnownServer(t, hostSigner, cb)
+	var expectErr *HostKeyExpectationError
+	if !errors.As(err, &expectErr) {
+		t.Fatalf("want *HostKeyExpectationError, got %T: %v", err, err)
+	}
+	if expectErr.Expected != wrong {
+		t.Fatalf("expected = %q; want %q", expectErr.Expected, wrong)
+	}
+	if want := ssh.FingerprintSHA256(hostSigner.PublicKey()); expectErr.Got != want {
+		t.Fatalf("got = %q; want live fingerprint %q", expectErr.Got, want)
+	}
+	if expectErr.Stored {
+		t.Fatal("first-use mismatch reported as a stored-pin mismatch")
+	}
+	if _, ok, _ := store.KnownHost("test-host:22"); ok {
+		t.Fatal("wrong expected fingerprint wrote a pin")
+	}
+	if strings.Contains(err.Error(), "ssh-ed25519") || strings.Contains(err.Error(), "AAAAC3Nza") {
+		t.Fatalf("error leaked raw key material: %q", err.Error())
+	}
+}
+
+// TestAcceptHostKeyRejectsChangedServerKey: (c) a later connection using a
+// different server key is rejected and the original pin survives.
+func TestAcceptHostKeyRejectsChangedServerKey(t *testing.T) {
+	hostSigner, fp := knownHostKeyForTest(t)
+	rotated, err := ed25519SignerForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newMemHostKeyStore()
+	r, err := New(Config{ExpectedHostKey: fp, HostKeyStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := tofuHostKeyCallback(r.cfg.HostKeyStore, "test-host:22")
+	if err := handshakeWithKnownServer(t, hostSigner, cb); err != nil {
+		t.Fatalf("first handshake failed: %v", err)
+	}
+	err = handshakeWithKnownServer(t, rotated, cb)
+	var mismatch *HostKeyMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("want *HostKeyMismatchError for rotated key, got %T: %v", err, err)
+	}
+	if got, ok, _ := store.KnownHost("test-host:22"); !ok || got != fp {
+		t.Fatalf("pin after rejected rotation = %q ok=%v; want %q", got, ok, fp)
+	}
+}
+
+// TestAcceptHostKeyMustMatchStoredPin: a later --accept-host-key value must
+// match the stored pin; a disagreement is a hard error even when the live key
+// still matches the stored pin. The pin is never replaced.
+func TestAcceptHostKeyMustMatchStoredPin(t *testing.T) {
+	hostSigner, fp := knownHostKeyForTest(t)
+	other, err := ed25519SignerForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newMemHostKeyStore()
+	first, err := New(Config{ExpectedHostKey: fp, HostKeyStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handshakeWithKnownServer(t, hostSigner,
+		tofuHostKeyCallback(first.cfg.HostKeyStore, "test-host:22")); err != nil {
+		t.Fatal(err)
+	}
+	second, err := New(Config{ExpectedHostKey: ssh.FingerprintSHA256(other.PublicKey()), HostKeyStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = handshakeWithKnownServer(t, hostSigner,
+		tofuHostKeyCallback(second.cfg.HostKeyStore, "test-host:22"))
+	var expectErr *HostKeyExpectationError
+	if !errors.As(err, &expectErr) || !expectErr.Stored {
+		t.Fatalf("want stored *HostKeyExpectationError, got %T: %v", err, err)
+	}
+	if got, ok, _ := store.KnownHost("test-host:22"); !ok || got != fp {
+		t.Fatalf("stored pin changed: %q ok=%v; want %q", got, ok, fp)
+	}
+}
+
+// TestNormalizeHostKeyFingerprint pins the accepted input forms: canonical
+// SHA256:<base64>, the same fingerprint without the prefix, surrounding space
+// and a case-insensitive prefix. Malformed values are rejected early.
+func TestNormalizeHostKeyFingerprint(t *testing.T) {
+	_, fp := knownHostKeyForTest(t)
+	bare := strings.TrimPrefix(fp, "SHA256:")
+	for _, in := range []string{fp, bare, "  " + fp + "  ", "sha256:" + bare} {
+		got, err := NormalizeHostKeyFingerprint(in)
+		if err != nil || got != fp {
+			t.Fatalf("NormalizeHostKeyFingerprint(%q) = %q, %v; want %q", in, got, err, fp)
+		}
+	}
+	for _, in := range []string{"", "SHA256:", "SHA256:not-base64!", "SSH256:" + bare, bare[:10]} {
+		if _, err := NormalizeHostKeyFingerprint(in); err == nil {
+			t.Fatalf("NormalizeHostKeyFingerprint accepted invalid value %q", in)
+		}
+	}
+}
