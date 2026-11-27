@@ -203,7 +203,12 @@ jobs:
           # `prerelease: auto` behaviour for -alpha/-beta/-rc tags.
           # --verify-tag: never let gh auto-create a tag from the default branch
           # if the pushed tag is somehow missing on the remote.
-          release_opts=(--title "$TAG" --generate-notes --verify-tag)
+          # This job intentionally has NO checkout (it never executes build
+          # code), so `gh release create --generate-notes` cannot work: it
+          # calls git to find the previous tag and fails with "not a git
+          # repository". Use static notes instead; the CHANGELOG is the
+          # canonical source of release notes.
+          release_opts=(--title "$TAG" --notes "See CHANGELOG.md for details." --verify-tag)
           if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+- ]]; then
             release_opts+=(--prerelease)
           fi
