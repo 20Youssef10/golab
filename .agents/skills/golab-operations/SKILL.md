@@ -2,7 +2,7 @@
 name: golab-operations
 description: "Operate the golab CLI (unofficial Google Colab CLI) safely: session lifecycle, exec and run parity, file transfer, VM inspection, detached jobs, spend guards, redaction, stdout and stderr contract, TTY and --yes rules, path semantics, and human-only steps. Use when asked to create, inspect, run code on, sync files with, or stop Colab sessions with golab, or to diagnose billable-spend, credential, confirmation, or remote-versus-local path issues."
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
   owner: golab-maintainers
 ---
 
@@ -37,10 +37,17 @@ metadata:
 
 ## Detached jobs and spend guards
 
-- `golab run --detach --ttl 1h SCRIPT` enforces the deadline **at submission**: `--detach` without a strictly positive `--ttl` is a usage error (exit 2). The TTL is written to the VM's `meta.json` and a small credential-free local manifest and is shown by `golab jobs`, but the CLI does **not** auto-stop the VM at expiry — stop it yourself. There is no local daemon or keep-alive socket; `jobs`, `logs ID [-f]`, and `wait --for kernel|idle|ready` poll on demand with bounded intervals.
-- `golab logs ID -f --interval 2s --max 30` is always bounded. A missing remote file is reported as unknown/stale, never as success.
-- `golab run --max-cu 10 --enforce` sets a *minimum account-level CU reserve* sampled from `GET /tun/m/ccu-info`; breach only warns without `--enforce`, and the foreground monitor does not survive `run --detach`. `golab budget --enforce` refuses an allocation when a profile threshold is tripped; `--max-balance` is a reserve floor and `--max-hourly` a rate ceiling. `--yes` never overrides either guard.
+- `golab run --detach --ttl 1h SCRIPT` enforces the deadline **at submission** (`--detach` without a strictly positive `--ttl` is a usage error, exit 2) and **remotely** from then on: the launcher writes an absolute `deadline_at` into the VM's `meta.json` and starts a bounded watchdog that kills the detached job's process group at the deadline, writes `ttl-reason` = `ttl_exceeded` and exit code `124`; `golab jobs` reports `ttl=exceeded`. There is still no local daemon or keep-alive socket — `jobs`, `logs ID [-f]` and `wait --for kernel|idle|ready` poll on demand. **The watchdog stops the job, not the VM** — the runtime stays allocated and billable until you `golab stop` it.
+- `--max-cu` and `--enforce` are now **rejected outright with `--detach`** (usage error): they sample CU in the foreground run loop only. Use them on a foreground `golab run SCRIPT --max-cu 10 --enforce`; `--max-cu 0` disables the monitor. `golab budget --enforce` refuses an allocation when a profile threshold is tripped; `--max-balance` is a reserve floor and `--max-hourly` a rate ceiling. `--yes` never overrides either guard.
+- `golab logs ID -f --interval 2s --max 30` is always bounded. A missing remote file is reported as unknown/stale, never as success; an expired run is reported as exceeded, never as success.
 - `golab cost [--since 24h] [--json]` reports observed CU samples from a private local ledger; account-level, no prices. `golab reap --dry-run` previews orphan cleanup before the billable unassign.
+
+## Recently landed surfaces
+
+- **SSH host-key pinning:** `golab ssh -s NAME --accept-host-key SHA256:…` accepts a fingerprint with or without the `SHA256:` prefix. It must match the live runtime key on first use and the stored pin afterwards; a mismatch is a hard failure, so obtain the fingerprint from a trusted source rather than blindly copying a prompt.
+- **Compatibility snapshots:** `golab compat refresh --ref v0.8.0 --out FILE` fetches the official upstream CLI surface into a provenance-tagged snapshot; dry-run by default, and `--out -` prints the snapshot JSON to stdout. `golab compat report [--json]` then compares the live command tree against a snapshot. `compat` does not allocate a VM.
+- **Distribution channels:** `packaging/` holds Homebrew (`golab.rb`), Scoop (`golab.json`), winget (`20Youssef10.golab*.yaml`) and nfpm (`nfpm.yaml`, `.deb`/`.rpm`/`.apk`) configs, aligned with signed release v0.2.0. **winget is blocked**: releases publish only `.tar.gz` archives while winget's installer enum has no tar.gz type — a `.zip` repack of the same signed binary with new URLs/hashes is required before a `winget-pkgs` PR. Never weaken a hash check to unblock it. Package availability is not live-install proof.
+- **MCP companion binary:** `go install github.com/20Youssef10/golab/cmd/golab-mcp@latest` installs the typed MCP server. For its flags, 22 tools and client config, use the sibling `colab-mcp` skill.
 
 ## Human-only — stop and ask a maintainer
 
@@ -61,4 +68,4 @@ Never automate or claim success for: browser **OAuth consent** (including `--sco
 - **Command inventory and exact flags:** read `references/command-map.md` for all 54 top-level commands grouped by purpose, plus hidden commands.
 - **Deep safety rules:** read `references/safety.md` before any billable, destructive, non-interactive, credential-adjacent or human-gated operation. It carries the spend checklist, redaction contract, TTY/exit-code table, path rules and environment knobs.
 
-Version history: v1.0.0 — initial release, flags verified against `golab 0.2.0 --help`.
+Version history: v1.1.0 — added verifiable follow-up surfaces (host-key pin, compat refresh, packaging channels, remote TTL enforcement, MCP install); v1.0.0 — initial release, flags verified against `golab 0.2.0 --help`.

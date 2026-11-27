@@ -27,7 +27,7 @@ Source of truth: `golab --help` and `<command> --help` for the v0.2.0 binary (54
 | `exec` | `-s`, `-f/--file`, `--env KEY=VALUE`, `--env-file PATH`, `--secret NAME`, `--json`, `--timeout SECONDS`, `--output-image PATH` | Runs in an existing session; code from file or stdin. `--explain` is not listed for this command. |
 | `run` | `SCRIPT`, `-s`, `--gpu`, `--tpu`, `--high-mem`, `--env`, `--env-file`, `--secret`, `-p/--param`, `--params-file`, `--timeout`, `--json`, `--output-image`, `--keep`, `--max-cu FLOAT`, `--enforce`, `--detach`, `--ttl DURATION`, `--lockfile PATH`, `--bundle`, `--out PATH` | Allocates, uploads, runs, then releases unless `--keep`. `--explain` is supported. Flags after `SCRIPT` belong to the script except `--env`. |
 | `repl` | `-s`, `--output-image PATH` | Rich frontend only on a TTY; piped mode exits on EOF. |
-| `ssh` | `-s`, `-i/--identity PATH`, `--gpu`, `--tpu`, `--high-mem`, `--force`, `--proxy-mode`, `--rm`, `-- CMD...` | Interactive or `-- CMD` (no allocation for `-- CMD`); auto-create consults the budget guard. `--explain` is supported. |
+| `ssh` | `-s`, `-i/--identity PATH`, `--gpu`, `--tpu`, `--high-mem`, `--force`, `--proxy-mode`, `--rm`, `--accept-host-key SHA256:…`, `-- CMD...` | Interactive or `-- CMD` (no allocation for `-- CMD`); auto-create consults the budget guard. `--accept-host-key` pins the runtime host key by fingerprint (prefix optional). `--explain` is supported. |
 | `install` | `-s`, `PKGS...`, `-r/--requirement PATH` | Installs packages on the VM; package names are sent as a JSON list. |
 | `auth` | `-s` *(hidden command)* | Runs Colab's interactive in-VM auth; human-only. |
 
@@ -68,7 +68,7 @@ Source of truth: `golab --help` and `<command> --help` for the v0.2.0 binary (54
 | `doctor` | `--section config\|auth\|api\|update\|wire`, `--json`, `--timeout DURATION`, `--fixtures DIR`, `--live`, `--fix`, `--apply` | GET-only by default; `--live` needs `GOLAB_LIVE_PROBES=1`; `--fix` is dry-run. |
 | `audit` | `--json` | Local credential-store/file-mode report; no network. |
 | `trace` | `-- <command> [args]`, `-o/--output PATH`, `--unsafe-bodies` | Redacted wire NDJSON; unsafe bodies must be reviewed before sharing. |
-| `compat` | `report [--json]` | Compares the live command tree to an embedded snapshot; no network. |
+| `compat` | `report [--json]`, `refresh [--out FILE] [--ref TAG]` | `report` compares the live tree to a snapshot. `refresh` fetches the official upstream surface into a provenance-tagged snapshot: dry-run by default, `--out -` prints JSON to stdout. No VM allocation. |
 | `log` | `-s`, `-n/--lines`, `-t/--type`, `-o/--output FILE`, `-f/--follow` | Session history; `-o` extension chooses exporter. |
 | `url` | `-s`, `--host URL`, `--open` | Prints/opens a browser URL for a session. |
 | `drivemount` | `[PATH]`, `-s`, `--wait-for-consent` | Drive approval in the browser stays human-only. |
@@ -85,3 +85,8 @@ Source of truth: `golab --help` and `<command> --help` for the v0.2.0 binary (54
 ## Global flags (all commands)
 
 `--auth oauth2|adc`, `--budget-profile NAME`, `-c/--client-oauth-config PATH`, `--config PATH`, `--explain`, `--logtostderr`, `--no-public-api`, `--output text|json|ndjson`, `--public-api`, `--scopes full|minimal`, `--yes`. Boolean flags accept optional `=true|false`. There is no `--debug` flag; use `COLAB_DEBUG=1`.
+
+## Companion surfaces
+
+- MCP server binary: `go install github.com/20Youssef10/golab/cmd/golab-mcp@latest`; flags `--transport stdio|http`, `--addr :8080`, `--golab-bin PATH`. See the sibling `colab-mcp` skill.
+- Distribution configs in `packaging/`: `golab.rb` (Homebrew), `golab.json` (Scoop), `20Youssef10.golab*.yaml` (winget), `nfpm.yaml` (`.deb`/`.rpm`/`.apk`). winget manifests are blocked pending a `.zip` repack of the signed release (only `.tar.gz` assets exist). Channel configs are not install proof.
