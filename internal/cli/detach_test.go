@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +176,159 @@ func TestLogsRejectsUnknownRun(t *testing.T) {
 	h := newHarness(t)
 	if code := h.run(t, "", "logs", "run-nope"); code != 1 {
 		t.Fatalf("logs unknown id exit = %d, want 1; stderr=%s", code, h.stderr.String())
+	}
+}
+
+// ADR-001 follow-ups: TTL is enforced by a remote watchdog (no local daemon),
+// jobs reports expiry, and --max-cu is a foreground-only flag.
+func TestRunDetachWritesAbsoluteDeadlineAndRemoteWatchdog(t *testing.T) {
+	h := newHarness(t)
+	fixDetachSeams(t, h, "run-deadline")
+	script := writeRunScript(t, "print('hello')\n")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+	if code := h.run(t, "", "run", "--detach", "--ttl", "30m", "-s", "det1", script); code != 0 {
+		t.Fatalf("run --detach exit=%d stderr=%s", code, h.stderr.String())
+	}
+
+	// The local index carries the absolute deadline too.
+	raw, err := os.ReadFile(detach.ManifestPath(h.deps.HistoryDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Runs map[string]map[string]any `json:"runs"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	dl, ok := manifest.Runs["run-deadline"]["deadline_at"].(string)
+	if !ok || dl == "" {
+		t.Fatalf("manifest lacks an absolute deadline: %s", raw)
+	}
+	parsed, err := time.Parse(time.RFC3339, dl)
+	if err != nil {
+		t.Fatalf("deadline_at %q is not RFC3339: %v", dl, err)
+	}
+	if parsed.Before(time.Now().Add(29*time.Minute)) || parsed.After(time.Now().Add(31*time.Minute)) {
+		t.Fatalf("deadline_at %q does not match ttl=30m", dl)
+	}
+
+	execs := h.kernel.Executions()
+	if len(execs) != 1 {
+		t.Fatalf("kernel executions = %d, want 1", len(execs))
+	}
+	for _, want := range []string{"watchdog.py", "ttl-reason", "ttl_exceeded", "start_new_session=True"} {
+		if !strings.Contains(execs[0].Code, want) {
+			t.Fatalf("launcher cell lacks %q:\n%s", want, execs[0].Code)
+		}
+	}
+}
+
+func TestJobsReportsTTLExpiry(t *testing.T) {
+	h := newHarness(t)
+	fc := newFakeContents(t)
+	h.putSession(t, "s1")
+	h.attachContents(t, fc)
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	deadline := start.Add(time.Hour)
+	writeManifest(t, h, detach.Record{
+		ID: "run-expired", Session: "s1", Script: "job.py", StartedAt: start, TTL: "1h",
+	})
+	base := "content/.golab/runs/run-expired"
+	fc.addFile(base+"/meta.json", fmt.Sprintf(`{"id":"run-expired","ttl":"1h","deadline_at":%q}`, deadline.Format(time.RFC3339)))
+	fc.addFile(base+"/exit", "124")
+	fc.addFile(base+"/ttl-reason", "ttl_exceeded")
+
+	if code := h.run(t, "", "jobs"); code != 0 {
+		t.Fatalf("jobs exit=%d stderr=%s", code, h.stderr.String())
+	}
+	out := h.stdout.String()
+	for _, want := range []string{"run-expired", "ttl=exceeded", "ttl_exceeded", "124"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("jobs output lacks %q: %s", want, out)
+		}
+	}
+}
+
+func TestJobsReportsTTLWithinDeadline(t *testing.T) {
+	h := newHarness(t)
+	fc := newFakeContents(t)
+	h.putSession(t, "s1")
+	h.attachContents(t, fc)
+	now := time.Now().UTC()
+	deadline := now.Add(time.Hour)
+	writeManifest(t, h, detach.Record{
+		ID: "run-live", Session: "s1", Script: "job.py", StartedAt: now, TTL: "1h",
+	})
+	base := "content/.golab/runs/run-live"
+	fc.addFile(base+"/meta.json", fmt.Sprintf(`{"id":"run-live","ttl":"1h","deadline_at":%q}`, deadline.Format(time.RFC3339)))
+
+	if code := h.run(t, "", "jobs"); code != 0 {
+		t.Fatalf("jobs exit=%d stderr=%s", code, h.stderr.String())
+	}
+	out := h.stdout.String()
+	for _, want := range []string{"run-live", "ttl=ok", "running"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("jobs output lacks %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "ttl=exceeded") {
+		t.Fatalf("live run reported as TTL-expired: %s", out)
+	}
+}
+
+func TestRunDetachRejectsMaxCUAndEnforce(t *testing.T) {
+	// --max-cu samples CU in the foreground run loop; a detached CLI returns
+	// before the remote child runs, so the flag must be rejected, not ignored.
+	cases := []struct {
+		name  string
+		flags []string
+	}{
+		{"max-cu", []string{"--max-cu", "10"}},
+		{"max-cu-zero", []string{"--max-cu", "0"}},
+		{"enforce", []string{"--enforce"}},
+		{"both", []string{"--max-cu", "10", "--enforce"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			fixDetachSeams(t, h, "run-cu")
+			script := writeRunScript(t, "print('x')\n")
+			args := append([]string{"run", "--detach", "--ttl", "1h", "-s", "det1"}, tc.flags...)
+			args = append(args, script)
+			if code := h.run(t, "", args...); code != 2 {
+				t.Fatalf("exit=%d, want 2; stderr=%s", code, h.stderr.String())
+			}
+			if !strings.Contains(h.stderr.String(), "foreground runs only") {
+				t.Fatalf("stderr must explain that the flag is foreground-only: %s", h.stderr.String())
+			}
+			if len(h.kernel.Executions()) != 0 {
+				t.Fatalf("conflicting flags submitted %d cells", len(h.kernel.Executions()))
+			}
+			if _, err := h.deps.Store.Get("det1"); err == nil {
+				t.Fatal("conflicting flags still allocated a VM")
+			}
+		})
+	}
+}
+
+func TestStopReleasesVMAfterDetachedRun(t *testing.T) {
+	h := newHarness(t)
+	fixDetachSeams(t, h, "run-stop")
+	script := writeRunScript(t, "print('x')\n")
+	h.kernel.Script(fakekernel.Status("idle"), fakekernel.Reply("ok", nil))
+	if code := h.run(t, "", "run", "--detach", "--ttl", "1h", "-s", "det1", script); code != 0 {
+		t.Fatalf("detach exit=%d stderr=%s", code, h.stderr.String())
+	}
+	if code := h.run(t, "", "stop", "-s", "det1"); code != 0 {
+		t.Fatalf("stop exit=%d stderr=%s", code, h.stderr.String())
+	}
+	if _, err := h.deps.Store.Get("det1"); err == nil {
+		t.Fatal("stop did not release the detached session")
+	}
+	assignments, err := h.client.List(context.Background())
+	if err != nil || len(assignments) != 0 {
+		t.Fatalf("assignments = %v, %v", assignments, err)
 	}
 }
 

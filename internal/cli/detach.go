@@ -6,6 +6,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -96,8 +97,12 @@ func runDetached(cmd *cobra.Command, args []string, ttl time.Duration) error {
 		return err
 	}
 
+	started := detachNow()
 	rec := detach.Record{
-		ID: id, Session: name, Script: script, StartedAt: detachNow(), TTL: ttlString(ttl),
+		ID: id, Session: name, Script: script, StartedAt: started, TTL: ttlString(ttl),
+		// Fixed at submission: the remote watchdog enforces this absolute
+		// deadline without any local timer or daemon (ADR-001).
+		DeadlineAt: started.Add(ttl).UTC(),
 	}
 	launcher, err := detach.BuildLauncher(rec, body, forwarded, envMap(envVars))
 	if err != nil {
@@ -135,10 +140,10 @@ func runDetached(cmd *cobra.Command, args []string, ttl time.Duration) error {
 		return err
 	}
 	writeEvent(d, name, "detached_run_started", map[string]any{
-		"run_id": id, "ttl": rec.TTL,
+		"run_id": id, "ttl": rec.TTL, "deadline": rec.DeadlineAt.Format(time.RFC3339),
 	})
 	fmt.Fprintf(d.Stdout, "%s\n", id)
-	fmt.Fprintf(d.Stderr, "[colab] Detached run %s started. VM '%s' stays allocated until you stop it; TTL=%s (see ADR-001).\n", id, name, ttlString(ttl))
+	fmt.Fprintf(d.Stderr, "[colab] Detached run %s started. VM '%s' stays allocated until you stop it; deadline=%s enforced by a remote watchdog (VM must stay alive; see ADR-001).\n", id, name, rec.DeadlineAt.Format(time.RFC3339))
 	fmt.Fprintf(d.Stderr, "[colab] Follow with: golab logs %s -f   |   golab jobs\n", id)
 	return nil
 }
@@ -220,12 +225,28 @@ func jobsCommand() *cobra.Command {
 			sort.Strings(ids)
 			for _, id := range ids {
 				rec := m.Runs[id]
-				status, exitCode := "unknown", "-"
+				status, exitCode, ttlState := "unknown", "-", "unknown"
+				deadline, hasDeadline := rec.Deadline()
+				reason := ""
 				s, err := d.Store.Get(rec.Session)
 				if err == nil {
 					if client, cErr := d.ContentsFor(s); cErr == nil {
-						_, metaErr := client.Read(cmd.Context(), detach.RemoteFile(id, detach.MetaFile))
+						metaBody, metaErr := client.Read(cmd.Context(), detach.RemoteFile(id, detach.MetaFile))
 						exitBody, exitErr := client.Read(cmd.Context(), detach.RemoteFile(id, detach.ExitFile))
+						reasonBody, reasonErr := client.Read(cmd.Context(), detach.RemoteFile(id, detach.TTLReasonFile))
+						if reasonErr == nil {
+							reason = strings.TrimSpace(string(reasonBody.Content))
+						}
+						// meta.json holds the deadline the remote watchdog
+						// enforces; fall back to the local manifest if absent.
+						if metaErr == nil && len(metaBody.Content) > 0 {
+							var remote detach.Record
+							if json.Unmarshal(metaBody.Content, &remote) == nil {
+								if rd, ok := remote.Deadline(); ok {
+									deadline, hasDeadline = rd, true
+								}
+							}
+						}
 						switch {
 						case exitErr == nil:
 							status = "exited"
@@ -240,12 +261,24 @@ func jobsCommand() *cobra.Command {
 				} else if errors.Is(err, state.ErrNotFound) {
 					status = "stale"
 				}
+				// A missing remote file is never a success: the reason marker
+				// and the absolute deadline are the only TTL evidence we have.
+				now := time.Now()
+				switch {
+				case reason == detach.TTLExceeded:
+					status = "ttl_exceeded"
+					ttlState = "exceeded"
+				case hasDeadline && !deadline.After(now):
+					ttlState = "exceeded"
+				case hasDeadline:
+					ttlState = "ok"
+				}
 				dur := time.Since(rec.StartedAt)
 				if dur < 0 {
 					dur = 0
 				}
-				fmt.Fprintf(d.Stdout, "%s\t%s\texit=%s\tduration=%s\tsession=%s\tscript=%s\n",
-					rec.ID, status, exitCode, dur.Round(time.Second), rec.Session, rec.Script)
+				fmt.Fprintf(d.Stdout, "%s\t%s\texit=%s\tttl=%s\tduration=%s\tsession=%s\tscript=%s\n",
+					rec.ID, status, exitCode, ttlState, dur.Round(time.Second), rec.Session, rec.Script)
 			}
 			return nil
 		},

@@ -56,6 +56,15 @@ func addDetachToRun(root *cobra.Command) {
 		if !detach {
 			return original(cmd, args)
 		}
+		// --max-cu/--enforce sample CU in the foreground run loop. A detached
+		// CLI returns after submitting one cell, so they would be silently
+		// inactive. Reject them before any allocation instead (ADR-001).
+		if cmd.Flags().Changed("max-cu") {
+			return usagef("[colab] --max-cu applies to foreground runs only; 'golab run --detach' does not sample compute units. Remove --max-cu or drop --detach.")
+		}
+		if cmd.Flags().Changed("enforce") {
+			return usagef("[colab] --enforce applies to foreground runs only (it acts on --max-cu); it has no effect with --detach.")
+		}
 		return runDetached(cmd, args, ttl)
 	}
 }

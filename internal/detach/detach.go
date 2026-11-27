@@ -32,13 +32,27 @@ const (
 	ExitFile = "exit"
 	PidFile  = "pid"
 
-	// PayloadFile and RunnerFile are internal launcher scratch files.
-	PayloadFile = "payload.b64"
-	RunnerFile  = "runner.py"
+	// PayloadFile, RunnerFile and WatchdogFile are internal launcher scratch
+	// files written on the VM. WatchdogLogFile captures watchdog diagnostics.
+	PayloadFile     = "payload.b64"
+	RunnerFile      = "runner.py"
+	WatchdogFile    = "watchdog.py"
+	WatchdogLogFile = "watchdog.log"
+
+	// TTLReasonFile records why a run ended; TTLExceeded is the reason written
+	// by the remote watchdog when it kills a job at its deadline. TTLExitCode
+	// is the exit value recorded for that kill.
+	TTLReasonFile = "ttl-reason"
+	TTLExceeded   = "ttl_exceeded"
+	TTLExitCode   = "124"
 
 	// ManifestSchema is the local index schema.
 	ManifestSchema = "golab/detach/1"
 )
+
+// WatchInterval is the watchdog's remote polling granularity. It is embedded
+// in the payload, so the watchdog needs no clock coordination with the CLI.
+const WatchInterval = 5 * time.Second
 
 // ErrCorrupt means the local manifest could not be decoded. It never carries
 // file contents.
@@ -55,9 +69,26 @@ type Record struct {
 	Session   string    `json:"session"`
 	Script    string    `json:"script"`
 	StartedAt time.Time `json:"started_at"`
-	// TTL is the informational duration string (e.g. "1h"). A detached run
-	// requires --ttl so a forgotten job cannot bill forever; see ADR-001.
+	// TTL is the duration string as supplied by the user (e.g. "1h").
 	TTL string `json:"ttl"`
+	// DeadlineAt is the absolute UTC deadline written into meta.json and
+	// enforced by the remote watchdog. It is fixed at submission time; no
+	// local timer or daemon depends on it after the launcher cell returns.
+	DeadlineAt time.Time `json:"deadline_at"`
+}
+
+// Deadline returns the absolute deadline for r. Records written before remote
+// TTL enforcement have no DeadlineAt, so they fall back to StartedAt+TTL; a
+// record with neither yields no deadline (jobs then reports "unknown").
+func (r Record) Deadline() (time.Time, bool) {
+	if !r.DeadlineAt.IsZero() {
+		return r.DeadlineAt.UTC(), true
+	}
+	d, err := time.ParseDuration(r.TTL)
+	if err != nil || d <= 0 || r.StartedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return r.StartedAt.Add(d).UTC(), true
 }
 
 // Manifest is the local on-disk index of detached runs.
@@ -89,15 +120,21 @@ func RemoteFile(id, name string) string { return path.Join(RunDir(id), name) }
 // payload is the base64/JSON envelope decoded by the remote runner. Every
 // user-controlled value is carried here, never spliced into Python source.
 type payload struct {
-	Name   string            `json:"name"`
-	Script string            `json:"script"` // base64 of the script bytes
-	Argv   []string          `json:"argv"`
-	Env    map[string]string `json:"env"`
-	RunDir string            `json:"run_dir"`
-	Meta   string            `json:"meta"` // base64 of the JSON-encoded Record
+	Name          string            `json:"name"`
+	Script        string            `json:"script"` // base64 of the script bytes
+	Argv          []string          `json:"argv"`
+	Env           map[string]string `json:"env"`
+	RunDir        string            `json:"run_dir"`
+	Meta          string            `json:"meta"`           // base64 of the JSON-encoded Record
+	Deadline      int64             `json:"deadline"`       // absolute deadline, Unix seconds (ceil)
+	WatchInterval float64           `json:"watch_interval"` // watchdog polling granularity, seconds
 }
 
 func buildPayload(r Record, script []byte, args []string, env map[string]string) (payload, error) {
+	deadline, ok := r.Deadline()
+	if !ok {
+		return payload{}, fmt.Errorf("detach: run %q has no deadline; --ttl is required", r.ID)
+	}
 	meta, err := json.Marshal(r)
 	if err != nil {
 		return payload{}, err
@@ -111,13 +148,19 @@ func buildPayload(r Record, script []byte, args []string, env map[string]string)
 	for k, v := range env {
 		envCopy[k] = v
 	}
+	deadlineUnix := deadline.Unix()
+	if deadline.Nanosecond() > 0 {
+		deadlineUnix++ // ceil: the watchdog must never fire early
+	}
 	return payload{
-		Name:   name,
-		Script: base64.StdEncoding.EncodeToString(script),
-		Argv:   argv,
-		Env:    envCopy,
-		RunDir: RunDir(r.ID),
-		Meta:   base64.StdEncoding.EncodeToString(meta),
+		Name:          name,
+		Script:        base64.StdEncoding.EncodeToString(script),
+		Argv:          argv,
+		Env:           envCopy,
+		RunDir:        RunDir(r.ID),
+		Meta:          base64.StdEncoding.EncodeToString(meta),
+		Deadline:      deadlineUnix,
+		WatchInterval: WatchInterval.Seconds(),
 	}, nil
 }
 
@@ -157,10 +200,48 @@ with open(os.path.join(_R, 'exit'), 'w') as _f:
     _f.write(str(_rc))
 `
 
+// watchdogSource is fixed Python source: it contains no user text. It reads
+// its parameters from the same base64/JSON payload as the runner, sleeps until
+// the absolute deadline, then kills the job's process group and records the
+// exit code and reason. It is started detached on the VM, so no local timer,
+// goroutine or process survives `run --detach`.
+const watchdogSource = `import base64, json, os, signal, sys, time
+_R = sys.argv[1]
+with open(os.path.join(_R, 'payload.b64')) as _f:
+    _p = json.loads(base64.b64decode(_f.read()))
+_deadline = float(_p['deadline'])
+_interval = float(_p['watch_interval'])
+with open(os.path.join(_R, 'pid')) as _f:
+    _pid = int(_f.read().strip())
+while True:
+    _left = _deadline - time.time()
+    if _left <= 0:
+        break
+    time.sleep(min(_interval, _left))
+if os.path.exists(os.path.join(_R, 'exit')):
+    sys.exit(0)
+try:
+    os.kill(_pid, 0)
+except OSError:
+    sys.exit(0)
+try:
+    os.killpg(_pid, signal.SIGKILL)
+except OSError:
+    try:
+        os.kill(_pid, signal.SIGKILL)
+    except OSError:
+        pass
+with open(os.path.join(_R, 'ttl-reason'), 'w') as _f:
+    _f.write('ttl_exceeded')
+with open(os.path.join(_R, 'exit'), 'w') as _f:
+    _f.write('124')
+`
+
 // BuildLauncher produces the single Python cell submitted by `run --detach`.
-// It writes meta.json, then starts the user's script with
-// start_new_session=True so the child outlives the launching cell and the
-// local CLI. The local CLI never starts a process and holds no keep-alive.
+// It writes meta.json with the absolute deadline, then starts the user's script
+// and a bounded TTL watchdog, both with start_new_session=True so they outlive
+// the launching cell and the local CLI. Nothing persists locally: the local
+// CLI starts no process and holds no keep-alive.
 func BuildLauncher(r Record, script []byte, args []string, env map[string]string) (string, error) {
 	if !ValidID(r.ID) {
 		return "", fmt.Errorf("detach: unsafe run id %q", r.ID)
@@ -183,10 +264,14 @@ func BuildLauncher(r Record, script []byte, args []string, env map[string]string
 	fmt.Fprintf(&b, "    _f.write(%s)\n", pyString(base64.StdEncoding.EncodeToString(encoded)))
 	fmt.Fprintf(&b, "with open(os.path.join(_R, %s), 'w') as _f:\n", pyString(RunnerFile))
 	fmt.Fprintf(&b, "    _f.write(%s)\n", pyString(runnerSource))
+	fmt.Fprintf(&b, "with open(os.path.join(_R, %s), 'w') as _f:\n", pyString(WatchdogFile))
+	fmt.Fprintf(&b, "    _f.write(%s)\n", pyString(watchdogSource))
 	fmt.Fprintf(&b, "with open(os.path.join(_R, %s), 'wb') as _log:\n", pyString(LogFile))
 	fmt.Fprintf(&b, "    _p = subprocess.Popen([sys.executable, os.path.join(_R, %s), _R], start_new_session=True, stdout=_log, stderr=subprocess.STDOUT, cwd='/content')\n", pyString(RunnerFile))
 	fmt.Fprintf(&b, "with open(os.path.join(_R, %s), 'w') as _f:\n", pyString(PidFile))
 	b.WriteString("    _f.write(str(_p.pid))\n")
+	fmt.Fprintf(&b, "with open(os.path.join(_R, %s), 'wb') as _wlog:\n", pyString(WatchdogLogFile))
+	fmt.Fprintf(&b, "    subprocess.Popen([sys.executable, os.path.join(_R, %s), _R], start_new_session=True, stdout=_wlog, stderr=subprocess.STDOUT, cwd='/content')\n", pyString(WatchdogFile))
 	b.WriteString("print('golab detached run started: ' + str(_p.pid))\n")
 	return b.String(), nil
 }

@@ -2,10 +2,13 @@
 date: 2026-11-26
 category: adr
 status: accepted
-tags: [detached-runs, jobs, wait, sync-watch, ttl, colab]
+tags: [detached-runs, jobs, wait, sync-watch, ttl, max-cu, colab]
 ---
 
 # ADR 001: Detached remote runs on Colab VMs
+
+> Amended 2026-11-27: `--ttl` is now **enforced** by a remote watchdog (it was
+> advisory in the original decision), and `--max-cu` is rejected with `--detach`.
 
 ## Context
 
@@ -38,10 +41,14 @@ commands, implemented in new CLI files and a small `internal/detach` package:
   exactly as `run` does, but instead of waiting on the kernel WebSocket it
   submits **one** launcher cell. The launcher:
   - creates `/content/.golab/runs/<id>/` on the VM (remote paths use `path`),
-  - writes `meta.json` (id, script, session, start time, ttl), and
+  - writes `meta.json` (id, script, session, start time, ttl and the absolute
+    `deadline_at` fixed at submission),
   - starts the user's script with Python `subprocess.Popen(...,
     start_new_session=True)`, redirecting stdout/stderr to `log` and writing
-    the final exit code to `exit` when the child terminates.
+    the final exit code to `exit` when the child terminates, and
+  - starts a **remote TTL watchdog**, also with `start_new_session=True`, from
+    a fixed Python source that reads the deadline and polling interval from the
+    same base64/JSON payload (see "TTL enforcement" below).
   The launcher payload is built from JSON/base64- or `repr`-quoted values; no
   user-controlled string is ever spliced into Python source.
 - A **local manifest** (a plain JSON file, written atomically) records only
@@ -72,29 +79,47 @@ commands, implemented in new CLI files and a small `internal/detach` package:
 3. **No live proof from fakes.** Unit tests use fakes; the remote behaviour is
    not "done" until a human runs a live e2e probe (billable, human-only).
 
-### `--ttl` is mandatory with `--detach`
+### `--ttl` is mandatory and enforced with `--detach`
 
 A detached process keeps the VM busy after the CLI exits. Without a bound, a
 forgotten job would bill forever. Therefore:
 
 - `--detach` **requires** `--ttl DURATION` (a strictly positive duration);
   the command is a usage error (exit 2) otherwise.
-- The TTL is written into `meta.json` and into the local manifest, and is
-  surfaced by `golab jobs`.
-- The remote launcher records the start time so a future reaper can act on
-  the deadline. In this change the TTL is advisory/informational — **it does
-  not itself terminate the VM**; enforcing it is a follow-up. The important
-  immediate property is that every detached job carries a visible deadline so
-  it cannot be silently forgotten.
+- The absolute deadline (`started_at + ttl`, UTC, fixed at submission) is
+  written into `meta.json` on the VM and into the local manifest. `golab jobs`
+  reports `ttl=ok|exceeded|unknown` and the `ttl_exceeded` status.
+- **Enforcement is remote, not advisory.** The launcher starts a small Python
+  watchdog in its own session. It reads `deadline` and `watch_interval` from
+  the base64/JSON payload, polls `time.time()` until the deadline, checks the
+  `exit` marker first (a completed job is left alone), then checks that the
+  recorded child pid is still alive and kills the child's **process group**
+  with `SIGKILL` (the child was started with `start_new_session=True`, so its
+  pid is the pgid), finally writing `exit=124` and `ttl-reason=ttl_exceeded`.
+  `golab jobs` reads that reason marker; `golab logs` still reads `log`.
+  No local process, goroutine or timer persists after `run --detach` returns.
+
+### `--max-cu` is foreground-only
+
+`--max-cu` (and its `--enforce` companion) sample `GET /tun/m/ccu-info` inside
+the **foreground** run loop. A detached CLI returns after submitting one cell,
+so the sampler would never run. We chose the smaller, honest option: the
+`--detach` registration wrapper rejects an explicitly supplied `--max-cu` or
+`--enforce` with a usage error (exit 2) before any allocation, stating that
+these flags apply to foreground runs only. No detached run silently ignores a
+CU guard. Wiring a remote CU sampler is deferred: it would need a second
+remote watchdog and a policy for which account-level balance to guard.
 
 ## Options considered
 
 | Option | Pros | Cons | Verdict |
 |--------|------|------|---------|
 | **A. Remote detached child + polling Contents API** (chosen) | No local daemon; survives CLI exit; reuses Contents API and existing sync engine; matches fire-and-forget invariant | Needs VM to stay allocated; exit code only available after child finishes; polling latency | **Chosen** |
+| A2. Remote watchdog process for TTL (part of A) | Enforces the deadline with no local daemon; reuses the launcher's base64/JSON payload discipline; kills the whole process group | Only runs while the VM is alive; polling granularity; `SIGKILL` is abrupt | **Chosen** |
 | B. Local daemon supervising the job | Instant output, easy cancellation | Violates no-daemon invariant; a mobile/Termux host kills background processes; credentials live longer | Rejected |
 | C. Keep the kernel WebSocket open in a background goroutine | Reuses existing streaming code | Still a local keep-alive; dies with the CLI; not resumable from a new invocation | Rejected |
-| D. Server-side scheduler / job service | Proper lifecycle and TTL enforcement | Requires a service that does not exist in this CLI; out of scope | Deferred |
+| D. Server-side scheduler / job service | Proper lifecycle and TTL enforcement independent of the VM | Requires a service that does not exist in this CLI; out of scope | Deferred |
+| E. Remote CU sampler for `--detach --max-cu` | Would enforce CU in detached mode too | Second remote process, account-level balance semantics, larger change; rejection is honest and sufficient | Deferred (flags rejected instead) |
 
 ## Consequences
 
@@ -110,24 +135,43 @@ forgotten job would bill forever. Therefore:
 ### Negative / risks
 
 - **A detached job requires the VM to stay allocated.** This is billable time.
-  It must be paired with `--ttl`, and the user must still remember to stop the
-  session (`golab stop`) when done; a future reaper should enforce the TTL.
+  `--ttl` is required and now enforced, but the watchdog is a *process on that
+  VM*: if the VM is unassigned/reclaimed before the deadline, the watchdog dies
+  with it and no local reaper notices. `golab stop` still releases the VM (and
+  therefore stops the job and the watchdog) as before.
+- **Polling granularity.** The watchdog checks every 5 seconds (`watch_interval`
+  in the payload), so expiry can be up to one interval late; the deadline itself
+  is rounded up to whole seconds so it never fires early. `jobs` also reports
+  `ttl=exceeded` from `deadline_at` when the reason marker is absent, which
+  covers a watchdog that never ran.
+- **The kill is abrupt.** The watchdog sends `SIGKILL` to the child process
+  group and records `exit=124` plus `ttl-reason=ttl_exceeded`. There is no
+  graceful shutdown hook, and a normal exit that races the deadline can be
+  relabelled; this is a deliberate trade-off for a bounded job.
 - **Output visibility lag.** Polling means `logs -f` and `jobs` see output only
   on the next poll; the interval is bounded, not instantaneous.
 - **`exit` is eventual.** The exit code appears only after the detached child
-  finishes; until then `jobs` reports the job as running.
+  finishes (or the watchdog kills it); until then `jobs` reports the job as
+  running.
 - **Manifest drift.** The local manifest can disagree with VM reality (VM
   pruned, files deleted). `jobs`/`logs` must treat missing remote files as
   "unknown/stale", never crash, and must not fabricate a success.
 - **Payload safety is a hard requirement.** Any future change that embeds user
-  strings directly into the launcher risks code injection on the VM; keep the
-  JSON/base64/`repr` discipline and the security tests that pin it.
+  strings directly into the launcher or watchdog risks code injection on the
+  VM; keep the JSON/base64/`repr` discipline and the security tests that pin it.
+- **Foreground-only CU guard.** `--detach --max-cu` is a usage error, not a
+  silent no-op; users who need CU enforcement must use foreground `golab run`.
 
 ## Verification
 
 Test-first with fakes: `run --detach` writes the manifest and spawns no local
-process; `jobs` and `logs -f` poll and render remote state; `wait` covers all
-three modes plus its typed timeout; `sync --watch` stops on context
-cancellation. SecOps gates (`redaction`, `paths`, `goleak-check`) must stay
-green. Live e2e (billable, human-only) remains required before calling the
-feature live-proven.
+process; the launcher embeds the absolute deadline in `meta.json` and a quoted
+watchdog snippet; `jobs` reports `ttl=exceeded`/`ttl_exceeded` from the remote
+reason marker and deadline; `stop` still releases the VM; `--detach --max-cu`
+and `--detach --enforce` exit 2 before allocation; `jobs` and `logs -f` poll and
+render remote state; `wait` covers all three modes plus its typed timeout;
+`sync --watch` stops on context cancellation. SecOps gates (`redaction`,
+`paths`, `goleak-check`) must stay green. Live e2e (billable, human-only)
+remains required before calling the feature live-proven: confirm on a real VM
+that the watchdog kills the process group at the deadline and that `jobs`
+renders the marker.
