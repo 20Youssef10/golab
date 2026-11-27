@@ -17,14 +17,21 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/20Youssef10/golab/internal/version"
 )
 
 // nextVersion is the release that first carries the Windows .zip repacks and
 // the new installers. The coordinator bumps internal/version.Number to this
 // value at release time; the winget manifests are prepared for it now.
 const nextVersion = "0.3.0"
+
+// lastPublishedVersion is the last release with real, signed, published
+// checksums. Third-party channel manifests (brew, scoop, nfpm) MUST pin that
+// release: they are bumped only AFTER a tag exists with real checksums, never
+// to the in-flight version. This keeps them honest while version.Number is
+// already at nextVersion but the tag has not been cut. The winget installer
+// manifest is the exception: it targets nextVersion's .zip repacks and holds
+// explicit REPLACE_AT_RELEASE markers until those hashes exist.
+const lastPublishedVersion = "0.2.0"
 
 func TestInstallScriptVerificationGate(t *testing.T) {
 	bash, err := exec.LookPath("bash")
@@ -132,9 +139,9 @@ func TestInstallScriptVerificationGate(t *testing.T) {
 // static companion to TestInstallScriptVerificationGate - a channel must not
 // silently drift to an unverified URL or a placeholder checksum.
 func TestPackagingConfigsPinSignedRelease(t *testing.T) {
-	// Published checksums.txt for the current version, recorded here so the
-	// test needs no network. Bump these together with internal/version.Number
-	// and the packaging configs when a new release is cut.
+	// Published checksums.txt for lastPublishedVersion, recorded here so the
+	// test needs no network. Bump these together with the third-party channel
+	// configs only after a new signed release has actually been published.
 	published := []string{
 		"689c593a910ecd9bddbc855745af54fb3679cd46c122f276b38b9cc9e1f35c04",
 		"25f75b771b63dafddbf50876c53ff79cb4795b0d6ae73a4e0fbaf0598d4654c6",
@@ -155,7 +162,7 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 		valid[sum] = true
 	}
 
-	ver := version.Number
+	ver := lastPublishedVersion
 	base := "https://github.com/20Youssef10/golab/releases/download/v" + ver
 	files := []string{
 		"golab.rb", "golab.json",
@@ -179,7 +186,8 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 		}
 		s := string(raw)
 		// winget targets the upcoming release with the Windows .zip repacks;
-		// the other channels stay on the current signed .tar.gz release.
+		// the other channels stay on the last signed, published .tar.gz
+		// release even though version.Number has already moved to 0.3.0.
 		target := ver
 		if strings.HasPrefix(name, "20Youssef10.golab") {
 			target = nextVersion
