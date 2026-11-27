@@ -154,6 +154,9 @@ jobs:
       - name: Sign archives and attest the SBOM
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job has no checkout, so gh cannot infer owner/repo from a git
+          # remote. GH_REPO gives it the repository context explicitly.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -222,6 +225,7 @@ jobs:
       - name: Verify published asset classes and signing identity
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
