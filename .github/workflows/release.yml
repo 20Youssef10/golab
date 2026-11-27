@@ -12,10 +12,13 @@ on:
 # from v* tags; a run on any other ref is not a signed release.
 #
 # Privilege split: `go mod download`, goreleaser and syft run in the `build`
-# job, which has NO id-token permission, so a compromised build-time dependency
-# cannot mint a Fulcio signing certificate. Only `sign` holds id-token: write;
-# it never checks out the tag or executes build-time code. Both jobs are in
-# this same workflow file, so the certificate SAN (job_workflow_ref@ref) stays
+# job, which has NEITHER id-token: write NOR contents: write, so a compromised
+# build-time dependency can neither mint a Fulcio signing certificate nor
+# publish a release. `build` only produces dist/ and hands it to `sign` as an
+# Actions artifact. Only `sign` holds id-token: write (keyless signing) and
+# contents: write (creating the GitHub release and uploading its assets); it
+# never checks out the tag or executes build-time code. Both jobs are in this
+# same workflow file, so the certificate SAN (job_workflow_ref@ref) stays
 # exactly the identity the updater pins.
 permissions: {} # default deny; each job grants only what it needs
 
@@ -26,15 +29,15 @@ concurrency:
 jobs:
   build:
     if: startsWith(github.ref, 'refs/tags/v')
-    # Both halves stay behind the same gate: build publishes the archives,
-    # sign attaches the keyless material. GitHub auto-creates the `release`
-    # environment on first use, but it gates nothing until a repo admin adds
-    # required reviewers there.
+    # Both halves stay behind the same gate: build produces the archives,
+    # sign publishes them together with the keyless material. GitHub
+    # auto-creates the `release` environment on first use, but it gates nothing
+    # until a repo admin adds required reviewers there.
     environment: release
     runs-on: ubuntu-latest
     permissions:
-      contents: write # GoReleaser publishes archives + checksums.txt
-      # NO id-token: write here, by design (see header).
+      contents: read # checkout + annotated-tag fetch + changelog lookup only
+      # NO contents: write and NO id-token: write here, by design (see header).
     env:
       # Exact stable version resolved by the old floating `~> v2` constraint
       # (goreleaser/goreleaser v2.20.3, published 2026-11-20). No floating refs.
@@ -73,14 +76,18 @@ jobs:
           version: ${{ env.GORELEASER_VERSION }}
           args: release --snapshot --clean
 
-      # --- Real release (archives + checksums.txt) --------------------------
-      - name: Release archives and checksums
+      # --- Real build (archives + checksums.txt, NO publication) ------------
+      - name: Release archives and checksums (build only, no publish)
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: ${{ env.GORELEASER_VERSION }}
-          args: release --clean
+          # --skip=publish disables the publish pipe (no GitHub release, no
+          # asset uploads); all 13 archives and checksums.txt still land in dist.
+          args: release --clean --skip=publish
         env:
-          # GoReleaser v2 requires GITHUB_TOKEN for GitHub publishing.
+          # Read-only token for `changelog.use: github` metadata lookups only.
+          # This job has contents: read, so the token cannot create a release;
+          # --skip=publish is the primary guard, permissions are the backstop.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -124,7 +131,7 @@ jobs:
     environment: release
     runs-on: ubuntu-latest
     permissions:
-      contents: write # gh release upload attaches bundles to the release
+      contents: write # ONLY job that creates the release and uploads its assets
       id-token: write # keyless Fulcio certificate for cosign
     env:
       COSIGN_VERSION: v2.6.5
@@ -181,7 +188,18 @@ jobs:
               --predicate dist/sbom.cdx.json \
               --bundle "dist/${base}.sbom.sigstore.json" "$artifact"
           done
-          # Upload every bundle to the release GoReleaser just created.
+          # Publish from THIS job: `build` has no contents: write, so no release
+          # exists yet. gh release create fails if the tag already has one, so a
+          # re-run cannot silently replace published bytes. Keep goreleaser's
+          # `prerelease: auto` behaviour for -alpha/-beta/-rc tags.
+          # --verify-tag: never let gh auto-create a tag from the default branch
+          # if the pushed tag is somehow missing on the remote.
+          release_opts=(--title "$TAG" --generate-notes --verify-tag)
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+            release_opts+=(--prerelease)
+          fi
+          gh release create "$TAG" "${release_opts[@]}" "${archives[@]}" dist/checksums.txt
+          # Upload every bundle to the release created above.
           # No --clobber: published signatures/attestations are immutable, so a
           # re-run of this tag must fail here rather than overwrite them.
           gh release upload "$TAG" dist/*.sigstore.json
