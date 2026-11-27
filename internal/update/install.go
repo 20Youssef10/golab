@@ -178,51 +178,39 @@ func extractBinary(archive []byte, goos string, limit int64) ([]byte, error) {
 }
 
 // flatArchiveFiles is the complete set of root-level files our GoReleaser
-// archives may contain: the two binaries and the four documentation files.
+// archives may contain: the two binaries, the four documentation files and
+// one nested tar.gz holding the Agent Skills. The skill bundle is FLAT on
+// purpose: v0.2.0 updaters reject every member containing "/", so a nested
+// .agents/skills/... layout made signed self-update fail after v0.3.0.
 // An exact allowlist (rather than "any flat name") keeps a hostile extra file
 // from being accepted just because it has no slash.
 var flatArchiveFiles = map[string]bool{
-	"LICENSE":       true,
-	"NOTICE":        true,
-	"README.md":     true,
-	"CHANGELOG.md":  true,
-	"golab":         true,
-	"golab.exe":     true,
-	"golab-mcp":     true,
-	"golab-mcp.exe": true,
+	"LICENSE":             true,
+	"NOTICE":              true,
+	"README.md":           true,
+	"CHANGELOG.md":        true,
+	"golab":               true,
+	"golab.exe":           true,
+	"golab-mcp":           true,
+	"golab-mcp.exe":       true,
+	"golab-skills.tar.gz": true,
 }
 
-// safeArchivePath accepts only the flat files GoReleaser emits at the archive
-// root and Markdown files under .agents/skills/ (shipped so the installers can
-// copy the Agent Skills). Every other path is hostile regardless of the
-// member's declared type: separators outside the skill prefix, absolute paths,
-// backslashes, empty/dot segments and any ".." traversal are all rejected.
+// safeArchivePath accepts only the exact flat names above. This is identical
+// to the v0.2.0 policy (empty/dot names, absolute paths, backslashes, ".."
+// and any slash are rejected) with one added name: golab-skills.tar.gz.
+// In particular nested skill paths are NOT accepted; the installers unpack
+// the flat bundle themselves after verifying the outer archive.
 func safeArchivePath(name string) bool {
 	if name == "" || name == "." || name == ".." || path.IsAbs(name) {
 		return false
 	}
-	// A backslash is a separator on Windows; never interpret it in an archive
-	// member name, including inside the otherwise allowed skill tree.
-	if strings.ContainsAny(name, `\`) {
+	// A backslash is a separator on Windows; never interpret one in an
+	// archive member name. This also rejects the old "..\\evil" style.
+	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		return false
 	}
-	if flatArchiveFiles[name] {
-		return true
-	}
-	const skillPrefix = ".agents/skills/"
-	if !strings.HasPrefix(name, skillPrefix) {
-		return false
-	}
-	rest := strings.TrimPrefix(name, skillPrefix)
-	if rest == "" || !strings.HasSuffix(rest, ".md") {
-		return false
-	}
-	for _, seg := range strings.Split(rest, "/") {
-		if seg == "" || seg == "." || seg == ".." || strings.Contains(seg, "..") {
-			return false
-		}
-	}
-	return true
+	return flatArchiveFiles[name]
 }
 
 // boundedReader fails once limit decompressed bytes have been read; it never

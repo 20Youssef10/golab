@@ -90,8 +90,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'failed to download release verification material' }
     Verify-Release -ArtifactPath $artifactPath -BundlePath $bundlePath -ChecksumPath $checksumPath
 
-    tar.exe -xzf $artifactPath -C $tmp
-    if ($LASTEXITCODE -ne 0) { throw 'failed to extract the verified archive' }
+    # Extract ONLY known flat members from the verified outer archive; no
+    # arbitrary nested path is ever written to disk.
+    tar.exe -xzf $artifactPath -C $tmp golab.exe golab-mcp.exe
+    if ($LASTEXITCODE -ne 0) { throw 'failed to extract the verified binaries' }
+    tar.exe -xzf $artifactPath -C $tmp golab-skills.tar.gz
+    if ($LASTEXITCODE -ne 0) { throw 'failed to extract the verified skills bundle' }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     foreach ($binary in @('golab.exe', 'golab-mcp.exe')) {
         $source = Join-Path $tmp $binary
@@ -106,19 +110,23 @@ try {
     Write-Host "install: installed golab and golab-mcp $ver to $InstallDir"
 
     if (-not $NoSkills) {
-        foreach ($skill in $skills) {
-            $sourceSkill = Join-Path $tmp (".agents\skills\$skill")
-            if (-not (Test-Path -LiteralPath (Join-Path $sourceSkill 'SKILL.md') -PathType Leaf)) {
-                throw "verified archive has no skill $skill"
+        $bundlePathSkills = Join-Path $tmp 'golab-skills.tar.gz'
+        if (-not (Test-Path -LiteralPath $bundlePathSkills -PathType Leaf)) {
+            throw 'verified archive has no golab-skills.tar.gz'
+        }
+        # Defence in depth: the bundle is inside signed bytes, but still refuse
+        # to extract anything outside the two known skill trees.
+        foreach ($member in (& tar.exe -tzf $bundlePathSkills)) {
+            if ($member -notmatch '^(golab-operations|colab-mcp)(/|$)') {
+                throw "unexpected member in skills bundle: $member"
             }
         }
+        if ($LASTEXITCODE -ne 0) { throw 'failed to list the skills bundle' }
         New-Item -ItemType Directory -Force -Path $SkillsDir | Out-Null
+        & tar.exe -xzf $bundlePathSkills -C $SkillsDir golab-operations colab-mcp
+        if ($LASTEXITCODE -ne 0) { throw 'failed to extract the skills bundle' }
         foreach ($skill in $skills) {
-            $sourceSkill = Join-Path $tmp (".agents\skills\$skill")
-            $targetSkill = Join-Path $SkillsDir $skill
-            New-Item -ItemType Directory -Force -Path $targetSkill | Out-Null
-            Copy-Item -LiteralPath (Join-Path $sourceSkill '*') -Destination $targetSkill -Recurse -Force
-            if (-not (Test-Path -LiteralPath (Join-Path $targetSkill 'SKILL.md') -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $SkillsDir "$skill\SKILL.md") -PathType Leaf)) {
                 throw "failed to install skill $skill"
             }
         }

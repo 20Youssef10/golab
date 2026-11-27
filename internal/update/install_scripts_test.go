@@ -52,9 +52,10 @@ func TestInstallScriptVerificationGate(t *testing.T) {
 	for _, needle := range []string{
 		"cosign verify-blob", "--certificate-identity-regexp", "--certificate-oidc-issuer",
 		"sha256sum", "checksums.txt", "20Youssef10/golab", "--verify-only",
-		// Both binaries and both skills ship in the signed archive.
+		// Both binaries and the flat skills bundle ship in the signed archive.
 		"golab-mcp", "--no-skills", "--skills-dir", "XDG_DATA_HOME",
-		".agents/skills", "golab-operations", "colab-mcp",
+		"golab-skills.tar.gz", "golab-operations", "colab-mcp",
+		"tar -xzf \"$tmp/$asset\" -C \"$tmp\" golab-skills.tar.gz",
 		"install -m 0755", "--help", "-x \"$install_dir/$binary\"",
 	} {
 		if !strings.Contains(s, needle) {
@@ -271,7 +272,8 @@ func TestPowerShellInstallScriptPolicy(t *testing.T) {
 		"--certificate-oidc-issuer", "checksums.txt", "20Youssef10/golab",
 		// Both binaries, opt-out skills flag and the documented skill path.
 		"golab-mcp.exe", "-NoSkills", "$SkillsDir", "LOCALAPPDATA",
-		".agents\\skills\\", "SKILL.md", "--help",
+		"golab-skills.tar.gz", "SKILL.md", "--help",
+		"tar.exe -xzf $artifactPath -C $tmp golab-skills.tar.gz",
 	} {
 		if !strings.Contains(s, needle) {
 			t.Fatalf("install.ps1 is missing %q", needle)
@@ -310,7 +312,8 @@ func TestDistributionPipelineWiring(t *testing.T) {
 	for _, needle := range []string{
 		"main: ./cmd/golab-mcp", "ids: [golab, golab-mcp]",
 		"formats: [tar.gz]", "formats: [tar.gz, zip]",
-		`dst: ".agents/skills"`, "name_template: checksums.txt",
+		"scripts/make-skills-archive.sh", "golab-skills.tar.gz",
+		"name_template: checksums.txt",
 	} {
 		if !strings.Contains(goreleaser, needle) {
 			t.Errorf(".goreleaser.yaml is missing %q", needle)

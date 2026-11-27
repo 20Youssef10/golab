@@ -112,7 +112,10 @@ curl -fsSL -o "$tmp/${asset}.sigstore.json" "${base}/${asset}.sigstore.json"
 verify_local "$tmp/$asset" "$tmp/${asset}.sigstore.json" "$tmp/checksums.txt"
 
 # Extraction happens only after verification and never executes archive content.
-tar -xzf "$tmp/$asset" -C "$tmp"
+# Extract ONLY known flat members: no arbitrary nested path from the outer
+# archive is ever written to disk (and a v0.2.0 updater discards the bundle).
+tar -xzf "$tmp/$asset" -C "$tmp" golab golab-mcp
+tar -xzf "$tmp/$asset" -C "$tmp" golab-skills.tar.gz
 for binary in golab golab-mcp; do
   [[ -f "$tmp/$binary" && -x "$tmp/$binary" ]] || die "verified archive has no executable $binary"
 done
@@ -127,15 +130,20 @@ done
 printf 'install: installed golab and golab-mcp %s to %s\n' "$ver" "$install_dir"
 
 if (( install_skills )); then
-  need cp
-  for skill in "${SKILLS[@]}"; do
-    [[ -f "$tmp/.agents/skills/$skill/SKILL.md" ]] || die "verified archive has no skill $skill"
-  done
+  bundle="$tmp/golab-skills.tar.gz"
+  [[ -f "$bundle" ]] || die "verified archive has no golab-skills.tar.gz"
+  # Defence in depth: the bundle is inside signed bytes, but still refuse to
+  # extract anything outside the two known skill trees.
+  while IFS= read -r member; do
+    case "$member" in
+      golab-operations|golab-operations/*|colab-mcp|colab-mcp/*) ;;
+      *) die "unexpected member in skills bundle: $member" ;;
+    esac
+  done < <(tar -tzf "$bundle")
   mkdir -p "$skills_dir"
+  # Overwrite files in place; never delete the user's local edits.
+  tar -xzf "$bundle" -C "$skills_dir" golab-operations colab-mcp
   for skill in "${SKILLS[@]}"; do
-    # cp into an existing directory: never delete a user's local edits.
-    mkdir -p "$skills_dir/$skill"
-    cp -R "$tmp/.agents/skills/$skill/." "$skills_dir/$skill/"
     [[ -f "$skills_dir/$skill/SKILL.md" ]] || die "failed to install skill $skill"
   done
   printf 'install: installed skills %s to %s\n' "${SKILLS[*]}" "$skills_dir"

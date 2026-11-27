@@ -3,10 +3,13 @@
 # (internal/update/check.go: asset pattern `golab_*_<os>_<arch>.tar.gz`,
 # checksums.txt, *.sigstore.json, *.sbom.sigstore.json).
 #
-# Every archive carries BOTH static binaries (golab, golab-mcp) and the two
-# portable Agent Skills under .agents/skills/. Windows additionally gets a
-# .zip repack from the SAME binaries for winget, whose installer type has no
-# tar.gz form; the updater keeps consuming the untouched .tar.gz assets.
+# Every archive carries BOTH static binaries (golab, golab-mcp) and ONE flat
+# member, golab-skills.tar.gz, holding both portable Agent Skills. The outer
+# archive MUST stay flat: a v0.2.0 binary's safeArchivePath rejects any member
+# containing "/", so nested .agents/skills/... entries broke signed self-update
+# to v0.3.0. Windows additionally gets a .zip repack from the SAME binaries for
+# winget, whose installer type has no tar.gz form; the updater keeps consuming
+# the untouched .tar.gz assets.
 #
 # Signing (cosign sign-blob + attest-blob) is done in .github/workflows/release.yml
 # after this pipeline runs, because the bundles must be uploaded to the same
@@ -18,6 +21,9 @@ project_name: golab
 before:
   hooks:
     - go mod download
+    # Writes /tmp/golab-skills.tar.gz deterministically. A script (not a shell
+    # one-liner) is required: OSS GoReleaser runs hook strings without a shell.
+    - ./scripts/make-skills-archive.sh
 
 builds:
   - id: golab
@@ -99,10 +105,12 @@ archives:
       - NOTICE
       - README.md
       - CHANGELOG.md
-      # Glob base is .agents/skills, so `dst` recreates that exact tree inside
-      # the archive for install.sh / install.ps1 / the Docker image.
-      - src: ".agents/skills/**/*"
-        dst: ".agents/skills"
+      # Single FLAT member for backward-compatible self-update. The generated
+      # file lives outside dist (which GoReleaser cleans after before hooks);
+      # dst renames it so no absolute path leaks into the published archive.
+      # install.sh / install.ps1 unpack it into the skills directory.
+      - src: "/tmp/golab-skills.tar.gz"
+        dst: golab-skills.tar.gz
 
 checksum:
   # Must be literally `checksums.txt` (internal/update/check.go:192-195).
