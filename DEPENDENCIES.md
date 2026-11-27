@@ -27,5 +27,6 @@ Each direct dependency needs a one-line justification (AGENTS.md).
 | `github.com/stretchr/testify` | Test assertions (stdlib `testing` preferred where sufficient). |
 | `go.uber.org/goleak` | End-of-suite goroutine-leak gate for the websocket/goroutine-heavy packages (AUDIT-03 §4.2). |
 | `go.yaml.in/yaml/v3` | Strict `KnownFields(true)` decoding of `golab.yaml` budget profiles, replacing a hand-rolled YAML subset parser. |
+| `github.com/modelcontextprotocol/go-sdk` | Official MCP Go SDK (`mcp` package) for the typed `golab-mcp` tool/resource server over stdio and streamable HTTP. |
 
 Policy: `govulncheck` clean, `go mod verify` green, no new dependency without a row above.
