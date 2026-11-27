@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,31 +22,72 @@ import (
 	"github.com/20Youssef10/golab/internal/mcpserver"
 )
 
-// fakeGolab is a stand-in for the golab binary. It records argv and stdin,
-// then emits a well-formed agentout document (the format produced by
-// `golab --output json`). Its modes exercise success, redaction and failure.
-const fakeGolab = `#!/bin/sh
-if [ -n "$FAKE_GOLAB_LOG" ]; then printf '%s\n' "$*" >> "$FAKE_GOLAB_LOG"; fi
-if [ -n "$FAKE_GOLAB_STDIN" ]; then cat > "$FAKE_GOLAB_STDIN"; fi
-case "$FAKE_GOLAB_MODE" in
-  fail)
-    printf '%s\n' '[colab] boom Authorization: Bearer abcdefghijklmnop {"access_token":"supersecret123"}' >&2
-    exit 1 ;;
-  secret)
-    printf '%s\n' '{"schema":"golab/1","events":[{"schema":"golab/1","type":"output","text":"Authorization: Bearer abcdefghijklmnop"},{"schema":"golab/1","type":"output","text":"{\"access_token\":\"supersecret123\"}"}]}' ;;
-  *)
-    printf '%s\n' '{"schema":"golab/1","events":[{"schema":"golab/1","type":"output","text":"ok from fake"}]}' ;;
-esac
-`
-
-func writeFakeGolab(t *testing.T) (string, string, string) {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "golab-fake")
-	if err := os.WriteFile(bin, []byte(fakeGolab), 0o700); err != nil {
-		t.Fatalf("write fake binary: %v", err)
+// The test binary doubles as the fake golab binary. TestMain short-circuits
+// when GO_GOLAB_FAKE=1, which keeps the harness portable: no /bin/sh, no
+// shebang, no separate build step, and therefore no Windows PATH/exec issues.
+// It records argv and stdin and emits a well-formed agentout document.
+func TestMain(m *testing.M) {
+	if os.Getenv("GO_GOLAB_FAKE") == "1" {
+		runFakeGolab()
+		os.Exit(0)
 	}
-	return bin, filepath.Join(dir, "argv.log"), filepath.Join(dir, "stdin.txt")
+	os.Exit(m.Run())
+}
+
+const (
+	fakeOKDoc     = `{"schema":"golab/1","events":[{"schema":"golab/1","type":"output","text":"ok from fake"}]}`
+	fakeSecretDoc = `{"schema":"golab/1","events":[{"schema":"golab/1","type":"output","text":"Authorization: Bearer abcdefghijklmnop"},{"schema":"golab/1","type":"output","text":"{\"access_token\":\"supersecret123\"}"}]}`
+	fakeFailLine  = `[colab] boom Authorization: Bearer abcdefghijklmnop {"access_token":"supersecret123"}`
+)
+
+func runFakeGolab() {
+	if logPath := os.Getenv("FAKE_GOLAB_LOG"); logPath != "" {
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = fmt.Fprintln(f, strings.Join(os.Args[1:], " "))
+			_ = f.Close()
+		}
+	}
+	if stdinPath := os.Getenv("FAKE_GOLAB_STDIN"); stdinPath != "" {
+		f, err := os.Create(stdinPath)
+		if err == nil {
+			_, _ = io.Copy(f, os.Stdin)
+			_ = f.Close()
+		}
+	}
+	switch os.Getenv("FAKE_GOLAB_MODE") {
+	case "fail":
+		fmt.Fprintln(os.Stderr, fakeFailLine)
+		os.Exit(1)
+	case "secret":
+		fmt.Fprintln(os.Stdout, fakeSecretDoc)
+	default:
+		fmt.Fprintln(os.Stdout, fakeOKDoc)
+	}
+}
+
+func fakeGolabBin(t *testing.T) (string, string, string) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	t.Setenv("GO_GOLAB_FAKE", "1")
+	dir := t.TempDir()
+	return exe, filepath.Join(dir, "argv.log"), filepath.Join(dir, "stdin.txt")
+}
+
+// serverEnv removes fake-process markers before spawning a helper that must
+// run the MCP server rather than pretend to be golab.
+func serverEnv(extra ...string) []string {
+	env := make([]string, 0, len(os.Environ())+len(extra))
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GO_GOLAB_FAKE=") || strings.HasPrefix(kv, "GOLAB_MCP_TEST_STDIO=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, extra...)
 }
 
 func newTestServer(t *testing.T, bin string) (*mcp.Server, *mcp.ClientSession) {
@@ -131,7 +173,7 @@ func minimalArgs(name string) map[string]any {
 // valid object input schema, a non-empty description with side effects, and
 // behaviour annotations that distinguish read-only from mutating tools.
 func TestListTools(t *testing.T) {
-	bin, _, _ := writeFakeGolab(t)
+	bin, _, _ := fakeGolabBin(t)
 	_, cs := newTestServer(t, bin)
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
@@ -224,7 +266,7 @@ func contains(list []string, want string) bool {
 // TestReadOnlyCall proves the client/server session path and the typed JSON
 // envelope parser, and that argv starts with `--output json <command>`.
 func TestReadOnlyCall(t *testing.T) {
-	bin, log, _ := writeFakeGolab(t)
+	bin, log, _ := fakeGolabBin(t)
 	t.Setenv("FAKE_GOLAB_LOG", log)
 	_, cs := newTestServer(t, bin)
 	res := call(t, cs, "colab_sessions", nil)
@@ -246,7 +288,7 @@ func TestReadOnlyCall(t *testing.T) {
 // TestConfirmGate checks that no billable/destructive tool reaches the
 // subprocess without an explicit confirm, and that every one can be unlocked.
 func TestConfirmGate(t *testing.T) {
-	bin, log, _ := writeFakeGolab(t)
+	bin, log, _ := fakeGolabBin(t)
 	t.Setenv("FAKE_GOLAB_LOG", log)
 	_, cs := newTestServer(t, bin)
 	for _, name := range confirmGated {
@@ -299,7 +341,7 @@ func TestConfirmGate(t *testing.T) {
 // TestRedaction verifies that credentials in either channel never reach a
 // tool result; the subprocess deliberately emits both header and JSON forms.
 func TestRedaction(t *testing.T) {
-	bin, _, _ := writeFakeGolab(t)
+	bin, _, _ := fakeGolabBin(t)
 	t.Setenv("FAKE_GOLAB_MODE", "secret")
 	_, cs := newTestServer(t, bin)
 	res := call(t, cs, "colab_sessions", nil)
@@ -317,7 +359,7 @@ func TestRedaction(t *testing.T) {
 // TestErrorMapping checks failures become isError tool results with redacted
 // diagnostic text, never protocol errors or leaked credentials.
 func TestErrorMapping(t *testing.T) {
-	bin, _, _ := writeFakeGolab(t)
+	bin, _, _ := fakeGolabBin(t)
 	t.Setenv("FAKE_GOLAB_MODE", "fail")
 	_, cs := newTestServer(t, bin)
 	res := call(t, cs, "colab_sessions", nil)
@@ -336,7 +378,7 @@ func TestErrorMapping(t *testing.T) {
 // TestExecCodeViaStdin proves user code is sent on stdin, never spliced into
 // argv (AGENTS.md: never splice user strings into code run on the VM).
 func TestExecCodeViaStdin(t *testing.T) {
-	bin, log, stdinFile := writeFakeGolab(t)
+	bin, log, stdinFile := fakeGolabBin(t)
 	t.Setenv("FAKE_GOLAB_LOG", log)
 	t.Setenv("FAKE_GOLAB_STDIN", stdinFile)
 	_, cs := newTestServer(t, bin)
@@ -366,7 +408,7 @@ func TestExecCodeViaStdin(t *testing.T) {
 // TestResources exposes the bundled agent guidance to any MCP client that
 // supports resources/read.
 func TestResources(t *testing.T) {
-	bin, _, _ := writeFakeGolab(t)
+	bin, _, _ := fakeGolabBin(t)
 	_, cs := newTestServer(t, bin)
 	res, err := cs.ListResources(context.Background(), nil)
 	if err != nil {
@@ -399,7 +441,7 @@ func TestResources(t *testing.T) {
 // TestStreamableHTTP exercises the same tool set over the official SDK's
 // streamable HTTP transport, so HTTP-only clients see identical contracts.
 func TestStreamableHTTP(t *testing.T) {
-	bin, _, _ := writeFakeGolab(t)
+	bin, _, _ := fakeGolabBin(t)
 	srv, err := mcpserver.NewServer(mcpserver.Config{GolabBin: bin})
 	if err != nil {
 		t.Fatal(err)
@@ -431,23 +473,72 @@ func TestStreamableHTTP(t *testing.T) {
 	}
 }
 
+// captureConn is a portable in-test transport: it forwards bytes between an
+// SDK client and a child stdio server while recording every byte the child
+// writes to stdout. No shell, no tee, so it works on Windows as well.
+type captureConn struct {
+	stdout    io.Reader
+	stdin     io.WriteCloser
+	mu        sync.Mutex
+	data      bytes.Buffer
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (c *captureConn) Read(p []byte) (int, error) {
+	n, err := c.stdout.Read(p)
+	if n > 0 {
+		c.mu.Lock()
+		_, _ = c.data.Write(p[:n])
+		c.mu.Unlock()
+	}
+	return n, err
+}
+
+func (c *captureConn) Write(p []byte) (int, error) { return c.stdin.Write(p) }
+
+func (c *captureConn) Close() error {
+	c.closeOnce.Do(func() { c.closeErr = c.stdin.Close() })
+	return c.closeErr
+}
+
+func (c *captureConn) snapshot() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Clone(c.data.Bytes())
+}
+
 // TestStdioPurity connects an official SDK client to the real stdio
-// entrypoint through a stdout tee, then asserts every byte the process wrote
+// entrypoint through captureConn, then asserts every byte the process wrote
 // to stdout is a JSON-RPC message — the hard requirement in the official
 // build guide. It also checks the modern protocol era negotiates.
 func TestStdioPurity(t *testing.T) {
-	capture := filepath.Join(t.TempDir(), "stdout.ndjson")
-	bin, _, _ := writeFakeGolab(t)
-	script := fmt.Sprintf("%q -test.run '^TestHelperStdioServer$' | tee %q", os.Args[0], capture)
-	cmd := exec.Command("/bin/sh", "-c", script)
-	cmd.Env = append(os.Environ(), "GOLAB_MCP_TEST_STDIO=1", "FAKE_GOLAB_BIN="+bin)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestHelperStdioServer$")
+	cmd.Env = serverEnv("GOLAB_MCP_TEST_STDIO=1")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "purity-client", Version: "1.0.0"}, nil)
-	cs, err := client.Connect(context.Background(), &mcp.CommandTransport{Command: cmd}, nil)
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		t.Fatalf("CommandTransport connect: %v; stderr=%q", err, stderr.String())
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+
+	conn := &captureConn{stdout: stdout, stdin: stdin}
+	client := mcp.NewClient(&mcp.Implementation{Name: "purity-client", Version: "1.0.0"}, nil)
+	cs, err := client.Connect(context.Background(), &mcp.IOTransport{Reader: conn, Writer: conn}, nil)
+	if err != nil {
+		t.Fatalf("stdio connect: %v; stderr=%q", err, stderr.String())
 	}
 	tools, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
@@ -459,12 +550,18 @@ func TestStdioPurity(t *testing.T) {
 	if err := cs.Close(); err != nil {
 		t.Fatalf("session close: %v", err)
 	}
-
-	data, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatalf("read capture: %v", err)
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("stdio server exit: %v; stderr=%q", err, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("stdio server did not exit after close")
 	}
-	lines := bufio.NewScanner(bytes.NewReader(data))
+
+	lines := bufio.NewScanner(bytes.NewReader(conn.snapshot()))
 	count := 0
 	for lines.Scan() {
 		line := strings.TrimSpace(lines.Text())
@@ -489,8 +586,12 @@ func TestStdioPurity(t *testing.T) {
 // confirms a legacy MCP client sees the same tool list. The Go SDK negotiates
 // both protocol eras; this test guards the fallback path.
 func TestLegacyProtocolEra(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperStdioServer$")
-	cmd.Env = append(os.Environ(), "GOLAB_MCP_TEST_STDIO=1")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestHelperStdioServer$")
+	cmd.Env = serverEnv("GOLAB_MCP_TEST_STDIO=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
