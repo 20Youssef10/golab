@@ -281,6 +281,25 @@ runs. "Closed" applies to the specific check named, not to the whole layer.
 
 ## Change log
 
+- 2026-11-28 — **Live distribution and feature verification on billable CPU VMs.**
+  Distribution methods checked from a clean Colab VM against published v0.3.0
+  assets: direct `.tar.gz` download + `checksums.txt` + both binaries (`golab`,
+  `golab-mcp`) smoke = PASS; `install.sh` = FAIL with cosign **v2.4.1**
+  (`bundle does not contain cert for verification`) but PASS with the
+  release-pinned **cosign v2.6.5** (`Verified OK`, checksum + signature + both
+  binaries + both skills) — installers now reject older cosign with an
+  actionable version error; `go install .../cmd/golab-mcp@v0.3.0` = PASS on the
+  host; the standalone MCP archive is configured for the **next** release and
+  was correctly absent from immutable v0.3.0. Feature probes: detached
+  `run --detach --ttl 40s` was killed remotely by the watchdog (`jobs` reported
+  `ttl_exceeded`, `exit=124`, `ttl=exceeded`); `ssh --accept-host-key` with a
+  wrong fingerprint failed before recording a pin and printed the live key;
+  `bundle verify --env` on a manifest recorded with `run --bundle` matched in a
+  **fresh VM**; one orphaned VM from the concurrent probes was reaped and the
+  final `golab sessions` was empty. `compat refresh --ref v0.8.0` returned HTTP
+  404 and was root-caused to a missing `googlecolab/google-colab-cli` segment in
+  the production URL (fix in progress). The wrong first `bundle record --env`
+  input was corrected: a real recorded environment probe requires `run --bundle`.
 - 2026-11-27 — **Flagged follow-ups closed honestly; no new live proof claimed
   for fake-tested surfaces.** The `ssh --accept-host-key SHA256:…` flag pins a
   host key only after the handshake matches (explicit pin, mismatch = exit 2

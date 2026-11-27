@@ -12,10 +12,10 @@ This is a community port, not a Google product. “Google” and “Colab” are
 - **Safe to pipe.** Program output goes to stdout; every `[colab] …` status line goes to stderr. `golab exec < code.py`, `golab ssh -- CMD` and `--output json|ndjson` produce clean, byte-exact streams.
 - **Loud about failures.** Atomic state writes, corrupt-state aborts, explicit HTTP timeouts and typed errors instead of string matching.
 
-## Status (v0.3.0 release target)
+## Status (v0.3.0 published)
 
-`v0.3.0` is the release target dated 2026-11-27; the annotated tag has not been
-pushed yet. It adds the `golab-mcp` server (22 tools, stdio and streamable HTTP),
+`v0.3.0` was published on 2026-11-27 (release run `46062649930`, 49 signed assets);
+the annotated tag points at `996af6d`. It adds the `golab-mcp` server (22 tools, stdio and streamable HTTP),
 two portable Agent Skills, the spend-safety and VM-inspection tiers, remote TTL
 enforcement, SSH host-key pinning, `compat refresh`, signed archives carrying both
 binaries plus the skills, Windows `.zip` repacks and a GHCR distroless image.
