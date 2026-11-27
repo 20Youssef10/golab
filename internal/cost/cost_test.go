@@ -1,11 +1,13 @@
 package cost
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,4 +107,71 @@ func TestDefaultPathUsesXDGCache(t *testing.T) {
 	p, err := DefaultPath()
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(dir, "colab-cli", "ccu.jsonl"), p)
+}
+
+// Regression: cost.New(path) is called fresh by the budget guard, `usage` and
+// the --max-cu monitor, so each call gets its own mutex. Concurrent appends to
+// the same ccu.jsonl must still be serialized or the read-modify-rename cycle
+// loses samples. Upstream analogue: the guard/usage/monitor fan-out that the
+// race agent flagged; there is no single upstream Python test for it.
+//
+// Every writer deliberately builds its OWN Ledger instance and appends a
+// distinct sample. A barrier releases them together, and repeated rounds make
+// a lost-update interleaving reliably observable.
+func TestConcurrentAppendFromDistinctLedgerInstances(t *testing.T) {
+	const (
+		rounds  = 3
+		writers = 24
+	)
+	for round := 0; round < rounds; round++ {
+		path := filepath.Join(t.TempDir(), "ccu.jsonl")
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		errs := make(chan error, writers)
+		for i := 0; i < writers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				// Mirrors sampleCCU's cost.New(path).Append(...) call site.
+				l := New(path)
+				<-start
+				errs <- l.Append(Sample{
+					At:         time.Unix(1_700_000_000+int64(i), 0).UTC(),
+					Source:     "usage",
+					Balance:    float64(i),
+					RateHourly: 1,
+				})
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+
+		// Raw JSONL check: exactly one valid, distinct line per writer. Read()
+		// skips malformed lines, so it alone cannot prove there was no corruption.
+		b, err := os.ReadFile(path)
+		require.NoError(t, err)
+		lines := bytes.Split(bytes.TrimSpace(b), []byte{'\n'})
+		require.Len(t, lines, writers, "round %d: lost or merged samples", round)
+		seen := make(map[float64]bool, writers)
+		for _, line := range lines {
+			var s Sample
+			require.NoError(t, json.Unmarshal(line, &s), "round %d: corrupt JSONL line %q", round, line)
+			require.False(t, seen[s.Balance], "round %d: duplicate sample %v", round, s.Balance)
+			seen[s.Balance] = true
+		}
+		for i := 0; i < writers; i++ {
+			require.True(t, seen[float64(i)], "round %d: sample %d missing", round, i)
+		}
+
+		// This is exactly what `golab cost --json` consumes: Read -> ReportOf.
+		samples, err := Read(path)
+		require.NoError(t, err)
+		report := ReportOf(samples, time.Unix(1_699_000_000, 0).UTC(), time.Unix(1_701_000_000, 0).UTC())
+		require.Equal(t, writers, report.SampleCount, "round %d: cost --json must see every sample", round)
+	}
 }

@@ -8,12 +8,16 @@ package cost
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/gofrs/flock"
 
 	"github.com/20Youssef10/golab/internal/platform"
 )
@@ -60,6 +64,13 @@ func (l *Ledger) SetMaxBytes(n int64) {
 
 // Append writes one JSON line, then trims the oldest lines if the file has
 // grown past the bound. The rewrite is atomic (temp file + rename).
+//
+// The whole read-modify-rename cycle is serialized by a per-path OS advisory
+// lock (see locked). An in-process mutex is not enough: cost.New(path) is
+// called fresh by every sampleCCU caller (the budget guard, `usage` and the
+// --max-cu monitor), so distinct Ledger instances — and even distinct golab
+// processes — would otherwise read the same pre-append contents and the last
+// rename would silently drop the other samples.
 func (l *Ledger) Append(s Sample) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -72,42 +83,65 @@ func (l *Ledger) Append(s Sample) error {
 	}
 	line = append(line, '\n')
 
-	dir := filepath.Dir(l.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	existing, err := os.ReadFile(l.path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	data := append(append([]byte(nil), existing...), line...)
-	data = trimToBound(data, l.maxBytes)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return l.locked(ctx, func() error {
+		existing, err := os.ReadFile(l.path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		data := append(append([]byte(nil), existing...), line...)
+		data = trimToBound(data, l.maxBytes)
 
-	f, err := os.CreateTemp(dir, ".ccu-tmp-*")
+		dir := filepath.Dir(l.path)
+		f, err := os.CreateTemp(dir, ".ccu-tmp-*")
+		if err != nil {
+			return err
+		}
+		tmp := f.Name()
+		defer func() { _ = os.Remove(tmp) }()
+		if err := f.Chmod(0o600); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if _, err := f.Write(data); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, l.path); err != nil {
+			return err
+		}
+		return platform.MakePrivate(l.path)
+	})
+}
+
+// locked mirrors internal/state's flock pattern. The lock is keyed by path, not
+// by Ledger instance, so it also covers separate processes appending to the
+// same cache file. gofrs/flock creates the .lock file with 0600 and it carries
+// no sample data. This was chosen over exposing a shared *Ledger through
+// app.Deps: it is smaller (no wiring changes in the CLI commands), and it
+// closes the cross-process gap that a single in-memory instance cannot.
+func (l *Ledger) locked(ctx context.Context, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(l.path), 0o700); err != nil {
+		return err
+	}
+	lock := flock.New(l.path + ".lock")
+	ok, err := lock.TryLockContext(ctx, 50*time.Millisecond)
 	if err != nil {
 		return err
 	}
-	tmp := f.Name()
-	defer func() { _ = os.Remove(tmp) }()
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return err
+	if !ok {
+		return fmt.Errorf("timed out acquiring cost ledger lock for %s", l.path)
 	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, l.path); err != nil {
-		return err
-	}
-	return platform.MakePrivate(l.path)
+	defer func() { _ = lock.Unlock() }()
+	return fn()
 }
 
 // trimToBound drops whole lines from the front until the payload fits. A
@@ -133,6 +167,8 @@ func trimToBound(data []byte, max int64) []byte {
 }
 
 // Read parses a ledger, skipping malformed lines (a cache is never fatal).
+// It needs no lock: Append publishes each new generation with an atomic rename,
+// so a reader always sees one complete generation, never a half-written file.
 func Read(path string) ([]Sample, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
