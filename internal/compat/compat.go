@@ -14,13 +14,21 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// Snapshot is a command -> sorted flag-names map plus provenance.
+// Snapshot is a command -> sorted flag-names map plus provenance. self-snapshot
+// files only carry Source/Captured; upstream-fetched files additionally carry
+// SourceURL/Ref/FetchedAt/ContentHash/Method so a report can name its origin
+// without ever claiming a live probe.
 type Snapshot struct {
-	Kind     string              `json:"kind"`
-	Scope    string              `json:"scope,omitempty"`
-	Source   string              `json:"source"`
-	Captured string              `json:"captured"`
-	Commands map[string][]string `json:"commands"`
+	Kind        string              `json:"kind"`
+	Scope       string              `json:"scope,omitempty"`
+	Source      string              `json:"source"`
+	Captured    string              `json:"captured"`
+	SourceURL   string              `json:"source_url,omitempty"`
+	Ref         string              `json:"ref,omitempty"`
+	FetchedAt   string              `json:"fetched_at,omitempty"`
+	ContentHash string              `json:"content_hash,omitempty"`
+	Method      string              `json:"method,omitempty"`
+	Commands    map[string][]string `json:"commands"`
 }
 
 //go:embed upstream.json
@@ -41,6 +49,11 @@ type Report struct {
 	SnapshotKind     string              `json:"snapshot_kind"`
 	SnapshotScope    string              `json:"snapshot_scope,omitempty"`
 	SnapshotSource   string              `json:"snapshot_source"`
+	SourceURL        string              `json:"source_url,omitempty"`
+	Ref              string              `json:"ref,omitempty"`
+	FetchedAt        string              `json:"fetched_at,omitempty"`
+	ContentHash      string              `json:"content_hash,omitempty"`
+	Method           string              `json:"method,omitempty"`
 	Captured         string              `json:"captured"`
 	Live             bool                `json:"live"`
 	SnapshotCommands int                 `json:"snapshot_commands"`
@@ -58,7 +71,9 @@ const schema = "golab/compat-report/1"
 func Compare(root *cobra.Command, snap Snapshot) Report {
 	rep := Report{
 		Schema: schema, SnapshotKind: snap.Kind, SnapshotScope: snap.Scope,
-		SnapshotSource: snap.Source, Captured: snap.Captured, Live: false,
+		SnapshotSource: snap.Source, SourceURL: snap.SourceURL, Ref: snap.Ref,
+		FetchedAt: snap.FetchedAt, ContentHash: snap.ContentHash, Method: snap.Method,
+		Captured: snap.Captured, Live: false,
 		AddedCommands: []string{}, MissingCommands: []string{},
 		AddedFlags: map[string][]string{}, MissingFlags: map[string][]string{},
 	}
