@@ -58,7 +58,11 @@ func setup(t *testing.T) (Config, FS, *recordFS) {
 	if err := os.WriteFile(lock, []byte(""), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-48 * time.Hour)
+	// Use the SAME clock the injected FS reports. Deriving this from
+	// time.Now() makes the fixture depend on the host timezone and date: a
+	// local (+0200) now 48h back can appear only ~22h old to the fixed UTC
+	// clock, so the stale-lock remediation disappears.
+	old := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC).Add(-48 * time.Hour)
 	if err := os.Chtimes(lock, old, old); err != nil {
 		t.Fatal(err)
 	}
