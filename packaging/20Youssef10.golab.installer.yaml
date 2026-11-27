@@ -1,43 +1,43 @@
-# winget installer manifest for golab, pinned to the REAL signed v0.2.0 release.
+# winget installer manifest for golab, prepared for the v0.3.0 release that
+# publishes Windows .zip repacks (winget's InstallerType has no tar.gz form).
+# Each .zip contains golab.exe, golab-mcp.exe, LICENSE/NOTICE/README and the
+# two Agent Skills, built from the very same CGO-free artifacts as the signed
+# .tar.gz archives consumed by install.sh and `golab update --install`.
 #
-# HONESTY / VERIFICATION: the three InstallerUrl values below are the actual
-# published GitHub Release assets for v0.2.0 (HTTP 200 when checked) and the
-# InstallerSha256 values are copied verbatim from that release's checksums.txt.
-# Every archive also has a cosign keyless bundle (*.tar.gz.sigstore.json) and a
-# signed CycloneDX SBOM attestation (*.tar.gz.sbom.sigstore.json).
+# RELEASE-TIME STEP (mandatory before a winget-pkgs PR): replace each
+# REPLACE_AT_RELEASE value with the matching `golab_0.3.0_windows_<arch>.zip`
+# line from the signed v0.3.0 checksums.txt (SHA-256 of the .zip bytes, NOT of
+# an unpacked .exe and NOT of the .tar.gz repack). Never submit a manifest
+# that still contains a placeholder, an unverified URL or a copied tar.gz
+# hash. The release workflow signs, checksums and attestes every .zip asset.
+# `winget validate` was not available in the authoring environment.
 #
-# KNOWN BLOCKER (do not submit as-is): the release currently publishes ONLY
-# .tar.gz archives. winget's "zip" installer type is the only archive type in
-# the v1.12.0 InstallerType enum and is documented for .zip files; there is no
-# tar.gz installer type. Before a winget-pkgs PR, publish a .zip repack of the
-# SAME signed golab.exe and replace the URLs and hashes here. Never swap in an
-# unverified URL or disable the winget hash check. `winget validate` was not
-# available in the authoring environment; schema structure was checked locally.
-#
-# BUMP CHECKLIST: publish the annotated v<version> tag first, copy the
-# windows_{amd64,arm64,386} lines from its checksums.txt into InstallerSha256,
-# replace every "0.2.0" across all three winget files, and keep
-# internal/version.Number and the brew/scoop/nfpm configs on that version.
+# BUMP CHECKLIST: publish the annotated v<version> tag first, copy the three
+# windows_{amd64,arm64,386} .zip lines from its checksums.txt into
+# InstallerSha256, replace every "0.3.0" across all three winget files, and
+# keep internal/version.Number and the brew/scoop/nfpm configs on that version.
 PackageIdentifier: 20Youssef10.golab
-PackageVersion: 0.2.0
+PackageVersion: 0.3.0
 Platform:
 - Windows.Desktop
 MinimumOSVersion: 10.0.17763.0
-ReleaseDate: "2026-11-24"
+ReleaseDate: "2026-11-27"
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
 - RelativeFilePath: golab.exe
   PortableCommandAlias: golab
+- RelativeFilePath: golab-mcp.exe
+  PortableCommandAlias: golab-mcp
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_amd64.tar.gz
-  InstallerSha256: a75742ec1e03d55cc38687f68056bff4595d639e7571349aca2f675442046af5
+  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_amd64.zip
+  InstallerSha256: REPLACE_AT_RELEASE
 - Architecture: arm64
-  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_arm64.tar.gz
-  InstallerSha256: 83350bc3c1572b9e231706845220b1b5656ebb74e8e3fc444888a70e31e97b7c
+  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_arm64.zip
+  InstallerSha256: REPLACE_AT_RELEASE
 - Architecture: x86
-  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_386.tar.gz
-  InstallerSha256: 38f874d57623179442b7f47b2860a5e3612ded2f0a6a5c27ce21c757858ec7b8
+  InstallerUrl: https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_386.zip
+  InstallerSha256: REPLACE_AT_RELEASE
 ManifestType: installer
 ManifestVersion: 1.12.0

@@ -1,0 +1,17 @@
+# Keep the build context minimal. .agents/skills MUST stay in the context:
+# both the verify stage and the runtime image copy it verbatim, including
+# every SKILL.md and references/ file.
+.git
+.github
+docs
+testdata
+dist
+scripts
+packaging
+golab
+golab-mcp
+*.out
+*.test
+*.sigstore.json
+coverage.*
+.env

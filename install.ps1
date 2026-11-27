@@ -1,10 +1,12 @@
-# Install golab on Windows ONLY from a release whose SHA-256 checksum and
-# cosign keyless signature have both been verified against the pinned release
-# identity. Downloaded text is never executed as program text.
+# Install golab and golab-mcp on Windows ONLY from a release whose SHA-256
+# checksum and cosign keyless signature have both been verified against the
+# pinned release identity. Downloaded text is never executed as program text.
 [CmdletBinding()]
 param(
     [string] $Version,
     [string] $InstallDir = "$env:LOCALAPPDATA\golab\bin",
+    [string] $SkillsDir = "$env:LOCALAPPDATA\golab\skills",
+    [switch] $NoSkills,
     [switch] $VerifyOnly,
     [string] $Artifact,
     [string] $Bundle,
@@ -16,6 +18,7 @@ $owner = '20Youssef10'
 $repo = 'golab'
 $issuer = 'https://token.actions.githubusercontent.com'
 $identity = '^https://github\.com/20Youssef10/golab/\.github/workflows/release\.yml@refs/tags/v'
+$skills = @('golab-operations', 'colab-mcp')
 
 function Verify-Release {
     param([string] $ArtifactPath, [string] $BundlePath, [string] $ChecksumPath)
@@ -89,11 +92,40 @@ try {
 
     tar.exe -xzf $artifactPath -C $tmp
     if ($LASTEXITCODE -ne 0) { throw 'failed to extract the verified archive' }
-    $source = Join-Path $tmp 'golab.exe'
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'verified archive has no golab.exe' }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    Copy-Item -LiteralPath $source -Destination (Join-Path $InstallDir 'golab.exe') -Force
-    Write-Host "install: installed golab $ver to $InstallDir\golab.exe"
+    foreach ($binary in @('golab.exe', 'golab-mcp.exe')) {
+        $source = Join-Path $tmp $binary
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "verified archive has no $binary" }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $InstallDir $binary) -Force
+        $installed = Join-Path $InstallDir $binary
+        if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw "failed to install $binary" }
+        # Smoke test the installed bytes (no downloaded text is executed).
+        & $installed --help 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "$binary --help failed after install" }
+    }
+    Write-Host "install: installed golab and golab-mcp $ver to $InstallDir"
+
+    if (-not $NoSkills) {
+        foreach ($skill in $skills) {
+            $sourceSkill = Join-Path $tmp (".agents\skills\$skill")
+            if (-not (Test-Path -LiteralPath (Join-Path $sourceSkill 'SKILL.md') -PathType Leaf)) {
+                throw "verified archive has no skill $skill"
+            }
+        }
+        New-Item -ItemType Directory -Force -Path $SkillsDir | Out-Null
+        foreach ($skill in $skills) {
+            $sourceSkill = Join-Path $tmp (".agents\skills\$skill")
+            $targetSkill = Join-Path $SkillsDir $skill
+            New-Item -ItemType Directory -Force -Path $targetSkill | Out-Null
+            Copy-Item -LiteralPath (Join-Path $sourceSkill '*') -Destination $targetSkill -Recurse -Force
+            if (-not (Test-Path -LiteralPath (Join-Path $targetSkill 'SKILL.md') -PathType Leaf)) {
+                throw "failed to install skill $skill"
+            }
+        }
+        Write-Host "install: installed skills $($skills -join ', ') to $SkillsDir"
+    } else {
+        Write-Host 'install: skipped skills (-NoSkills)'
+    }
 } finally {
     Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
 }

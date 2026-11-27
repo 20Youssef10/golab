@@ -3,6 +3,11 @@
 # (internal/update/check.go: asset pattern `golab_*_<os>_<arch>.tar.gz`,
 # checksums.txt, *.sigstore.json, *.sbom.sigstore.json).
 #
+# Every archive carries BOTH static binaries (golab, golab-mcp) and the two
+# portable Agent Skills under .agents/skills/. Windows additionally gets a
+# .zip repack from the SAME binaries for winget, whose installer type has no
+# tar.gz form; the updater keeps consuming the untouched .tar.gz assets.
+#
 # Signing (cosign sign-blob + attest-blob) is done in .github/workflows/release.yml
 # after this pipeline runs, because the bundles must be uploaded to the same
 # GitHub Release. Validate with: goreleaser check && goreleaser release --snapshot --clean
@@ -44,11 +49,48 @@ builds:
         goarch: arm
       - goos: freebsd
         goarch: riscv64
+  - id: golab-mcp
+    # Same static matrix as the CLI: the MCP server is shipped in every
+    # archive, not via `go install`, so it has the same signed provenance.
+    main: ./cmd/golab-mcp
+    binary: golab-mcp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64, "386", arm, riscv64]
+    goarm: ["7"]
+    ignore:
+      - goos: darwin
+        goarch: "386"
+      - goos: darwin
+        goarch: arm
+      - goos: darwin
+        goarch: riscv64
+      - goos: windows
+        goarch: arm
+      - goos: windows
+        goarch: riscv64
+      - goos: freebsd
+        goarch: arm
+      - goos: freebsd
+        goarch: riscv64
 
 archives:
   - id: default
+    ids: [golab, golab-mcp]
     # The updater expects .tar.gz for EVERY target, including Windows.
     formats: [tar.gz]
+    # winget has no tar.gz installer type: emit an additional .zip from the
+    # very same binary artifacts. The 13 tar.gz names are unchanged; only the
+    # three Windows targets gain a second asset.
+    format_overrides:
+      - goos: windows
+        formats: [tar.gz, zip]
     # No OS/arch "replacements": runtime.GOOS/runtime.GOARCH must match exactly
     # (linux/amd64 -> golab_0.1.0-alpha.1_linux_amd64.tar.gz).
     name_template: "golab_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -57,9 +99,15 @@ archives:
       - NOTICE
       - README.md
       - CHANGELOG.md
+      # Glob base is .agents/skills, so `dst` recreates that exact tree inside
+      # the archive for install.sh / install.ps1 / the Docker image.
+      - src: ".agents/skills/**/*"
+        dst: ".agents/skills"
 
 checksum:
   # Must be literally `checksums.txt` (internal/update/check.go:192-195).
+  # It now also contains the three winget .zip digests; the updater selects
+  # only the platform .tar.gz line, so this is backward compatible.
   name_template: checksums.txt
   algorithm: sha256
 

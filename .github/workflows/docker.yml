@@ -1,0 +1,95 @@
+name: docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+# The image is pushed to GHCR on main and on v* tags. Only the two permissions
+# actually needed are granted: read the source, write the package. BuildKit's
+# provenance/SBOM attestations are attached to the image itself, so this job
+# deliberately does NOT request id-token: write or attestations: write (a
+# GitHub-native `attest-build-provenance` step would need both).
+permissions: {}
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/20youssef10/golab
+
+jobs:
+  image:
+    if: github.repository == '20Youssef10/golab'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      # Local smoke gate: the Dockerfile's verify stage runs both binaries'
+      # --help and asserts both SKILL.md files are present. Nothing is pushed
+      # unless this passes. Equivalent local command:
+      #   docker build --target verify -t golab-verify .
+      - name: Smoke test the Dockerfile verify target
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          target: verify
+          push: false
+          provenance: false
+          sbom: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Verify the exact pushed bytes by digest, not a floating tag.
+      - name: Smoke test published image
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          ref="${IMAGE}@${DIGEST}"
+          docker run --rm "$ref" --help >/dev/null
+          docker run --rm --entrypoint /golab-mcp "$ref" --help >/dev/null 2>&1
+          cid="$(docker create --entrypoint /golab "$ref" --help)"
+          trap 'docker rm "$cid" >/dev/null' EXIT
+          for skill in golab-operations colab-mcp; do
+            docker cp "$cid:/usr/share/golab/skills/$skill/SKILL.md" "/tmp/golab-$skill.md"
+            test -s "/tmp/golab-$skill.md"
+          done

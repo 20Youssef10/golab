@@ -82,7 +82,8 @@ jobs:
         with:
           version: ${{ env.GORELEASER_VERSION }}
           # --skip=publish disables the publish pipe (no GitHub release, no
-          # asset uploads); all 13 archives and checksums.txt still land in dist.
+          # asset uploads); all 13 tar.gz archives, the 3 winget zip repacks
+          # and checksums.txt still land in dist.
           args: release --clean --skip=publish
         env:
           # Read-only token for `changelog.use: github` metadata lookups only.
@@ -157,10 +158,18 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          archives=(dist/golab_*.tar.gz)
-          if (( ${#archives[@]} == 0 )); then
-            echo "no archives built" >&2; exit 1
+          # One .tar.gz per Tier-1 target (the updater's only input) plus one
+          # .zip repack per Windows target for winget. Both are built from the
+          # same binaries and signed with the same pinned release identity.
+          tarballs=(dist/golab_*.tar.gz)
+          zips=(dist/golab_*.zip)
+          if (( ${#tarballs[@]} < 13 )); then
+            echo "expected at least 13 tar.gz archives, got ${#tarballs[@]}" >&2; exit 1
           fi
+          if (( ${#zips[@]} != 3 )); then
+            echo "expected 3 winget zip archives, got ${#zips[@]}" >&2; exit 1
+          fi
+          archives=("${tarballs[@]}" "${zips[@]}")
           for artifact in "${archives[@]}"; do
             base="$(basename "$artifact")"
             # Keyless signature bundle -> contains "sigstore", not "sbom":
@@ -222,7 +231,9 @@ jobs:
           }
           gh release view "$TAG" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
           for pattern in '^checksums\.txt$' '^golab_.*\.tar\.gz$' \
+                         '^golab_.*\.zip$' \
                          '^golab_.*\.tar\.gz\.sigstore\.json$' \
+                         '^golab_.*\.zip\.sigstore\.json$' \
                          '^golab_.*\.sbom\.sigstore\.json$'; do
             grep -E "$pattern" /tmp/assets.txt >/dev/null || {
               echo "FAIL: no release asset matches $pattern" >&2; exit 1;
@@ -246,7 +257,7 @@ jobs:
           # below would pass even if --new-bundle-format were dropped. Assert the
           # format on disk so that regression fails the release loudly instead.
           # jq is preinstalled on GitHub's ubuntu-latest runners.
-          fmt_bundles=(dist/golab_*.tar.gz.sigstore.json dist/golab_*.sbom.sigstore.json)
+          fmt_bundles=(dist/golab_*.tar.gz.sigstore.json dist/golab_*.zip.sigstore.json dist/golab_*.sbom.sigstore.json)
           if (( ${#fmt_bundles[@]} == 0 )); then
             echo "FAIL: no sigstore bundles found for format check" >&2; exit 1
           fi
@@ -262,8 +273,9 @@ jobs:
           done
           echo "all ${#fmt_bundles[@]} sigstore bundles are v0.3 format with inclusion proofs"
 
-          # (a) Keyless signature bundle for EVERY archive, not just one sample.
-          archive_bundles=(dist/golab_*.tar.gz.sigstore.json)
+          # (a) Keyless signature bundle for EVERY archive (tar.gz and zip),
+          # not just one sample.
+          archive_bundles=(dist/golab_*.tar.gz.sigstore.json dist/golab_*.zip.sigstore.json)
           if (( ${#archive_bundles[@]} == 0 )); then
             echo "FAIL: no archive signature bundles" >&2; exit 1
           fi
