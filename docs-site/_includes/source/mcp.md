@@ -47,8 +47,11 @@ there is **no** legacy `/sse` endpoint. The implementation uses the official
 handshake and a legacy client requesting `2025-06-18`, confirming the same tool
 list.
 
-**Caveat:** `golab-mcp` is not in `.goreleaser.yaml`, so it is not published in
-signed release archives and has no self-update path. For now, install it with
-`go install …/cmd/golab-mcp@latest` and verify the source/tag yourself. The tool
-behaviour is covered by fake-backed tests; it is not a claim of live Colab
-proof. See [CONFORMANCE.md §6](https://github.com/20Youssef10/golab/blob/main/docs/CONFORMANCE.md#6-human-only--external-steps-blocking-done).
+**Packaging:** as of the v0.3.0 release target, `.goreleaser.yaml` builds
+`golab-mcp` alongside `golab` and ships both binaries plus the two Agent Skills
+in every signed archive. `install.sh` / `install.ps1` install both binaries and
+the skills (skip with `--no-skills` / `-NoSkills`); the GHCR image carries them
+too. `golab-mcp` has no separate `update` command — replace it with the next
+signed release archive. `go install …/cmd/golab-mcp@latest` remains available.
+Tool behaviour is covered by fake-backed tests; that is not a claim of live
+Colab proof. See [CONFORMANCE.md §6](https://github.com/20Youssef10/golab/blob/main/docs/CONFORMANCE.md#6-human-only--external-steps-blocking-done).

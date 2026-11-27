@@ -40,7 +40,7 @@ golab run train.py --max-cu 10 --enforce
 | `golab readme` / `golab skill` | Print the bundled project README / agent skill text. Uppercase aliases are hidden. |
 | `golab help [COMMAND]` | Help for a command; unknown names exit 2. |
 | `golab completion bash\|zsh\|fish\|powershell` | Generate shell completion scripts. |
-| `golab version` | `golab 0.2.0 (compatible with google-colab-cli 0.8.x+HEAD)`. |
+| `golab version` | `golab 0.3.0 (compatible with google-colab-cli 0.8.x+HEAD)`. |
 | `golab update [--install] [--verify-only PATH]` | Check GitHub Releases; with `--install`, verify checksums, cosign signature and signed SBOM before replacing the binary. `--verify-only PATH` verifies a **local** artifact (checksum + cosign + SBOM; `--checksums`, `--signature`, `--sbom` override the sibling defaults) without installing anything. |
 | `golab logout` | Clear the local OAuth token, cached proxy tokens and capability probes so you can switch accounts. Under `--auth=adc`, print `gcloud auth application-default revoke` guidance instead. |
 | `golab test-public-api` | *(hidden)* Probe Public and Tunnel API reachability and cache the result. |

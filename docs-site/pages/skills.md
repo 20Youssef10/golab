@@ -12,6 +12,12 @@ permalink: /skills/
   <a class="card" href="https://github.com/20Youssef10/golab/tree/main/.agents/skills/colab-mcp"><strong>colab-mcp</strong><span>Client setup, transports, confirm gating and Inspector checks.</span></a>
 </div>
 
+<p>
+  Both skills ship in signed release archives, are installed by
+  <code>install.sh</code> / <code>install.ps1</code> (unless skipped), and are
+  bundled in the GHCR image at <code>/usr/share/golab/skills</code>.
+</p>
+
 {% capture md %}{% include source/skills.md %}{% endcapture %}
 {{ md | markdownify }}
 

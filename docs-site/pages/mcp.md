@@ -19,7 +19,14 @@ permalink: /mcp/
 </table>
 {% endfor %}
 
-<h2>Setup, transports and caveats</h2>
+<h2>Setup, transports and packaging</h2>
+
+<p>
+  For the v0.3.0 release target, <code>golab-mcp</code> is built by GoReleaser and
+  ships in the same signed archives as <code>golab</code>, alongside both Agent
+  Skills. It has no <code>update</code> subcommand: replace it with the next
+  signed release archive.
+</p>
 
 {% capture md %}{% include source/mcp.md %}{% endcapture %}
 {{ md | markdownify }}

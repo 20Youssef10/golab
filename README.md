@@ -12,11 +12,22 @@ This is a community port, not a Google product. “Google” and “Colab” are
 - **Safe to pipe.** Program output goes to stdout; every `[colab] …` status line goes to stderr. `golab exec < code.py`, `golab ssh -- CMD` and `--output json|ndjson` produce clean, byte-exact streams.
 - **Loud about failures.** Atomic state writes, corrupt-state aborts, explicit HTTP timeouts and typed errors instead of string matching.
 
-## Status (v0.2.0)
+## Status (v0.3.0 release target)
 
-`v0.2.0` is published (release run `45489842618`: 13 archives with signatures and SBOMs). The full CI matrix is green, `golangci-lint` reports 0 issues and `govulncheck` is clean. The tree has 664 test/fuzz functions in 103 `_test.go` files across 25 packages (23 with tests), at 75.8% total statement coverage — above the CI floor of 70%, short of the 80% target (notably for `state`/`sshx`). A real signed self-update from `v0.1.9` → `v0.2.0` was verified and installed an executable binary.
+`v0.3.0` is the release target dated 2026-11-27; the annotated tag has not been
+pushed yet. It adds the `golab-mcp` server (22 tools, stdio and streamable HTTP),
+two portable Agent Skills, the spend-safety and VM-inspection tiers, remote TTL
+enforcement, SSH host-key pinning, `compat refresh`, signed archives carrying both
+binaries plus the skills, Windows `.zip` repacks and a GHCR distroless image.
+The last published release is `v0.2.0` (release run `45489842618`: 13 archives with
+signatures and SBOMs); its full CI matrix was green, `golangci-lint` reported 0
+issues and `govulncheck` was clean. The tree has 664 test/fuzz functions in 103
+`_test.go` files across 25 packages (23 with tests), at 75.8% total statement
+coverage — above the CI floor of 70%, short of the 80% target (notably for
+`state`/`sshx`). A real signed self-update from `v0.1.9` → `v0.2.0` was verified
+and installed an executable binary.
 
-**Live proof, with its limits.** A billable CPU-VM live e2e has been run (recorded in [CHANGELOG.md](CHANGELOG.md) under v0.2.0): `new`, `status`, `ls`, `exec` (text/JSON/secrets), `run` (script and notebook), `ssh`, piped `repl`, upload/download, `install`, `restart-kernel`, `log`, `stop --verify` and `resume` error paths; the final `golab sessions` was empty. That is a real end-to-end pass on one machine class — it is not certification of every platform, feature or failure mode.
+**Live proof, with its limits.** A billable CPU-VM live e2e has been run (recorded in [CHANGELOG.md](CHANGELOG.md) under v0.2.0): `new`, `status`, `ls`, `exec` (text/JSON/secrets), `run` (script and notebook), `ssh`, piped `repl`, upload/download, `install`, `restart-kernel`, `log`, `stop --verify` and `resume` error paths; the final `golab sessions` was empty. A second billable CPU pass on 2026-11-26/27 covered all six feature tiers, VM inspection, detached submission, `reap`, `cost` and cleanup (see `CHANGELOG.md` `[0.3.0]`). These are real end-to-end passes on one machine class — not certification of every platform, feature or failure mode.
 
 **Still human-only / not proven:** OAuth re-consent, Drive browser approval, interactive-TTY `repl`/`ssh`, real Windows and Termux devices, and induced WebSocket-drop recovery. These are tracked in [docs/REMEDIATION.md](docs/REMEDIATION.md) and the layered ledger in [docs/CONFORMANCE.md](docs/CONFORMANCE.md); nothing here should be read as blanket live certification.
 
@@ -39,7 +50,7 @@ cd golab
 make build
 ```
 
-The binary is named **`golab`** in all three cases. Put it on your `PATH` (on Windows, the installer/release archive contains `golab.exe`). To verify a release manually, see [docs/FAQ.md](docs/FAQ.md#how-do-i-verify-a-release).
+The binary is named **`golab`** in all three cases. Put it on your `PATH` (on Windows, the installer/release archive contains `golab.exe`). Release archives also carry `golab-mcp` and both Agent Skills; `install.sh` / `install.ps1` install all of them (`--no-skills` / `-NoSkills`, `--skills-dir` / `-SkillsDir` to opt out or relocate). A distroless image is published at `ghcr.io/20youssef10/golab`. To verify a release manually, see [docs/FAQ.md](docs/FAQ.md#how-do-i-verify-a-release).
 
 ## Quick start
 

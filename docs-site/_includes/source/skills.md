@@ -3,7 +3,9 @@
 ## 13. Agent Skills discovery
 
 Two portable Agent Skills live in the repository for agents that load skills
-from a filesystem:
+from a filesystem. They are also shipped in release archives, installed by the
+release installers, and bundled in the GHCR image under
+`/usr/share/golab/skills`:
 
 | Path | Purpose |
 |---|---|

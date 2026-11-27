@@ -5,7 +5,7 @@ description: >-
 url: https://20youssef10.github.io
 baseurl: /golab
 repository: 20Youssef10/golab
-release: v0.2.0
+release: v0.3.0
 
 markdown: kramdown
 kramdown:
