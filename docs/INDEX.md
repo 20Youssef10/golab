@@ -1,5 +1,10 @@
 # golab documentation index
 
+> **Published documentation site:** <https://20youssef10.github.io/golab/> provides
+> hierarchical navigation, in-page filtering and diagrams over this documentation.
+> It is built from these files: the site's excerpts are generated from canonical
+> `docs/*.md` prose, which remains the source of truth.
+
 > **Current release: v0.2.0 (2026-11-24).** The dated notes at the top of docs
 > 01–04 and 07 were written for v0.1.0 (2026-11-23) and are not an up-to-date
 > account of v0.2.0; for that, read [CHANGELOG.md](../CHANGELOG.md) and

@@ -1,0 +1,23 @@
+<aside id="site-sidebar" class="sidebar" aria-label="Documentation navigation">
+  <div class="sidebar-inner">
+    {% include search.html %}
+    <nav class="nav-tree" aria-label="Pages">
+      {% for group in site.data.nav %}
+      <section class="nav-group" data-group="{{ group.title | slugify }}">
+        <h2 class="nav-group-title">{{ group.title }}</h2>
+        <ul class="nav-list">
+          {% for item in group.items %}
+          <li class="nav-item">
+            <a href="{{ item.url | relative_url }}">{{ item.title }}</a>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endfor %}
+    </nav>
+    <p id="search-empty" class="search-empty" hidden>No pages match that filter.</p>
+    <div class="sidebar-bottom">
+      <a href="https://github.com/20Youssef10/golab/tree/main/docs">All canonical docs</a>
+    </div>
+  </div>
+</aside>

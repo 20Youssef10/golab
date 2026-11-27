@@ -115,6 +115,7 @@ On Termux, install the static `linux/arm64` binary with [docs/INSTALL-TERMUX.md]
 
 ## Documentation
 
+- **Published documentation site:** <https://20youssef10.github.io/golab/> — wiki-style navigation over these docs (searchable sidebar, diagrams, theme toggle). Canonical prose stays in `docs/`; the site's excerpts are generated from it.
 - [User guide — flags, workflows, exit codes](docs/USAGE.md)
 - [Migrating from Python `colab`](docs/MIGRATION.md)
 - [Frequently asked questions](docs/FAQ.md)

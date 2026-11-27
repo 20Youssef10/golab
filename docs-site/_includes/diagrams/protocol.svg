@@ -1,0 +1,42 @@
+<svg viewBox="0 0 860 330" role="img" aria-labelledby="proto-title proto-desc">
+  <title id="proto-title">Request flow across the two planes</title>
+  <desc id="proto-desc">A request first reaches the control plane with a user bearer token to obtain a notebook hash and runtime proxy token, then uses the runtime proxy for kernel REST, WebSocket execution and contents operations.</desc>
+  <defs>
+    <marker id="proto-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path class="head" d="M 0 0 L 10 5 L 0 10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="box-accent" x="18" y="118" width="150" height="72" rx="8"/>
+  <text class="label" x="93" y="148" text-anchor="middle">golab</text>
+  <text class="small mono" x="93" y="168" text-anchor="middle">Cobra command</text>
+
+  <rect class="box" x="230" y="74" width="180" height="160" rx="8"/>
+  <text class="label" x="320" y="102" text-anchor="middle">Control plane</text>
+  <text class="small mono" x="320" y="130" text-anchor="middle">C1 GET /assignments</text>
+  <text class="small mono" x="320" y="151" text-anchor="middle">C2 POST /assign</text>
+  <text class="small" x="320" y="182" text-anchor="middle">nbh · variant · shape</text>
+  <text class="small" x="320" y="205" text-anchor="middle">bearer only here</text>
+
+  <rect class="box" x="470" y="74" width="180" height="160" rx="8"/>
+  <text class="label" x="560" y="102" text-anchor="middle">Runtime proxy</text>
+  <text class="small mono" x="560" y="130" text-anchor="middle">token refresh</text>
+  <text class="small mono" x="560" y="151" text-anchor="middle">POST /api/kernels</text>
+  <text class="small" x="560" y="182" text-anchor="middle">Contents API</text>
+  <text class="small" x="560" y="205" text-anchor="middle">proxy token only</text>
+
+  <rect class="box" x="710" y="118" width="132" height="72" rx="8"/>
+  <text class="label" x="776" y="148" text-anchor="middle">Kernel</text>
+  <text class="small mono" x="776" y="168" text-anchor="middle">WS · iopub</text>
+
+  <path class="arrow" marker-end="url(#proto-head)" d="M 168 145 L 228 132"/>
+  <text class="small" x="198" y="121" text-anchor="middle">1</text>
+  <path class="arrow" marker-end="url(#proto-head)" d="M 410 132 L 468 132"/>
+  <text class="small" x="440" y="121" text-anchor="middle">2</text>
+  <path class="arrow" marker-end="url(#proto-head)" d="M 650 145 L 708 145"/>
+  <text class="small" x="680" y="121" text-anchor="middle">3</text>
+  <path class="arrow" marker-end="url(#proto-head)" d="M 168 172 C 340 300 520 300 762 192"/>
+  <text class="small" x="470" y="290" text-anchor="middle">4 · execute_request → iopub → colab_request / input_reply</text>
+
+  <text class="small" x="430" y="317" text-anchor="middle">Every HTTP call has explicit connect / TLS / header / idle timeouts; control-plane mutations strip XSSI and do GET-then-POST XSRF.</text>
+</svg>

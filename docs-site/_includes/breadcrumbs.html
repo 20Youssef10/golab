@@ -1,0 +1,17 @@
+{% assign section = nil %}
+{% for group in site.data.nav %}
+  {% for item in group.items %}
+    {% if item.url == page.url %}
+      {% assign section = group.title %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <ol>
+    <li><a href="{{ '/' | relative_url }}">Docs</a></li>
+    {% if section and page.url != '/' %}
+    <li><span>{{ section }}</span></li>
+    {% endif %}
+    <li><span aria-current="page">{{ page.title }}</span></li>
+  </ol>
+</nav>

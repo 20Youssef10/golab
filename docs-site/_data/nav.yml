@@ -1,0 +1,48 @@
+# Persistent navigation tree. Every url must match a Jekyll page.url.
+# Validate with: python3 docs-site/tools/check-nav.py
+- title: Overview
+  items:
+    - title: Overview & status
+      url: /
+    - title: Quickstart
+      url: /quickstart/
+    - title: Commands map (54)
+      url: /commands/
+    - title: FAQ
+      url: /faq/
+    - title: Migrating from Python colab
+      url: /migration/
+- title: Operations
+  items:
+    - title: Spend safety
+      url: /spend-safety/
+    - title: VM inspection
+      url: /vm-inspection/
+    - title: Detached runs (ADR-001)
+      url: /detached-runs/
+    - title: Reproducibility
+      url: /reproducibility/
+- title: Architecture
+  items:
+    - title: Two planes, two credentials
+      url: /architecture/
+    - title: MCP server (22 tools)
+      url: /mcp/
+    - title: Agent Skills
+      url: /skills/
+- title: Protocol
+  items:
+    - title: Control & data plane wire spec
+      url: /protocol/
+- title: Security
+  items:
+    - title: Security & redaction
+      url: /security/
+- title: Testing
+  items:
+    - title: Conformance & verification ledger
+      url: /conformance/
+- title: Release
+  items:
+    - title: Install & distribution
+      url: /distribution/

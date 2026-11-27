@@ -1,0 +1,127 @@
+# Generated from `golab help` on 2026-11-27 (54 top-level commands).
+# Regenerate with: golab help | (see docs-site/README.md)
+commands:
+  - group: Session lifecycle
+    items:
+      - name: new
+        summary: "Create a new session"
+      - name: sessions
+        summary: "List all active sessions"
+      - name: status
+        summary: "Show session status"
+      - name: stop
+        summary: "Stop a session, or all sessions with --all"
+      - name: restart-kernel
+        summary: "Restart a session's kernel"
+      - name: resume
+        summary: "Recover an interrupted execution without resubmitting code"
+      - name: wait
+        summary: "Wait for a session to become kernel/idle/ready (bounded, no allocation)"
+      - name: attach
+        summary: "Attach a browser-created runtime as a local session"
+      - name: use
+        summary: "Set the default session used when -s is omitted"
+  - group: Execution
+    items:
+      - name: exec
+        summary: "Execute code in a session"
+      - name: repl
+        summary: "Start an interactive REPL"
+      - name: run
+        summary: "Run a Python script on a fresh Colab VM, then release it"
+      - name: jobs
+        summary: "List detached runs with status, exit code and duration"
+      - name: logs
+        summary: "Show (and optionally follow) a detached run's log"
+  - group: Files & VM inspection
+    items:
+      - name: cat
+        summary: "Print a remote file to stdout (binary-safe)"
+      - name: download
+        summary: "Download a file or directory from a session"
+      - name: du
+        summary: "Show disk usage per entry under a remote path"
+      - name: edit
+        summary: "Edit a file on a running Colab session"
+      - name: fetch
+        summary: "Download a URL into the VM (wget with curl fallback)"
+      - name: find
+        summary: "Find files by name under the remote /content directory"
+      - name: grep
+        summary: "Search remote files on the VM"
+      - name: ls
+        summary: "List files in a session"
+      - name: ps
+        summary: "Show processes, GPU, memory and disk usage on the VM"
+      - name: rm
+        summary: "Remove a remote file"
+      - name: sync
+        summary: "One-shot bidirectional file sync with conflict detection"
+      - name: tail
+        summary: "Print the tail of a remote file (optionally follow it)"
+      - name: upload
+        summary: "Upload a file or directory to a session"
+  - group: Remote access
+    items:
+      - name: ssh
+        summary: "Connect to a Colab runtime via SSH"
+  - group: Config & state
+    items:
+      - name: config
+        summary: "Read and write local settings.json"
+      - name: env
+        summary: "Inspect and freeze a session's Python environment"
+      - name: init
+        summary: "Scaffold golab.yaml and .golabignore in the current directory"
+      - name: state
+        summary: "Inspect and migrate local state schema"
+  - group: Automation
+    items:
+      - name: drivemount
+        summary: "Mount Google Drive at PATH (default /content/drive)"
+      - name: install
+        summary: "Install python packages on the VM"
+  - group: Account & info
+    items:
+      - name: completion
+        summary: "Generate shell completion scripts"
+      - name: cost
+        summary: "Report observed compute-unit balance and rate (CU only, no prices)"
+      - name: help
+        summary: "Show help for a command"
+      - name: log
+        summary: "Manage and view session history logs"
+      - name: pay
+        summary: "Open the Colab sign-up page to manage compute units"
+      - name: url
+        summary: "Print a browser URL that connects to an existing session"
+      - name: usage
+        summary: "Show account compute-unit usage rate and balance"
+      - name: version
+        summary: "Show the version of the Colab CLI"
+  - group: Maintenance & Go-only
+    items:
+      - name: agentout
+        summary: "Emit a typed structured-output event (text, json or ndjson)"
+      - name: audit
+        summary: "Report credential storage, file modes and cached security state"
+      - name: budget
+        summary: "Show an advisory compute-unit budget decision (no allocation)"
+      - name: bundle
+        summary: "Record and verify reproducible execution provenance"
+      - name: compat
+        summary: "Compare the CLI surface against a local snapshot"
+      - name: doctor
+        summary: "Probe Colab connectivity with GET-only, redacting checks"
+      - name: logout
+        summary: "Clear local credentials to sign out or switch accounts"
+      - name: readme
+        summary: "Print bundled documentation"
+      - name: reap
+        summary: "Unassign server runtimes that have no local session record"
+      - name: skill
+        summary: "Print bundled documentation"
+      - name: trace
+        summary: "Run a command and append a redacted wire trace to an NDJSON file"
+      - name: update
+        summary: "Check for a newer version (and optionally install it)"
