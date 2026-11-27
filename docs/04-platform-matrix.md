@@ -23,7 +23,7 @@
 >   restart and is not claimed; no Tier-1 per-OS §9 acceptance pass is recorded.
 >   See [AUDIT-INDEX.md](AUDIT-INDEX.md) §5 and
 >   [CONFORMANCE.md](CONFORMANCE.md) §1/§6.
-> - **Distribution actually configured (updated 2026-11-26):** GitHub Releases
+> - **Distribution actually configured (updated 2026-11-27):** GitHub Releases
 >   (archives + SHA-256 checksums + cosign signatures + signed SBOMs) via
 >   `.goreleaser.yaml` and `.github/workflows/release.yml`, plus
 >   `go install github.com/20Youssef10/golab/cmd/golab@latest`. The root
@@ -31,8 +31,15 @@
 >   SHA-256 checksum and the cosign keyless signature before installing, and
 >   `install.sh --verify-only ARTIFACT BUNDLE CHECKSUMS` reuses that gate for
 >   local/CI checks. They are not yet wired into release CI and have **no live
->   install proof**. Homebrew, Scoop, winget, nfpm packages (`.deb`/`.rpm`/`.apk`),
->   AUR, Termux TUR and Docker/Nix remain **planned, not configured**.
+>   install proof**. **Packaging configs were added under `packaging/`**:
+>   Homebrew formula (`golab.rb`), Scoop manifest (`golab.json`), winget
+>   version/locale/installer manifests and an nfpm config (`.deb`/`.rpm`/`.apk`).
+>   They are **configs, not live channels**: none is wired into release CI, and
+>   brew/scoop/nfpm are **unverified on this host**. winget is **blocked pending
+>   a `.zip` repack** (its installer manifest expects an archive GoReleaser does
+>   not yet produce). AUR, Termux TUR and Docker/Nix remain **planned, not
+>   configured**. `golab-mcp` is a separate binary and is not in
+>   `.goreleaser.yaml` either.
 
 ---
 
@@ -157,18 +164,19 @@ Optional later improvement: Tailscale's `androiddns` approach (query Android's `
 | GitHub Releases (archives + checksums + cosign sigs + SBOM) | all | GoReleaser | 1 |
 | `install.sh` (verifies SHA-256 + cosign signature; `--verify-only`) | Linux, macOS, Termux | curl installer | exists (2026-11-26), not CI-wired/live-proven |
 | `install.ps1` (verifies SHA-256 + cosign signature) | Windows | PowerShell installer | exists (2026-11-26), not CI-wired/live-proven |
-| Homebrew tap | macOS, Linux | GoReleaser `brews` | 4 |
-| Scoop bucket | Windows | GoReleaser `scoops` | 4 |
-| winget | Windows | GoReleaser `winget` → PR to `winget-pkgs` | 5 |
-| `.deb` / `.rpm` / `.apk` | Linux | `nfpm` | 4 |
+| Homebrew tap | macOS, Linux | `packaging/golab.rb` formula | configs added; unverified here, not CI-wired |
+| Scoop bucket | Windows | `packaging/golab.json` manifest | configs added; unverified here, not CI-wired |
+| winget | Windows | `packaging/20Youssef10.golab*.yaml` version/locale/installer manifests → PR to `winget-pkgs` | configs added; **blocked pending `.zip` repack** |
+| `.deb` / `.rpm` / `.apk` | Linux | `packaging/nfpm.yaml` | configs added; unverified here, not CI-wired |
 | AUR `colab-go-bin` | Arch | PKGBUILD | 5 |
 | Termux (`go install`, tarball, TUR) | Termux | see §3.3 | 4 |
 | `go install github.com/20Youssef10/golab/cmd/golab@latest` | all with Go | source | 1 (configured) |
 | Nix flake / Docker `scratch` image | optional | community | 5+ |
 
-Rows marked "exists" are scripts present in the repository, not configured
-release channels; the remaining Phase values are the original plan, not a claim
-that those channels are live.
+Rows marked "exists" or "configs added" are files present in the repository,
+not configured release channels; the remaining Phase values are the original
+plan, not a claim that those channels are live. None of the packaging configs
+has been validated by a package-manager install on this host or in CI.
 
 ## 8. Build & CI matrix
 

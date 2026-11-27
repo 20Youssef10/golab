@@ -18,11 +18,20 @@
 >
 > **Six tiers landed 2026-11-26** with new fake-tested gate packages
 > (`cost`, `vmstat`, `detach`, `envlock`, `nbparams`, `compat`, `doctorfix`,
-> `trace`). These are L1/L2 additions only. `scripts/coverage-gate.sh` still
-> checks the original **seven** packages (`colabapi`, `runtime`, `state`,
-> `sshx`, `auth`, `platform`, `app`); the eight new packages are not in that
-> gate. No L3/L4/L5 proof exists for any of the new commands; see
-> [CONFORMANCE.md](CONFORMANCE.md) §Change log.
+> `trace`). These are L1/L2 additions only. Later that week `internal/mcpserver`
+> was added (`cmd/golab-mcp`), `internal/compat` gained `refresh` (official
+> upstream source fetch with provenance), and `internal/cost` serialized its
+> ledger appends across processes with a per-path flock. `internal/mcpserver`
+> tests exercise both transports, tool/resources listing, `confirm: true`
+> gating and legacy `2025-06-18` protocol negotiation against the official
+> [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)
+> (v1.7.0); they remain fake-backed, not live Colab proof. `golab-mcp` is not in
+> `.goreleaser.yaml`. `scripts/coverage-gate.sh` still checks the original
+> **seven** packages (`colabapi`, `runtime`, `state`, `sshx`, `auth`, `platform`,
+> `app`); the new packages are not in that gate. The 2026-11-26/27 billable CPU
+> pass recorded in [CONFORMANCE.md](CONFORMANCE.md) §6 covers some of the tier
+> commands, but no L3/L4 fixtures or full L5 matrix exist for the newer
+> surfaces.
 
 ## 1. Layers
 

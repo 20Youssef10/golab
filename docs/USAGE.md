@@ -215,7 +215,7 @@ golab run analysis.ipynb --gpu t4      # code cells only; outputs saved to analy
 | `--keep` | Leave the session running after the script finishes. |
 | `--max-cu FLOAT` | Minimum compute-unit balance to maintain during the run (`0` disables). Samples `GET /tun/m/ccu-info`, which is **account-level, not per-session**; no prices are computed. |
 | `--enforce` | Interrupt and stop the run when `--max-cu` is breached. Without it a breach is only reported. |
-| `--detach`, `--ttl DURATION` | Start the script remotely detached; `--ttl` (strictly positive) is **required** with `--detach`. See "Detached runs" below and [ADR-001](adr-001-detached-runs.md). |
+| `--detach`, `--ttl DURATION` | Start the script remotely detached; `--ttl` (strictly positive) is **required** with `--detach` and is now **enforced** by a remote watchdog. `--max-cu` / `--enforce` cannot be combined with `--detach` (exit 2). See "Detached runs" below and [ADR-001](adr-001-detached-runs.md). |
 | `--lockfile PATH` | Verify and install this environment lockfile before running. |
 | `-p`, `--param NAME=VALUE` | Notebook parameter, repeatable. |
 | `--params-file PATH` | JSON/YAML notebook parameters file. |
@@ -238,7 +238,7 @@ Script semantics:
 golab run train.py --max-cu 10 --enforce
 ```
 
-`--max-cu FLOAT` is a **minimum reserve** sampled from `GET /tun/m/ccu-info`. That endpoint is **account-level**, so the sampled balance and any delta belong to the account, not to this one VM; no price is inferred. Without `--enforce`, a breach is reported; with it, the run is interrupted and the session stopped. `--max-cu 0` disables the monitor. The guard monitors a foreground `run` only: `run --detach` returns after submitting the remote child and does **not** keep the in-run monitor alive.
+`--max-cu FLOAT` is a **minimum reserve** sampled from `GET /tun/m/ccu-info`. That endpoint is **account-level**, so the sampled balance and any delta belong to the account, not to this one VM; no price is inferred. Without `--enforce`, a breach is reported; with it, the run is interrupted and the session stopped. `--max-cu 0` disables the monitor. The guard is **foreground-only**: `run --detach` returns after submitting the remote child and does not keep the in-run monitor alive, so supplying `--max-cu` or `--enforce` together with `--detach` is a usage error (exit 2) before any allocation. Wiring a remote CU sampler is deferred; see [ADR-001](adr-001-detached-runs.md).
 
 ### Detached runs
 
@@ -251,7 +251,7 @@ golab logs <ID> -f --interval 2s --max 30  # bounded follow
 
 The job is a **remote** child process on the VM. There is no local daemon, no keep-alive thread and no WebSocket held open after submission; `jobs`, `logs` and `wait` poll on demand. The VM **stays allocated and billable** until you `golab stop` it.
 
-`--ttl` must be strictly positive (otherwise exit 2). It is written to the VM's `meta.json` and to a small credential-free local manifest and shown by `jobs`, but in this change it is **advisory only**: it does not itself terminate the VM or enforce a deadline. Plan to stop the session yourself. The local manifest can drift from VM reality; a missing remote file is reported as unknown/stale, never as success. Follow mode is bounded by `--interval` × `--max`; remote output is visible only on the next poll. The design and explicit non-goals are in [ADR-001](adr-001-detached-runs.md). All of this is fake-tested; the remote behaviour has no live e2e proof yet.
+`--ttl` must be strictly positive (otherwise exit 2). It is written to the VM's `meta.json` and to a small credential-free local manifest and shown by `jobs`. It is now **enforced, not advisory**: the launcher starts a small remote watchdog (own session, `start_new_session=True`) that reads the deadline and a 5-second poll interval from the run metadata. At the deadline it kills the whole process group and records `exit=124` with `ttl-reason=ttl_exceeded`. The watchdog stops the **job**, not the runtime — the VM stays allocated and billable until you `golab stop` it, and a watchdog cannot survive VM reclamation or unassignment. The local manifest can drift from VM reality; a missing remote file is reported as unknown/stale, never as success. Follow mode is bounded by `--interval` × `--max`; remote output is visible only on the next poll. The design, amendment and explicit non-goals are in [ADR-001](adr-001-detached-runs.md). The watchdog is fake-tested; a billable CPU e2e covered `run --detach` + `jobs`/`logs`, but not a deadline expiry (see [CONFORMANCE.md §6](CONFORMANCE.md#6-human-only--external-steps-blocking-done)).
 
 ### Reproducibility
 
@@ -326,6 +326,7 @@ golab ssh -s train -- 'python -c "print(1)"'
 golab ssh --proxy-mode -s train        # stdio bridge for an external OpenSSH ProxyCommand
 golab ssh -s train --force             # kill stale sshd children first
 golab ssh --gpu t4 --rm                # auto-create, then unassign on exit
+golab ssh -s train --accept-host-key SHA256:AbCdEf... -- echo ok
 ```
 
 | Flag | Meaning |
@@ -336,6 +337,7 @@ golab ssh --gpu t4 --rm                # auto-create, then unassign on exit
 | `--rm` | Unassign the runtime when the session ends. Applies to auto-created runtimes and proxy bridges; ignored with `-- CMD` and with a reused interactive session. |
 | `--force` | Kill existing SSH sessions on the runtime via the kernel (10-second bound) before dialling. Diagnostics go to stderr. |
 | `--proxy-mode` | Act as a WebSocket-to-stdio bridge compatible with OpenSSH `ProxyCommand`. Takes no command. |
+| `--accept-host-key SHA256:FP` | Explicitly pin the runtime host key by SHA-256 fingerprint (the `SHA256:` prefix is optional). The value is validated before allocation; the pin is stored only after the live handshake matches it, and a stored pin must match the explicit value. A mismatch or malformed fingerprint is a usage error (exit 2). This is an explicit alternative to trust-on-first-use, not a way to bypass verification. |
 
 Modes and auto-creation:
 
@@ -394,9 +396,32 @@ These are additive commands with no Python counterpart:
 | `golab budget [--profile F] [--profile-name N] [--max-balance N] [--max-hourly N] [--enforce] [--json]` | Advisory compute-unit decision from `GET /tun/m/ccu-info`; never allocates. Without a profile it reports the current usage. `--max-balance` is a minimum reserve floor (deny at or below); `--max-hourly` is a rate ceiling (deny at or above). |
 | `golab bundle record [--out F] [--file P …] [--env K=V …] [--root DIR] [--shape S] [--variant V] [--accelerator A]` / `golab bundle verify MANIFEST [--files-root DIR] [--env]` | Create and verify a deterministic provenance manifest of local inputs. Verify is metadata-only unless `--env` is given, which allocates a fresh VM to re-check the recorded environment. |
 | `golab sync LOCAL REMOTE [-s NAME] [--direction up\|down\|both] [--apply] [--delete] [--diff] [--include-outputs] [--watch] [--interval D] [--iterations N]` | One-shot directory sync with conflict detection. Dry-run is the default; `--apply` writes. Conflicts fail without changing anything. `--diff` compares two notebooks with volatile metadata and outputs stripped. `--watch` re-runs sync with bounded polling (no fsnotify). |
-| `golab compat report [--json]` | Compare the live command tree against an **embedded self-snapshot** baked into this binary. It performs no network I/O and is not a comparison with the Python CLI or a live upstream release; the report labels the snapshot kind and source. |
+| `golab compat report [--json] [--snapshot FILE]` | Compare the live command tree against an **embedded self-snapshot** baked into this binary, or against `FILE` from `compat refresh`. By default it performs no network I/O and is not a comparison with the Python CLI or a live upstream release; the report labels the snapshot kind and source. |
+| `golab compat refresh [--out FILE] [--ref REF]` | Fetch the official upstream Typer CLI source from `raw.githubusercontent.com` at a pinned ref and write a provenance-tagged, explicitly **partial** surface snapshot. Dry-run by default (`--out -` prints JSON to stdout); never synthesises flags from parameter names. This is a source parse, not a live upstream comparison. See "Compatibility snapshots" below. |
 | `golab trace -- <command> [args] [-o FILE] [--unsafe-bodies]` | Wrap a command and append a redacted wire trace as NDJSON. Headers and **query values are never written**; only query *keys*, body shape and a SHA-256 hash are recorded. `--unsafe-bodies` additionally includes redacted JSON bodies and labels those events `UNSAFE` — review the file before sharing it. |
 | `golab agentout [--format text\|json\|ndjson] [--type info\|output\|error] [text …]` | Emit one typed structured-output event; handy for testing a schema pipeline without a VM. |
+
+### Compatibility snapshots
+
+`compat report` still compares against a self-snapshot by default. To check
+against the official upstream surface instead:
+
+```bash
+golab compat refresh --out upstream.json --ref v0.8.0   # pinned ref; dry-run without --out
+golab compat report --snapshot upstream.json --json
+```
+
+The refresh fetch is bounded (2 MiB, explicit connect/TLS/header/idle timeouts,
+redirect cap) and uses only `https://raw.githubusercontent.com` — no flag or
+environment variable can redirect a release build to another host. The snapshot
+records its ref, source URL, SHA-256 of the fetched source, capture time and the
+extraction method (`typer-source-literals`), and is labelled
+`upstream-fetched`. It is deliberately partial: only literal long options in
+explicit `typer.Option(...)` calls and explicit command registrations are
+captured, so "missing" flags in a report can be extraction gaps. Failure to find
+any recognisable command surface is a loud error, never an empty report. The
+default `--ref` is compatibility text (`0.8.x+HEAD`), not a guaranteed git tag;
+pass a real tag such as `v0.8.0` for a reproducible snapshot.
 
 ## 7. Structured output, plans and confirmations
 
@@ -535,10 +560,88 @@ golab run validate.py --max-cu 10 --enforce   # guarded foreground run
 golab run --detach --ttl 1h train.py          # remote child; no local monitor
 golab jobs                                    # find the detached run ID
 golab logs <ID> -f --interval 2s --max 30
-golab stop -s batch                           # the VM does NOT stop itself at TTL
+golab stop -s batch                           # the watchdog ends the JOB at TTL; the VM does NOT stop itself
 golab sessions                                # should be empty
 ```
 
 `cost` can be consulted at any time for the account-level CU history; `wait --for ready --timeout 120` is a bounded readiness check that allocates nothing.
 
 All stdout in the JSON pipeline above is `golab/1` JSON; `[colab] …` progress stays on stderr, so `jq`, a log shipper or an agent can consume the stream without filtering chatter.
+
+## 12. MCP server (`golab-mcp`)
+
+`golab-mcp` is a **separate static binary** that exposes the CLI as a Model
+Context Protocol server. It is not a subcommand of `golab` and is not shipped in
+the release archives yet (see the caveat below).
+
+```bash
+go install github.com/20Youssef10/golab/cmd/golab-mcp@latest
+
+golab-mcp                                   # stdio transport (default)
+golab-mcp --transport stdio
+golab-mcp --transport http --addr :8080
+golab-mcp --golab-bin /path/to/golab         # binary invoked by tool calls
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--transport` | `stdio` | `stdio` for desktop agents, or `http` for streamable HTTP. Any other value exits 2. |
+| `--addr` | `:8080` | HTTP listen address; used only with `--transport http`. |
+| `--golab-bin` | `golab` | Path to the `golab` binary that tool calls invoke. A missing binary is a startup warning, not a fatal error: `tools/list` must still work. |
+
+Go's `flag` package accepts both `-flag` and `--flag`; the forms above are
+equivalent. In stdio mode nothing but SDK JSON-RPC is written to stdout — all
+diagnostics go to stderr (`COLAB_DEBUG=1` enables debug logging).
+
+**Tools and safety.** The server exposes 22 allow-listed `colab_*` tools: 15
+read-only (`colab_sessions`, `colab_status`, `colab_usage`, `colab_cost`,
+`colab_ps`, `colab_cat`, `colab_tail`, `colab_grep`, `colab_du`, `colab_find`,
+`colab_logs`, `colab_wait`, `colab_jobs`, `colab_doctor`, `colab_compat`) and 7
+that mutate billable/remote state (`colab_new`, `colab_run`, `colab_exec`,
+`colab_stop`, `colab_reap`, `colab_fetch`, `colab_resume`). There is no shell
+tool, no arbitrary-code tool and no raw-request tool. **Every mutating tool
+requires an explicit `confirm: true` in its arguments**; without it the call
+fails before invoking `golab`. `colab_reap` is dry-run by default — it needs both
+`dry_run: false` and `confirm: true` to delete records. Code for `colab_exec` is
+passed on stdin, never in argv or a shell. Tool errors and output are redacted
+with the same filter as the CLI.
+
+**Resources and transport.** Two read-only resources are available:
+`golab://docs/skill` and `golab://docs/usage`. Over HTTP the streamable MCP
+endpoint is `/mcp` (the root `/` is also accepted for client compatibility);
+there is **no** legacy `/sse` endpoint. The implementation uses the official
+[`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)
+(v1.7.0), which negotiates the protocol version; tests drive both the modern
+handshake and a legacy client requesting `2025-06-18`, confirming the same tool
+list.
+
+**Caveat:** `golab-mcp` is not in `.goreleaser.yaml`, so it is not published in
+signed release archives and has no self-update path. For now, install it with
+`go install …/cmd/golab-mcp@latest` and verify the source/tag yourself. The tool
+behaviour is covered by fake-backed tests; it is not a claim of live Colab
+proof. See [CONFORMANCE.md §6](CONFORMANCE.md#6-human-only--external-steps-blocking-done).
+
+## 13. Agent Skills discovery
+
+Two portable Agent Skills live in the repository for agents that load skills
+from a filesystem:
+
+| Path | Purpose |
+|---|---|
+| `.agents/skills/golab-operations` | Safe operating procedure for the CLI: session lifecycle, `exec`/`run` parity, file transfer, VM inspection, detached jobs, spend guards, redaction, stdout/stderr contract, TTY and `--yes` rules, and remote-vs-local path semantics. |
+| `.agents/skills/colab-mcp` | Setting up and verifying `golab-mcp` from MCP clients: stdio and streamable HTTP, Claude Desktop `mcpServers` config, tool categories, `confirm: true` gating, redaction, and MCP Inspector checks with modern and legacy protocol eras. |
+
+Each is a directory with a `SKILL.md` frontmatter (`name`, `description`,
+`metadata`) and a `references/` subdirectory. Both validate with the official
+`agentskills` CLI:
+
+```bash
+agentskills validate .agents/skills/golab-operations
+agentskills validate .agents/skills/colab-mcp
+```
+
+These skills carry no live proof themselves: they document the CLI surfaces
+above, whose verification status is recorded in
+[CONFORMANCE.md](CONFORMANCE.md). Command and flag facts in them were checked
+against `golab --help` and `<command> --help`; re-check the installed binary with
+`golab version`, because flags can drift between versions.

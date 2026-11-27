@@ -103,6 +103,40 @@ on-disk schema or persisted token format (per AGENTS.md).
   instead of VM root, so files uploaded to `/sample.txt` were invisible. All
   cases were re-verified live after the fix; cleanup left no assignments.
 
+- Live e2e follow-up (2026-11-27): billable CPU probes closed several checks
+  that had been deferred as human-only — a CPU `new` / `run` pass, the sweeper
+  (which left no assignments), GET-only wire/trace capture and the goleak and
+  coverage gates. The two Tier 2 defects found on 2026-11-26 (`du` decoding the
+  array-shaped `lines` payload and relative paths in `tail`/`grep`/`du`/`fetch`
+  resolving against kernel cwd `/content` instead of VM root) were re-verified
+  live after the fix. **Not covered:** OAuth re-consent, Drive browser approval,
+  interactive TTY, real device matrices, the GCP quota project, or uploads
+  larger than 75 MiB. See
+  [CONFORMANCE.md §6](docs/CONFORMANCE.md#6-human-only--external-steps-blocking-done).
+
+- Cost-ledger appends are now serialized across processes. `cost.New(path)` is
+  constructed afresh by every CCU sampler (budget guard, `usage`, `--max-cu`
+  monitor), so an in-process mutex alone let distinct Ledger instances — and
+  distinct `golab` processes — read the same pre-append bytes and let the last
+  rename silently drop the other samples. The whole read-modify-rename cycle
+  now holds a per-path OS advisory lock with a 10-second timeout.
+
+- `doctor --fix` test fixture no longer depends on the host clock or timezone.
+  The stale-lock fixture derived its mtime from `time.Now().Add(-48h)`, which a
+  fixed UTC test clock could see as only ~22 h old in a `+0200` timezone, so the
+  stale-lock remediation disappeared. It now uses a fixed UTC date matching the
+  injected filesystem clock. This is a test-only fix; no CLI behaviour changed.
+
+- Release workflow least privilege: the `build` job now holds `contents: read`
+  only, and `sign` is the only job with `contents: write` and `id-token: write`.
+  The pinned Fulcio certificate identity is unchanged. No live tagged release
+  has exercised the new `dist/` artifact hand-off yet.
+
+- `run --detach` now rejects an explicitly supplied `--max-cu` or `--enforce`
+  with exit 2 before any allocation. The CU guard samples an account-level
+  endpoint inside the foreground process and cannot follow a detached child;
+  wiring a second remote watchdog is deferred rather than silently ignored.
+
 - Post-release audit + live e2e found and fixed seven defects in the batch 2
   features: `exec --json` now matches text mode for `SystemExit(0)` (clean
   `status:"ok"`, no IPython banner or "To exit: use …" warning); all `--env-file` values are redacted even
@@ -122,15 +156,22 @@ billable CPU VM covered `new`, `status`, `ls`, `exec` (text/JSON/secrets),
 `resume` error paths and cleanup — final `golab sessions` was empty. Fuzz smoke
 passed both seeds. Coverage gate misses the 80% target for `state`/`sshx`
 (the CI floor is 70%, as documented). Cross-build smoke was interrupted by a
-server restart and is not claimed. Fake-kernel tests cover all six fixes; a
-live re-run of the fixed cases follows this commit.
+server restart and is not claimed. Fake-kernel tests cover all six fixes, and a
+billable live re-run on 2026-11-26/27 re-verified the fixed cases (see the e2e
+entries above). The newer surfaces — `golab-mcp`, the Agent Skills,
+`ssh --accept-host-key`, `compat refresh`, the packaging configs and the
+cost/doctorfix changes — are static- or fake-tested only: `internal/mcpserver`
+covers both transports and legacy `2025-06-18` negotiation, and both skills pass
+`agentskills validate`. `golab-mcp` is **not** in `.goreleaser.yaml`, so no
+signed release archive or self-update proof exists for it.
 
 ### Added
 
 - Six feature tiers landed on `main` (2026-11-26), all written test-first with
-  fakes; **no live e2e proof is claimed for any of them** — the billable probes
-  remain human-only. **Tier 1 (spend safety):** `reap [--older-than --dry-run
-  --yes --json]` unassigns server runtimes with no local record and prunes stale
+  fakes; at landing **no live e2e proof was claimed for any of them**. A later
+  billable CPU pass (2026-11-26/27, see `### Fixed` above) covered part of
+  these surfaces; it did not prove all of them. **Tier 1 (spend safety):**
+  `reap [--older-than --dry-run --yes --json]` unassigns server runtimes with no local record and prunes stale
   local records; `new --ttl D [--ttl-action warn|stop]` stores a local expiry
   checked on every invocation (no daemon or timer) and `--wait-capacity D`
   retries capacity refusals; `cost [--since --json]` reports observed compute
@@ -142,9 +183,10 @@ live re-run of the fixed cases follows this commit.
   `tail -f` is not byte-perfect under log rotation. **Tier 3 (background):**
   `run --detach --ttl`, `jobs`, `logs ID [-f]`, `wait --for kernel|idle|ready
   --timeout` and `sync --watch`; detached jobs are **remote**, there is no local
-  daemon, the VM stays allocated and billable, and `--ttl` is mandatory but
-  advisory — the decision and its non-goals are in
-  [ADR-001](docs/adr-001-detached-runs.md). **Tier 4 (reproducibility):**
+  daemon and the VM stays allocated and billable. `--ttl` was mandatory but
+  advisory at landing; it is now **remotely enforced** — see `### Changed`
+  below and the amended [ADR-001](docs/adr-001-detached-runs.md).
+  **Tier 4 (reproducibility):**
   `env freeze -s NAME -o FILE`, `run --lockfile`, `run -p K=V --params-file`,
   `run --bundle --out` and `bundle verify --env`; metadata-only verify is
   RECORDED, while `--env` actually re-checks the environment in a fresh VM
@@ -181,6 +223,53 @@ live re-run of the fixed cases follows this commit.
   `version.Upstream` remains `0.8.x+HEAD` and the CLI default stays the tunnel
   API until live proof. The tunnel API may be turned down soon, removing the
   `--no-public-api` / 0.8.0 opt-out.
+
+- **Colab MCP server** (`cmd/golab-mcp`): a dedicated static binary built on the
+  official `modelcontextprotocol/go-sdk` (v1.7.0). It exposes 22 `colab_*` tools
+  from an allow-list (no shell, arbitrary-code or raw-request tool), with an
+  explicit `confirm: true` required for every billable/destructive tool, and two
+  resources: `golab://docs/skill` and `golab://docs/usage`. Transports are
+  `--transport stdio` (default) and `--transport http --addr :8080`; HTTP is
+  streamable MCP at `/mcp` (also `/`), with no `/sse` endpoint. Tests cover
+  legacy clients negotiating protocol version `2025-06-18`. Install with
+  `go install github.com/20Youssef10/golab/cmd/golab-mcp@latest`.
+  **Follow-up:** `golab-mcp` is not in `.goreleaser.yaml`, so release archives
+  and the signed-update path do not publish it yet. See
+  [USAGE.md](docs/USAGE.md#12-mcp-server-golab-mcp).
+
+- **Portable Agent Skills** at `.agents/skills/golab-operations` and
+  `.agents/skills/colab-mcp` (each a `SKILL.md` plus `references/`), validated
+  with the official `agentskills` CLI. They document safe operation and client
+  configuration; they are not live proof of any underlying CLI behaviour.
+
+- `ssh --accept-host-key SHA256:<fingerprint>` (the `SHA256:` prefix is optional)
+  pins a runtime host key explicitly. The pin is stored only after the live
+  handshake matches it; a stored pin must also match the explicit value. An
+  invalid fingerprint or a mismatch is a usage error (exit 2) before allocation.
+
+- `golab compat refresh [--out FILE] [--ref REF]` fetches the official upstream
+  Typer source from `raw.githubusercontent.com` at a pinned ref and writes a
+  provenance-tagged, explicitly **partial** command-surface snapshot. It is
+  dry-run by default (`--out -` prints JSON without writing) and never
+  synthesises flags from parameter names or comments. Feed the file to
+  `golab compat report --snapshot FILE`. This is a bounded source parse, not a
+  live upstream CLI comparison and not a claim of complete upstream coverage.
+
+- Packaging configs under `packaging/`: Homebrew formula, Scoop manifest, winget
+  version/locale/installer manifests and an nfpm config. None is wired into
+  release CI or live-proven on this host; winget is blocked pending a `.zip`
+  repack. See the [platform matrix](docs/04-platform-matrix.md#7-distribution-channels).
+
+### Changed
+
+- **Detached-run `--ttl` semantics (breaking).** `run --detach --ttl D` previously
+  stored an advisory deadline that did not stop anything; it is now enforced by
+  a remote watchdog on the VM that polls every 5 seconds, kills the whole
+  process group at the deadline and records `exit=124` /
+  `ttl-reason=ttl_exceeded`. The watchdog stops the *job*, not the runtime — the
+  VM remains allocated and billable until `golab stop`, and a watchdog cannot
+  survive VM reclamation. [ADR-001](docs/adr-001-detached-runs.md) is amended;
+  see [MIGRATION.md](docs/MIGRATION.md#new-ergonomics-and-spend-semantics).
 
 ## [0.2.0] - 2026-11-24
 
