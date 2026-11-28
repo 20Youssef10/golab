@@ -73,8 +73,38 @@ the individual fix entries that landed on `main` before the tag remain in
 
 ## [Unreleased]
 
+### Added
+
+- **MCP tools 23–25** (`cmd/golab-mcp`, 25 total): `colab_update` (read-only
+  `check` / gated signed `install`), `colab_install_mcp` (auto or manual config
+  for OpenCode, Claude Code, Cursor, Gemini CLI, Codex CLI and VS Code — all or
+  named agents, dry-run by default) and `colab_install_skills` (unified, project,
+  named-agent or all targets; only the two known portable skill trees, with
+  traversal rejection). Implemented in a new injected-filesystem package
+  `internal/agentinstall`; 13 tests plus stdio/HTTP/legacy handshake assertions.
+- **Standalone `golab-mcp` download**: a second GoReleaser archive set
+  (`golab-mcp_<version>_<os>_<arch>.tar.gz`, plus Windows `.zip`) with the same
+  signed provenance as the CLI archives, wired into the release workflow's
+  sign/upload/proof steps. Ships in the **next** release; v0.3.0 assets are
+  immutable. `go install github.com/20Youssef10/golab/cmd/golab-mcp@v0.3.0`
+  was verified live.
+
 ### Fixed
 
+- `compat refresh` built `https://raw.githubusercontent.com/<ref>/<path>` with
+  no owner/repo segment, so every production fetch returned HTTP 404. The URL
+  now pins the official `googlecolab/google-colab-cli` repository; the `--ref`
+  help text no longer implies the compatibility label `0.8.x+HEAD` is a
+  resolvable git tag. Live proof: a snapshot of tag `v0.8.0` was fetched and
+  consumed by `compat report`.
+- `install.sh` / `install.ps1` now reject cosign older than v2.6.5 with an
+  actionable version error. Releases use `--new-bundle-format` sigstore v0.3
+  bundles; cosign v2.4.1 reports the misleading `bundle does not contain cert
+  for verification` and cannot verify them (live VM proof: FAIL with v2.4.1,
+  PASS with v2.6.5).
+- Third-party manifests (Homebrew, Scoop, nfpm) pinned to the published signed
+  v0.3.0 archives with real `checksums.txt` digests; winget keeps its three
+  real v0.3.0 `.zip` hashes.
 - Spend-safety audit (`docs/gap-report.md` §2–3) found seven defects, all fixed
   test-first: a failed session-record write now compensates with `Unassign`
   instead of orphaning a billable runtime; `stop --all` reports the real stop

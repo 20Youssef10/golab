@@ -15,7 +15,7 @@ This is a community port, not a Google product. “Google” and “Colab” are
 ## Status (v0.3.0 published)
 
 `v0.3.0` was published on 2026-11-27 (release run `46062649930`, 49 signed assets);
-the annotated tag points at `996af6d`. It adds the `golab-mcp` server (22 tools, stdio and streamable HTTP),
+the annotated tag points at `996af6d`. It adds the `golab-mcp` server (25 tools on `main` after the install/update additions; the published v0.3.0 binary has 22, stdio and streamable HTTP),
 two portable Agent Skills, the spend-safety and VM-inspection tiers, remote TTL
 enforcement, SSH host-key pinning, `compat refresh`, signed archives carrying both
 binaries plus the skills, Windows `.zip` repacks and a GHCR distroless image.

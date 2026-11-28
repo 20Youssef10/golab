@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/20Youssef10/golab/internal/agentinstall"
 )
 
 // Each input type is also its tool's JSON Schema. Fields without omitempty
@@ -169,6 +171,67 @@ type doctorInput struct {
 
 type compatInput struct{}
 
+// updateInput drives colab_update. "check" is read-only; "install" verifies
+// and installs a signed release and is gated.
+type updateInput struct {
+	Action  string `json:"action" jsonschema:"check (default) reads release state without changing anything; install verifies and installs a signed update and requires confirm:true"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"Required when action is install; check never needs confirmation"`
+}
+
+func (in updateInput) isConfirmed() bool { return in.Confirm }
+
+func (in updateInput) gate() error {
+	switch strings.ToLower(in.Action) {
+	case "", "check":
+		return nil
+	case "install":
+		return requireConfirm("colab_update", in)
+	default:
+		return errors.New("colab_update action must be check or install")
+	}
+}
+
+// installMCPInput drives colab_install_mcp. Writes happen only in auto mode
+// with dry_run:false; manual mode returns a snippet and writes nothing.
+type installMCPInput struct {
+	Agents    []string `json:"agents,omitempty" jsonschema:"Agent names (opencode, claude-code, cursor, gemini, codex, vscode) or [all]; empty means all"`
+	Transport string   `json:"transport,omitempty" jsonschema:"stdio (default) or http"`
+	Addr      string   `json:"addr,omitempty" jsonschema:"HTTP listen address when transport is http"`
+	GolabBin  string   `json:"golab_bin,omitempty" jsonschema:"Absolute path to golab-mcp written into the configs; required for a write"`
+	Mode      string   `json:"mode,omitempty" jsonschema:"auto (default) writes configs; manual returns the exact snippet and writes nothing"`
+	DryRun    *bool    `json:"dry_run,omitempty" jsonschema:"Preview only (default true). Set false to write configs in auto mode"`
+	Confirm   bool     `json:"confirm,omitempty" jsonschema:"Required when dry_run is false in auto mode, because configs are written"`
+}
+
+func (in installMCPInput) isConfirmed() bool { return in.Confirm }
+
+func (in installMCPInput) gate() error {
+	mode := strings.ToLower(in.Mode)
+	if mode != "" && mode != "auto" && mode != "manual" {
+		return errors.New("colab_install_mcp mode must be auto or manual")
+	}
+	if (in.DryRun == nil || *in.DryRun) || mode == "manual" {
+		return nil
+	}
+	return requireConfirm("colab_install_mcp", in)
+}
+
+// installSkillsInput drives colab_install_skills. Dry-run is the default.
+type installSkillsInput struct {
+	Targets []string `json:"targets,omitempty" jsonschema:"Skill targets: agent names, unified, project, or [all]; empty means unified"`
+	DryRun  *bool    `json:"dry_run,omitempty" jsonschema:"Preview only (default true). Set false to copy the two portable skills"`
+	Confirm bool     `json:"confirm,omitempty" jsonschema:"Required when dry_run is false, because skill files are written"`
+}
+
+func (in installSkillsInput) isConfirmed() bool { return in.Confirm }
+
+func (in installSkillsInput) gate() error {
+	if in.DryRun == nil || *in.DryRun {
+		return nil
+	}
+	return requireConfirm("colab_install_skills", in)
+}
+
 type confirmable interface{ isConfirmed() bool }
 
 func requireConfirm(tool string, in confirmable) error {
@@ -178,7 +241,7 @@ func requireConfirm(tool string, in confirmable) error {
 	return fmt.Errorf("%s is billable/destructive and changes external state; pass confirm: true to proceed", tool)
 }
 
-func registerTools(s *mcp.Server, r *Runner) {
+func registerTools(s *mcp.Server, r *Runner, cfg Config) {
 	// Read-only tools: no confirm, readOnlyHint=true, no external mutation.
 	register(s, r, &mcp.Tool{
 		Name:        "colab_sessions",
@@ -448,6 +511,70 @@ func registerTools(s *mcp.Server, r *Runner) {
 		strFlag(&f, "session", ptrStr(in.Session))
 		floatFlag(&f, "timeout", in.Timeout)
 		return invocation{command: "resume", flags: f}
+	})
+
+	// Update (check is read-only; install is gated and mutates the local binary).
+	register(s, r, &mcp.Tool{
+		Name:        "colab_update",
+		Description: "Check for a newer signed golab release (action=check, read-only) or verify and install it in place (action=install). Install is gated: requires confirm:true. Never accepts or handles tokens.",
+		Annotations: mutating("Check or install a golab update"),
+	}, func(in updateInput) error { return in.gate() }, func(in updateInput) invocation {
+		f := newFlags()
+		if strings.EqualFold(in.Action, "install") {
+			boolFlag(&f, "install", true)
+			boolFlag(&f, "yes", true)
+		}
+		return invocation{command: "update", flags: f}
+	})
+
+	// Install tools operate on local config/skill directories only; no subprocess
+	// is spawned. They are gated because a write changes agent configuration.
+	registerDirect(s, &mcp.Tool{
+		Name:        "colab_install_mcp",
+		Description: "Install the golab MCP server config for one or more AI agents (opencode, claude-code, cursor, gemini, codex, vscode, or all). dry_run defaults to true (preview only); mode=manual returns the exact snippet and writes nothing. Setting dry_run:false in auto mode writes config files and requires confirm:true. Never stores credentials; env is always empty.",
+		Annotations: mutating("Install MCP client configuration"),
+	}, func(in installMCPInput) error { return in.gate() }, func(ctx context.Context, in installMCPInput) (agentinstall.Result, error) {
+		_ = ctx // local filesystem only; no network and no long-running work
+		inst, err := cfg.installerFor()
+		if err != nil {
+			return agentinstall.Result{}, err
+		}
+		return inst.InstallMCP(agentinstall.MCPRequest{
+			Agents:    in.Agents,
+			Transport: in.Transport,
+			Addr:      in.Addr,
+			GolabBin:  in.GolabBin,
+			Mode:      in.Mode,
+			DryRun:    in.DryRun,
+		})
+	})
+
+	registerDirect(s, &mcp.Tool{
+		Name:        "colab_install_skills",
+		Description: "Install the two portable golab Agent Skills into the unified dir, a specific agent dir, the project dir, or all targets. Only the known colab-mcp and golab-operations trees are copied; traversal and unknown targets are rejected. dry_run defaults to true (preview only); setting dry_run:false copies files and requires confirm:true.",
+		Annotations: mutating("Install portable Agent Skills"),
+	}, func(in installSkillsInput) error { return in.gate() }, func(ctx context.Context, in installSkillsInput) (agentinstall.Result, error) {
+		_ = ctx // local filesystem only; no network and no long-running work
+		inst, err := cfg.installerFor()
+		if err != nil {
+			return agentinstall.Result{}, err
+		}
+		return inst.InstallSkills(agentinstall.SkillsRequest{Targets: in.Targets, DryRun: in.DryRun})
+	})
+}
+
+// registerDirect registers a tool whose handler operates locally (no golab
+// subprocess), sharing the same gate/schema/error conventions as register.
+func registerDirect[In any, Out any](s *mcp.Server, tool *mcp.Tool, gate func(In) error, run func(context.Context, In) (Out, error)) {
+	mcp.AddTool(s, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		if gate != nil {
+			if err := gate(in); err != nil {
+				var zero Out
+				return nil, zero, err
+			}
+		}
+		out, err := run(ctx, in)
+		return nil, out, err
 	})
 }
 

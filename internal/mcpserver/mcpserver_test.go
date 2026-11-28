@@ -90,9 +90,9 @@ func serverEnv(extra ...string) []string {
 	return append(env, extra...)
 }
 
-func newTestServer(t *testing.T, bin string) (*mcp.Server, *mcp.ClientSession) {
+func newTestServerAt(t *testing.T, cfg mcpserver.Config) (*mcp.Server, *mcp.ClientSession) {
 	t.Helper()
-	srv, err := mcpserver.NewServer(mcpserver.Config{GolabBin: bin})
+	srv, err := mcpserver.NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -109,6 +109,17 @@ func newTestServer(t *testing.T, bin string) (*mcp.Server, *mcp.ClientSession) {
 	}
 	t.Cleanup(func() { _ = cs.Close() })
 	return srv, cs
+}
+
+// newTestServer injects temporary home/project roots so confirmed install
+// tools never touch the host's real config directories.
+func newTestServer(t *testing.T, bin string) (*mcp.Server, *mcp.ClientSession) {
+	t.Helper()
+	return newTestServerAt(t, mcpserver.Config{
+		GolabBin:   bin,
+		HomeDir:    t.TempDir(),
+		ProjectDir: t.TempDir(),
+	})
 }
 
 func textOf(t *testing.T, res *mcp.CallToolResult) string {
@@ -136,14 +147,15 @@ func call(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any)
 
 var allToolNames = []string{
 	"colab_cat", "colab_compat", "colab_cost", "colab_doctor", "colab_du",
-	"colab_exec", "colab_fetch", "colab_find", "colab_grep", "colab_jobs",
-	"colab_logs", "colab_new", "colab_ps", "colab_reap", "colab_resume",
-	"colab_run", "colab_sessions", "colab_status", "colab_stop", "colab_tail",
-	"colab_usage", "colab_wait",
+	"colab_exec", "colab_fetch", "colab_find", "colab_grep", "colab_install_mcp",
+	"colab_install_skills", "colab_jobs", "colab_logs", "colab_new", "colab_ps",
+	"colab_reap", "colab_resume", "colab_run", "colab_sessions", "colab_status",
+	"colab_stop", "colab_tail", "colab_update", "colab_usage", "colab_wait",
 }
 
 var confirmGated = []string{
-	"colab_exec", "colab_fetch", "colab_new", "colab_reap", "colab_resume", "colab_run", "colab_stop",
+	"colab_exec", "colab_fetch", "colab_install_mcp", "colab_install_skills",
+	"colab_new", "colab_reap", "colab_resume", "colab_run", "colab_stop", "colab_update",
 }
 
 func minimalArgs(name string) map[string]any {
@@ -164,6 +176,12 @@ func minimalArgs(name string) map[string]any {
 		return map[string]any{"url": "https://example.com/a"}
 	case "colab_reap":
 		return map[string]any{"dry_run": false}
+	case "colab_update":
+		return map[string]any{"action": "install"}
+	case "colab_install_mcp":
+		return map[string]any{"agents": []any{"opencode"}, "mode": "auto", "dry_run": false, "golab_bin": "/bin/golab-mcp"}
+	case "colab_install_skills":
+		return map[string]any{"targets": []any{"unified"}, "dry_run": false}
 	default:
 		return map[string]any{"session": "vm"}
 	}
@@ -317,8 +335,11 @@ func TestConfirmGate(t *testing.T) {
 			if res.IsError {
 				t.Fatalf("%s with confirm: %q", name, textOf(t, res))
 			}
-			if _, err := os.Stat(log); err != nil {
-				t.Fatalf("%s: subprocess was not invoked: %v", name, err)
+			// Install tools act on local config only: they spawn no subprocess.
+			if name != "colab_install_mcp" && name != "colab_install_skills" {
+				if _, err := os.Stat(log); err != nil {
+					t.Fatalf("%s: subprocess was not invoked: %v", name, err)
+				}
 			}
 		})
 	}
@@ -669,4 +690,216 @@ func TestHelperStdioServer(t *testing.T) {
 	}
 	_ = mcpserver.Serve(context.Background(), mcpserver.Config{}, "stdio", "")
 	os.Exit(0) // never let the testing framework write PASS to stdout
+}
+
+// ---------- Install / update tools (new surface) ----------
+
+func resultMap(t *testing.T, res *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structured content: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal structured content: %v (%s)", err, b)
+	}
+	return m
+}
+
+// TestUpdateTool verifies check runs a read-only golab update, install is
+// gated, and a confirmed install forwards --install --yes with argv only.
+func TestUpdateTool(t *testing.T) {
+	bin, log, _ := fakeGolabBin(t)
+	t.Setenv("FAKE_GOLAB_LOG", log)
+	_, cs := newTestServer(t, bin)
+
+	check := call(t, cs, "colab_update", map[string]any{"action": "check"})
+	if check.IsError {
+		t.Fatalf("check: %s", textOf(t, check))
+	}
+	argv, err := os.ReadFile(log)
+	if err != nil || !strings.Contains(string(argv), "--output json update") {
+		t.Fatalf("check argv: %q, err %v", argv, err)
+	}
+	if strings.Contains(string(argv), "--install") {
+		t.Fatalf("check must not install: %q", argv)
+	}
+
+	if err := os.Remove(log); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	denied := call(t, cs, "colab_update", minimalArgs("colab_update"))
+	if !denied.IsError || !strings.Contains(textOf(t, denied), "confirm: true") {
+		t.Fatalf("install gate: %s", textOf(t, denied))
+	}
+	if _, err := os.Stat(log); !os.IsNotExist(err) {
+		t.Fatal("install ran without confirm")
+	}
+
+	allowed := call(t, cs, "colab_update", map[string]any{"action": "install", "confirm": true})
+	if allowed.IsError {
+		t.Fatalf("install: %s", textOf(t, allowed))
+	}
+	argv, err = os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--output json update", "--install", "--yes"} {
+		if !strings.Contains(string(argv), want) {
+			t.Fatalf("install argv missing %q: %q", want, argv)
+		}
+	}
+}
+
+// TestInstallMCPToolDryRunAndManual verifies the safe defaults write nothing:
+// dry_run (default true) reports would-write, manual returns pasteable snippets.
+func TestInstallMCPToolDryRunAndManual(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	bin, _, _ := fakeGolabBin(t)
+	_, cs := newTestServerAt(t, mcpserver.Config{GolabBin: bin, HomeDir: home, ProjectDir: project})
+
+	dry := call(t, cs, "colab_install_mcp", map[string]any{
+		"agents": []any{"all"}, "golab_bin": "/bin/golab-mcp",
+	})
+	if dry.IsError {
+		t.Fatalf("dry run: %s", textOf(t, dry))
+	}
+	m := resultMap(t, dry)
+	if m["dry_run"] != true {
+		t.Fatalf("dry_run = %v", m["dry_run"])
+	}
+	targets, _ := m["targets"].([]any)
+	if len(targets) != 6 {
+		t.Fatalf("targets = %d, want 6", len(targets))
+	}
+	for _, p := range []string{
+		filepath.Join(home, ".config", "opencode", "opencode.json"),
+		filepath.Join(home, ".claude", "settings.json"),
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("dry run wrote %s: %v", p, err)
+		}
+	}
+
+	manual := call(t, cs, "colab_install_mcp", map[string]any{
+		"agents": []any{"claude-code"}, "golab_bin": "/bin/golab-mcp", "mode": "manual",
+	})
+	if manual.IsError {
+		t.Fatalf("manual: %s", textOf(t, manual))
+	}
+	mm := resultMap(t, manual)
+	ts, _ := mm["targets"].([]any)
+	if len(ts) != 1 {
+		t.Fatalf("manual targets = %d", len(ts))
+	}
+	entry, _ := ts[0].(map[string]any)
+	if entry["outcome"] != "snippet" || !strings.Contains(fmt.Sprint(entry["snippet"]), "golab") {
+		t.Fatalf("manual outcome: %v", entry)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("manual wrote config: %v", err)
+	}
+}
+
+// TestInstallMCPToolConfirmedWrite writes real configs into the injected home
+// and proves the written env is empty (no secrets ever enter a config).
+func TestInstallMCPToolConfirmedWrite(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	bin, _, _ := fakeGolabBin(t)
+	_, cs := newTestServerAt(t, mcpserver.Config{GolabBin: bin, HomeDir: home, ProjectDir: project})
+
+	res := call(t, cs, "colab_install_mcp", map[string]any{
+		"agents": []any{"opencode", "claude-code"}, "golab_bin": "/bin/golab-mcp",
+		"dry_run": false, "confirm": true,
+	})
+	if res.IsError {
+		t.Fatalf("install: %s", textOf(t, res))
+	}
+	oc, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(oc), "environment\":{") == false && !strings.Contains(string(oc), "environment") {
+		t.Fatalf("opencode config: %s", oc)
+	}
+	for _, secret := range []string{"Authorization", "Bearer", "access_token"} {
+		if strings.Contains(string(oc), secret) {
+			t.Fatalf("secret in config: %s", oc)
+		}
+	}
+}
+
+// TestInstallSkillsToolDryRunAndConfirmed checks dry-run is side-effect free,
+// a confirmed write installs both skill trees, and the confirm gate blocks
+// with zero file writes (and zero subprocess invocations).
+func TestInstallSkillsToolDryRunAndConfirmed(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	bin, log, _ := fakeGolabBin(t)
+	t.Setenv("FAKE_GOLAB_LOG", log)
+	_, cs := newTestServerAt(t, mcpserver.Config{GolabBin: bin, HomeDir: home, ProjectDir: project})
+
+	dry := call(t, cs, "colab_install_skills", map[string]any{"targets": []any{"all"}})
+	if dry.IsError {
+		t.Fatalf("dry run: %s", textOf(t, dry))
+	}
+	if resultMap(t, dry)["dry_run"] != true {
+		t.Fatalf("dry_run: %v", resultMap(t, dry))
+	}
+	if _, err := os.Stat(filepath.Join(home, ".agents", "skills")); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote skills: %v", err)
+	}
+
+	denied := call(t, cs, "colab_install_skills", minimalArgs("colab_install_skills"))
+	if !denied.IsError || !strings.Contains(textOf(t, denied), "confirm: true") {
+		t.Fatalf("skills gate: %s", textOf(t, denied))
+	}
+	if _, err := os.Stat(filepath.Join(home, ".agents", "skills")); !os.IsNotExist(err) {
+		t.Fatalf("gated call wrote skills: %v", err)
+	}
+	if _, err := os.Stat(log); !os.IsNotExist(err) {
+		t.Fatal("gated call started a subprocess")
+	}
+
+	allowed := call(t, cs, "colab_install_skills", map[string]any{
+		"targets": []any{"unified"}, "dry_run": false, "confirm": true,
+	})
+	if allowed.IsError {
+		t.Fatalf("confirmed skills: %s", textOf(t, allowed))
+	}
+	for _, skill := range []string{"colab-mcp", "golab-operations"} {
+		p := filepath.Join(home, ".agents", "skills", skill, "SKILL.md")
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("skill %s not installed: %v", skill, err)
+		}
+	}
+}
+
+// TestNewToolsRejectInvalidInput verifies schema-backed validation rejects
+// unknown agents/targets before any file or subprocess side effect.
+func TestNewToolsRejectInvalidInput(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	bin, log, _ := fakeGolabBin(t)
+	t.Setenv("FAKE_GOLAB_LOG", log)
+	_, cs := newTestServerAt(t, mcpserver.Config{GolabBin: bin, HomeDir: home, ProjectDir: project})
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"colab_install_mcp", map[string]any{"agents": []any{"../../evil"}, "dry_run": false, "confirm": true}},
+		{"colab_install_skills", map[string]any{"targets": []any{"../evil"}, "dry_run": false, "confirm": true}},
+		{"colab_update", map[string]any{"action": "destroy", "confirm": true}},
+	} {
+		res := call(t, cs, tc.name, tc.args)
+		if !res.IsError {
+			t.Errorf("%s accepted invalid input: %s", tc.name, textOf(t, res))
+		}
+	}
+	if _, err := os.Stat(log); !os.IsNotExist(err) {
+		t.Fatalf("invalid input started a subprocess: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".agents", "skills")); !os.IsNotExist(err) {
+		t.Fatalf("invalid input wrote skills: %v", err)
+	}
 }

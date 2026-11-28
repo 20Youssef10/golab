@@ -9,11 +9,14 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/20Youssef10/golab/internal/agentinstall"
 	"github.com/20Youssef10/golab/internal/logx"
 	"github.com/20Youssef10/golab/internal/version"
 )
@@ -25,9 +28,15 @@ var skillDoc string
 var usageDoc string
 
 // Config configures the MCP server. An empty GolabBin defaults to "golab"
-// resolved on PATH at the time a tool is called.
+// resolved on PATH at the time a tool is called. HomeDir and ProjectDir are
+// injected roots for the install tools; when empty they are resolved from the
+// host at call time. SkillsFS defaults to the embedded portable skill trees.
 type Config struct {
-	GolabBin string
+	GolabBin   string
+	HomeDir    string
+	ProjectDir string
+	SkillsFS   fs.FS
+	DirSync    func(string) error
 }
 
 // NewServer builds a server with the full tool suite and bundled resources.
@@ -38,9 +47,37 @@ func NewServer(cfg Config) (*mcp.Server, error) {
 		Title:       "Google Colab via golab",
 		Description: "Manage Colab runtimes, execute code and inspect state through the golab CLI. Billable and destructive tools require confirm:true.",
 	}, nil)
-	registerTools(s, NewRunner(cfg.GolabBin))
+	registerTools(s, NewRunner(cfg.GolabBin), cfg)
 	addResources(s)
 	return s, nil
+}
+
+// installerFor resolves the injected roots lazily so tools/list never depends
+// on a user home directory being available.
+func (cfg Config) installerFor() (*agentinstall.Installer, error) {
+	home := cfg.HomeDir
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve home directory: %w", err)
+		}
+	}
+	project := cfg.ProjectDir
+	if project == "" {
+		var err error
+		project, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("resolve working directory: %w", err)
+		}
+	}
+	skills := cfg.SkillsFS
+	if skills == nil {
+		skills = agentinstall.SkillsFS()
+	}
+	inst := agentinstall.New(home, project, skills)
+	inst.DirSync = cfg.DirSync
+	return inst, nil
 }
 
 func addResources(s *mcp.Server) {

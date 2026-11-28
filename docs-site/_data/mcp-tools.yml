@@ -1,4 +1,4 @@
-# Generated from internal/mcpserver/tools.go on 2026-11-27 (22 allow-listed tools).
+# Generated from internal/mcpserver/tools.go on 2026-11-28 (25 allow-listed tools).
 tools:
   - group: "Read-only (15)"
     items:
@@ -32,8 +32,14 @@ tools:
         summary: "Read-only local diagnostics: report config, auth, API, update and wire state. This tool never applies fixes, never runs live probes and never edits files."
       - name: colab_compat
         summary: "Read-only: compare the local command surface against the embedded snapshot. Uses a local snapshot only; makes no network claim."
-  - group: "Requires confirm: true (7)"
+  - group: "Requires confirm: true (10)"
     items:
+      - name: colab_update
+        summary: "Check for a newer signed golab release (action=check, read-only) or verify and install it in place (action=install, requires confirm:true). Never accepts or handles tokens."
+      - name: colab_install_mcp
+        summary: "Install the golab MCP server config for one or more AI agents (opencode, claude-code, cursor, gemini, codex, vscode, or all). dry_run defaults to true; mode=manual returns the snippet and writes nothing; dry_run:false in auto mode requires confirm:true and never stores credentials."
+      - name: colab_install_skills
+        summary: "Install the two portable Agent Skills into the unified dir, a specific agent dir, the project dir, or all targets. Only known skill trees are copied; traversal and unknown targets are rejected. dry_run defaults to true; copying requires confirm:true."
       - name: colab_reap
         summary: "Prune stale local session records. DRY-RUN BY DEFAULT (dry_run=true): previews changes without mutation. Setting dry_run=false deletes records and requires confirm:true."
       - name: colab_new
