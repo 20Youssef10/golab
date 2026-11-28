@@ -75,6 +75,24 @@ the individual fix entries that landed on `main` before the tag remain in
 
 ### Added
 
+- **Named accounts with isolated sessions.** `golab account add|list|show|use|remove`
+  manages versioned profiles in a 0600 atomic `accounts.json`; the existing
+  single-identity token and `sessions.json` become `default` with no data
+  movement. Named profiles use per-account keyring entries and derived
+  `oauth_token_<name>.json` / `sessions_<name>.json` files. `GOLAB_ACCOUNT` and
+  the global `--account` flag scope any invocation to one account.
+- **Browser-created sessions.** `golab sessions --web` discovers Web UI runtimes
+  from the read-only `List` on both the legacy tunnel and Public API planes;
+  `attach --all` imports all unattached runtimes idempotently and
+  `attach --refresh` renews expired proxy tokens. `attach` no longer requires
+  the Public API, so no GCP setup is needed on the default path. No POST/assign
+  is issued.
+- **Self-bootstrapping installers.** `install.sh` falls back from curl→wget→
+  Python urllib, sha256sum→shasum→openssl→hashlib, tar→Python tarfile and
+  mktemp→private `$$` dir; it downloads and double-verifies a pinned cosign
+  v2.6.5 when none is present. `install.ps1` uses PowerShell built-ins and the
+  same pinned cosign bootstrap. The checksum + cosign trust gate, allow-listed
+  extraction and both-binary smoke tests are unchanged.
 - **MCP tools 23–25** (`cmd/golab-mcp`, 25 total): `colab_update` (read-only
   `check` / gated signed `install`), `colab_install_mcp` (auto or manual config
   for OpenCode, Claude Code, Cursor, Gemini CLI, Codex CLI and VS Code — all or
