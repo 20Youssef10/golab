@@ -23,7 +23,7 @@ import (
 // nextVersion is the published, signed release that every third-party channel
 // manifest pins. It carries the 13 CLI .tar.gz archives, the 3 winget .zip
 // repacks, and the standalone golab-mcp archives, all signed at the same tag.
-const nextVersion = "0.3.0"
+const nextVersion = "0.4.0"
 
 // cosignBootstrapVersion is the pinned verifier release. Both installers must
 // bootstrap exactly this version when the local cosign is missing or too old:
@@ -49,42 +49,39 @@ var cosignPublishedV265 = map[string]string{
 
 const cosignChecksumsDigest = "4037b3c8d222e970cf0c030147471f44743626323cb0904820e59869e03968ef"
 
-// publishedV030 is an independent transcription of the SIGNED v0.3.0
+// publishedV040 is an independent transcription of the SIGNED v0.4.0
 // checksums.txt (all 16 lines: 13 tar.gz + 3 windows zip), downloaded from
-// https://github.com/20Youssef10/golab/releases/download/v0.3.0/checksums.txt
-// (SHA-256 of that file: 7305d6456cdf4f52003bab064f7994678845f6da3e07c6152228d02ad4714198).
-// The packaging manifests are checked against THIS fixture, never against
-// their own contents, so a wrong-platform or placeholder hash cannot pass.
-var publishedV030 = map[string]string{
-	"golab_0.3.0_darwin_amd64.tar.gz":  "7026201245238ce5f518438adee2407e04fd6ea454ebb65071237eb6e7a512c4",
-	"golab_0.3.0_darwin_arm64.tar.gz":  "3a8c35b41206460bf66cd7c5b4e6f6da965dc17abf4bea174255d6ebf89f5e03",
-	"golab_0.3.0_freebsd_386.tar.gz":   "fe9a4eb8b5861bbb2b066fcfe0782689228a61e8f3120fbb76ed3295ef04a3fd",
-	"golab_0.3.0_freebsd_amd64.tar.gz": "0b6e7c53cc87034c789ee8a55f1b4cc82bba800e9872982acb50d73bdfc75ecb",
-	"golab_0.3.0_freebsd_arm64.tar.gz": "5e1f09a98587cf0383768ff954eff464823cc45484a7e3cae830cea252e66f53",
-	"golab_0.3.0_linux_386.tar.gz":     "b737d8540d82ff326f264a886188a1231c2636beb35e472db9130c0a79c05eee",
-	"golab_0.3.0_linux_amd64.tar.gz":   "248d3099e7fb5b9ce13e24d32768b0aff1eaecc50b96f8e5e5037af3c2d76f88",
-	"golab_0.3.0_linux_arm.tar.gz":     "b277bdb0ed82122b56a75acfdac3d4ac2f934b36584aa860c12ef8e334ebd726",
-	"golab_0.3.0_linux_arm64.tar.gz":   "a0f92813997fdad425bbf83b649aee78511278c4c587f1678d49d5245bc649de",
-	"golab_0.3.0_linux_riscv64.tar.gz": "0e9d2b5563ac8f5d7ffaaa24892189a93867f80827032ce64cc721baff732b23",
-	"golab_0.3.0_windows_386.tar.gz":   "547ab75039cff395e74a8f24458ee56c22e321f88c28714ff04d087dde6d0bf8",
-	"golab_0.3.0_windows_386.zip":      "42ae6b195c07a82c7b203491c72ef801105eadd8c5a711b6d15bff9141cd00c3",
-	"golab_0.3.0_windows_amd64.tar.gz": "5fdeaa7ecda7136cc333f96109917e8b957c5b2f7008cdf27ff88d4bfb30bb02",
-	"golab_0.3.0_windows_amd64.zip":    "d217650dfd4fe300b9282f2d3068ca8f80acb10031278c0be304805edc05b7e9",
-	"golab_0.3.0_windows_arm64.tar.gz": "a279ad1a1356d3aa79fc0321132c21ff5872aeef33979e4fb54b39fae4f77703",
-	"golab_0.3.0_windows_arm64.zip":    "ef6e4861c9d8f3f10af47248e1849bdd5564285cf181cc2757c1acc14d709918",
+// https://github.com/20Youssef10/golab/releases/download/v0.4.0/checksums.txt
+// (SHA-256 of that file: 34b279eacc3671d9df3035d3bb75fd41f972caaa2e7517ca89dd0103e05fc549).
+var publishedV040 = map[string]string{
+	"golab_0.4.0_darwin_amd64.tar.gz":  "fa251d3c6272911faaa0311fecb5cb1bb5ef8f8914fb21dfa49f737f7152fcaa",
+	"golab_0.4.0_darwin_arm64.tar.gz":  "947404c361c878438e0ba808b7c02130231545e3b869ce333dbac190d229318f",
+	"golab_0.4.0_freebsd_386.tar.gz":   "56cbb6ca8d2bf943331259db188cb840904cf209357d2cd22032f8004610b6b6",
+	"golab_0.4.0_freebsd_amd64.tar.gz": "c76f96ef23cde4d386ac824c017dccabe0ecad99a864de8e3b904313bb6d5e6f",
+	"golab_0.4.0_freebsd_arm64.tar.gz": "fa57e39187e0a6793fe2a9322c1473cbc73e8a7fd977b940865b36fa6c2856d3",
+	"golab_0.4.0_linux_386.tar.gz":     "03167366eb8202f89c058574067c5a37a75ba41c5bcd849f0e1578ca0bab1160",
+	"golab_0.4.0_linux_amd64.tar.gz":   "ff1d218ee0dce37a9ee88a32632322b7f16eeaa024ca135082c4b7c17bc3fda5",
+	"golab_0.4.0_linux_arm.tar.gz":     "7ec8c13aeba5245449c6e2d6ef3b56eb101bfea80358d27a83022c4fc0587c5b",
+	"golab_0.4.0_linux_arm64.tar.gz":   "aea6cfbde8e6d48c8f3aee9c9790ff210ea8ba8c117390a1debd536a634a044f",
+	"golab_0.4.0_linux_riscv64.tar.gz": "208d07ad197845b36f82170326e5d93e72ef2facee3a33f42fb711164216f2c0",
+	"golab_0.4.0_windows_386.tar.gz":   "25ecd7a02fa0d0c65db438cd4271152d92fb7e0f55063f7211d5cbcf936f6d07",
+	"golab_0.4.0_windows_386.zip":      "8c4889ef3035495a51ec0719d3bb391c9a46a7a98d7804ca0a53a2adfe04ffe9",
+	"golab_0.4.0_windows_amd64.tar.gz": "0dcd2beab1f822fe72bd46118aa1c51098ed956d2c38c75fe3c9af21ba692b92",
+	"golab_0.4.0_windows_amd64.zip":    "96dc0c9fab5797f02223233fdfe262bd4c3f612a1a9162fcfbb7cd9698e655f7",
+	"golab_0.4.0_windows_arm64.tar.gz": "be75d3dd552d2d614da63be650daee8b1b7896158c766924fadf390c2a1616c6",
+	"golab_0.4.0_windows_arm64.zip":    "0d33c3f5e781b6bb5552d4aca32b45e73126422675ebb3de002d2d22f436e03e",
 }
 
-// staleV020Hashes are the v0.2.0 digests that used to live in brew/scoop.
-// None of them may survive the v0.3.0 bump: reusing a v0.2.0 hash on a v0.3.0
-// URL would make every channel fail verification.
-var staleV020Hashes = []string{
-	"689c593a910ecd9bddbc855745af54fb3679cd46c122f276b38b9cc9e1f35c04",
-	"25f75b771b63dafddbf50876c53ff79cb4795b0d6ae73a4e0fbaf0598d4654c6",
-	"27d58b4f0317644050d03c0f161d4f4a8afa0abe1fa965224a74bd6de7eb746e",
-	"d974a79a9818edb14dbab192011078146bc9d26a1d2ec8265201db4dddfe1ed9",
-	"a75742ec1e03d55cc38687f68056bff4595d639e7571349aca2f675442046af5",
-	"83350bc3c1572b9e231706845220b1b5656ebb74e8e3fc444888a70e31e97b7c",
-	"38f874d57623179442b7f47b2860a5e3612ded2f0a6a5c27ce21c757858ec7b8",
+// staleV030Hashes are the v0.3.0 digests that used to live in brew/scoop.
+// None may survive the v0.4.0 bump.
+var staleV030Hashes = []string{
+	"7026201245238ce5f518438adee2407e04fd6ea454ebb65071237eb6e7a512c4",
+	"3a8c35b41206460bf66cd7c5b4e6f6da965dc17abf4bea174255d6ebf89f5e03",
+	"248d3099e7fb5b9ce13e24d32768b0aff1eaecc50b96f8e5e5037af3c2d76f88",
+	"a0f92813997fdad425bbf83b649aee78511278c4c587f1678d49d5245bc649de",
+	"5fdeaa7ecda7136cc333f96109917e8b957c5b2f7008cdf27ff88d4bfb30bb02",
+	"a279ad1a1356d3aa79fc0321132c21ff5872aeef33979e4fb54b39fae4f77703",
+	"547ab75039cff395e74a8f24458ee56c22e321f88c28714ff04d087dde6d0bf8",
 }
 
 // cosignStub writes a fake cosign that reports plainOut for `cosign version`
@@ -734,8 +731,8 @@ func mustAbsScript(t *testing.T) string {
 }
 
 // TestPackagingConfigsPinSignedRelease guards the package-channel configs:
-// brew/scoop/nfpm and winget must all pin the PUBLISHED signed v0.3.0 release.
-// Every download hash must equal publishedV030's value for its OWN asset name,
+// brew/scoop/nfpm and winget must all pin the PUBLISHED signed v0.4.0 release.
+// Every download hash must equal publishedV040's value for its OWN asset name,
 // so a right-hash/wrong-platform pairing cannot pass. nfpm packages a locally
 // built binary and therefore carries no release hash.
 func TestPackagingConfigsPinSignedRelease(t *testing.T) {
@@ -743,10 +740,10 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 
 	// Build the valid digest set and the winget zip digests from the fixture,
 	// never from the manifests under test.
-	valid := make(map[string]bool, len(publishedV030))
+	valid := make(map[string]bool, len(publishedV040))
 	tarOnly := make(map[string]bool)
 	publishedZips := make(map[string]string)
-	for asset, sum := range publishedV030 {
+	for asset, sum := range publishedV040 {
 		valid[sum] = true
 		if strings.HasSuffix(asset, ".zip") {
 			publishedZips[asset] = sum
@@ -778,9 +775,9 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 		if !strings.Contains(s, nextVersion) {
 			t.Errorf("packaging/%s is not pinned to version %s", name, nextVersion)
 		}
-		for _, stale := range staleV020Hashes {
+		for _, stale := range staleV030Hashes {
 			if strings.Contains(s, stale) {
-				t.Errorf("packaging/%s still has stale v0.2.0 hash %s", name, stale)
+				t.Errorf("packaging/%s still has stale v0.3.0 hash %s", name, stale)
 			}
 		}
 		if strings.Contains(s, "REPLACE_AT_RELEASE") {
@@ -803,15 +800,15 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 	if !strings.Contains(brew, "version '"+nextVersion+"'") {
 		t.Error("packaging/golab.rb version field is not pinned to " + nextVersion)
 	}
-	brewPair := regexp.MustCompile(`url '(https://[^']+/golab_0\.3\.0_([a-z0-9_]+)\.tar\.gz)'\s*\n\s*sha256 '([0-9a-fA-F]{64})'`)
+	brewPair := regexp.MustCompile(`url '(https://[^']+/golab_0\.4\.0_([a-z0-9_]+)\.tar\.gz)'\s*\n\s*sha256 '([0-9a-fA-F]{64})'`)
 	brewPairs := brewPair.FindAllStringSubmatch(brew, -1)
 	if len(brewPairs) != 4 {
 		t.Fatalf("brew has %d url/hash pairs, want 4: %v", len(brewPairs), brewPairs)
 	}
 	for _, pair := range brewPairs {
-		asset := "golab_0.3.0_" + pair[2] + ".tar.gz"
+		asset := "golab_0.4.0_" + pair[2] + ".tar.gz"
 		hash := strings.ToLower(pair[3])
-		want, ok := publishedV030[asset]
+		want, ok := publishedV040[asset]
 		if !ok {
 			t.Errorf("brew references unpublished asset %s", asset)
 			continue
@@ -826,15 +823,15 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 	if !strings.Contains(scoop, `"version": "`+nextVersion+`"`) {
 		t.Error("packaging/golab.json version field is not pinned to " + nextVersion)
 	}
-	scoopPair := regexp.MustCompile(`"url": "[^"]+/golab_0\.3\.0_(windows_[a-z0-9_]+)\.tar\.gz",\s*"hash": "([0-9a-fA-F]{64})"`)
+	scoopPair := regexp.MustCompile(`"url": "[^"]+/golab_0\.4\.0_(windows_[a-z0-9_]+)\.tar\.gz",\s*"hash": "([0-9a-fA-F]{64})"`)
 	scoopPairs := scoopPair.FindAllStringSubmatch(scoop, -1)
 	if len(scoopPairs) != 3 {
 		t.Fatalf("scoop has %d url/hash pairs, want 3: %v", len(scoopPairs), scoopPairs)
 	}
 	for _, pair := range scoopPairs {
-		asset := "golab_0.3.0_" + pair[1] + ".tar.gz"
+		asset := "golab_0.4.0_" + pair[1] + ".tar.gz"
 		hash := strings.ToLower(pair[2])
-		want, ok := publishedV030[asset]
+		want, ok := publishedV040[asset]
 		if !ok {
 			t.Errorf("scoop references unpublished asset %s", asset)
 			continue
@@ -880,7 +877,7 @@ func TestPackagingConfigsPinSignedRelease(t *testing.T) {
 		asset, hash := pair[1], strings.ToLower(pair[2])
 		want, ok := publishedZips[asset]
 		if !ok {
-			t.Errorf("winget asset %s is not a published v0.3.0 .zip", asset)
+			t.Errorf("winget asset %s is not a published v0.4.0 .zip", asset)
 			continue
 		}
 		if hash != want {

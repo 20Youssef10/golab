@@ -4,7 +4,7 @@
 # or repack any release archive, and it adds no new signature claim.
 # There is deliberately no checksum field here: nfpm cannot verify a
 # binary it builds itself, so pinning a release hash would be misleading.
-# Build that binary from the same annotated v0.3.0 tag whose archives are
+# Build that binary from the same annotated v0.4.0 tag whose archives are
 # cosign-signed; do not use a random HEAD build with a pinned version.
 #
 # BUMP CHECKLIST: publish the annotated v<version> tag, set "version" below to
@@ -25,7 +25,7 @@
 name: golab
 arch: ${GOARCH}
 platform: linux
-version: 0.3.0
+version: 0.4.0
 version_schema: semver
 release: "1"
 section: utils

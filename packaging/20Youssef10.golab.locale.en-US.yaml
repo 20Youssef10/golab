@@ -2,7 +2,7 @@
 # BUMP: keep PackageVersion in sync with the version/installer manifests;
 # see the resolved-blocker and bump notes in 20Youssef10.golab.installer.yaml.
 PackageIdentifier: 20Youssef10.golab
-PackageVersion: 0.3.0
+PackageVersion: 0.4.0
 PackageLocale: en-US
 Publisher: 20Youssef10
 PublisherUrl: https://github.com/20Youssef10
