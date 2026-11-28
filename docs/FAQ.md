@@ -8,7 +8,7 @@ No. It is an unofficial, community-written Go implementation of Google's Colab C
 
 ## Which version of the upstream CLI does it target?
 
-Upstream HEAD `0abf82d` — the `v0.8.0` tag plus five commits — analysed on 2026-11-23. That includes `stop --all`, `--public-api` / `--no-public-api`, `test-public-api`, the `ssh --force` equivalent and the Drive propagation fix. `golab version` prints `golab 0.3.0 (compatible with google-colab-cli 0.8.x+HEAD)`.
+Upstream HEAD `0abf82d` — the `v0.8.0` tag plus five commits — analysed on 2026-11-23. That includes `stop --all`, `--public-api` / `--no-public-api`, `test-public-api`, the `ssh --force` equivalent and the Drive propagation fix. `golab version` prints `golab 0.4.0 (compatible with google-colab-cli 0.8.x+HEAD)`.
 
 ## What OAuth scopes does `golab` request?
 

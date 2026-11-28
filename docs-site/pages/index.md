@@ -26,6 +26,6 @@ permalink: /
   paragraph is dated. For changes landed after it — the MCP server, Agent Skills, spend
   guards, VM inspection, detached-run watchdog and packaging configs — read the
   <a href="https://github.com/20Youssef10/golab/blob/main/CHANGELOG.md">CHANGELOG</a>
-  <code>[0.3.0]</code> section and
+  <code>[0.4.0]</code> section and
   <a href="{{ '/conformance/' | relative_url }}">the verification ledger</a> on this site.
 </p>

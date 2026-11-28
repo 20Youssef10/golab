@@ -22,7 +22,7 @@ permalink: /mcp/
 <h2>Setup, transports and packaging</h2>
 
 <p>
-  For the published v0.3.0 release, <code>golab-mcp</code> is built by GoReleaser and
+  For the current v0.4.0 release, <code>golab-mcp</code> is built by GoReleaser and
   ships in the same signed archives as <code>golab</code>, alongside both Agent
   Skills. It has no <code>update</code> subcommand: replace it with the next
   signed release archive.

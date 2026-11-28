@@ -12,20 +12,21 @@ This is a community port, not a Google product. “Google” and “Colab” are
 - **Safe to pipe.** Program output goes to stdout; every `[colab] …` status line goes to stderr. `golab exec < code.py`, `golab ssh -- CMD` and `--output json|ndjson` produce clean, byte-exact streams.
 - **Loud about failures.** Atomic state writes, corrupt-state aborts, explicit HTTP timeouts and typed errors instead of string matching.
 
-## Status (v0.3.0 published)
+## Status (v0.4.0)
 
-`v0.3.0` was published on 2026-11-27 (release run `46062649930`, 49 signed assets);
-the annotated tag points at `996af6d`. It adds the `golab-mcp` server (25 tools on `main` after the install/update additions; the published v0.3.0 binary has 22, stdio and streamable HTTP),
-two portable Agent Skills, the spend-safety and VM-inspection tiers, remote TTL
-enforcement, SSH host-key pinning, `compat refresh`, signed archives carrying both
-binaries plus the skills, Windows `.zip` repacks and a GHCR distroless image.
-The last published release is `v0.2.0` (release run `45489842618`: 13 archives with
-signatures and SBOMs); its full CI matrix was green, `golangci-lint` reported 0
-issues and `govulncheck` was clean. The tree has 664 test/fuzz functions in 103
-`_test.go` files across 25 packages (23 with tests), at 75.8% total statement
-coverage — above the CI floor of 70%, short of the 80% target (notably for
-`state`/`sshx`). A real signed self-update from `v0.1.9` → `v0.2.0` was verified
-and installed an executable binary.
+`v0.4.0` is the current release (2026-11-28). It builds on `v0.3.0`
+(published 2026-11-27, release run `46062649930`, 49 signed assets) and adds
+**named accounts with isolated sessions**, **browser-created session discovery**
+(`sessions --web`, `attach --all`/`--refresh`), a 25-tool `golab-mcp` server with
+agent/skills installation tools, self-bootstrapping installers, standalone
+signed `golab-mcp` archives, and fixes to `compat refresh` and installer cosign
+compatibility. Two portable Agent Skills, the spend-safety and VM-inspection
+tiers, remote TTL enforcement, SSH host-key pinning, Windows `.zip` repacks and a
+GHCR distroless image remain part of the distribution. CI, `golangci-lint` and
+`govulncheck` are green on the release commit; the full layered ledger is
+[docs/CONFORMANCE.md](docs/CONFORMANCE.md). A real signed self-update from
+`v0.2.0` → `v0.3.0` was verified in a live install; the v0.4.0 proof is recorded
+in [CHANGELOG.md](CHANGELOG.md).
 
 **Live proof, with its limits.** A billable CPU-VM live e2e has been run (recorded in [CHANGELOG.md](CHANGELOG.md) under v0.2.0): `new`, `status`, `ls`, `exec` (text/JSON/secrets), `run` (script and notebook), `ssh`, piped `repl`, upload/download, `install`, `restart-kernel`, `log`, `stop --verify` and `resume` error paths; the final `golab sessions` was empty. A second billable CPU pass on 2026-11-26/27 covered all six feature tiers, VM inspection, detached submission, `reap`, `cost` and cleanup (see `CHANGELOG.md` `[0.3.0]`). These are real end-to-end passes on one machine class — not certification of every platform, feature or failure mode.
 

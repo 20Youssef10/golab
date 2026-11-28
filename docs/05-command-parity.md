@@ -74,7 +74,7 @@ Auto-update background check runs for every command **except** `update version l
 | `url` | `-s`, `--host`, `--open` | doc 02 §5 URL; print; optionally open browser | | P0 |
 | `log` | `-s`, `-n/--lines N`, `-t/--type TYPE`, `-o/--output FILE` | view session history; `-o` suffix selects `.ipynb`, `.md`, `.txt`, `.jsonl` exporter | exporters in `history`; notebook export uses `nb` | P1 |
 | `pay` | – | open the Colab sign-up page (compute units) | | P2 |
-| `version` | – | print version | Δ `golab 0.3.0 (compatible with google-colab-cli 0.8.x+HEAD)` | P0 |
+| `version` | – | print version | Δ `golab 0.4.0 (compatible with google-colab-cli 0.8.x+HEAD)` | P0 |
 | `update` | `--install` | check latest; with `--install` upgrade | Δ GitHub Releases + signature verification; works on all OSes incl. Windows running-exe replace | P1 |
 | `whoami` *(hidden)* | – | print credentials identity, scopes, expiry (debug) | never prints tokens | P1 |
 | `readme` / `README` / `skill` / `SKILL` *(hidden)* | – | print bundled markdown | `go:embed`; **write our own SKILL.md** (do not copy upstream's drifted one) | P2 |

@@ -313,7 +313,7 @@ runs. "Closed" applies to the specific check named, not to the whole layer.
   release `build` job is `contents: read` only and `sign` alone holds
   `contents: write` + `id-token: write`; and packaging configs were added under
   `packaging/` (winget `.zip` blocker resolved in code for v0.3.0, but checksums
-  remain `REPLACE_AT_RELEASE` until the tag; none live-proven here). Both binaries
+  are pinned to the published v0.3.0 digests; none live-proven here). Both binaries
   and the skills now ship in archives; a distroless GHCR image is configured.
   New surfaces: `cmd/golab-mcp` (official `modelcontextprotocol/go-sdk`, 22
   `colab_*` tools with `confirm: true` gating, `golab://docs/skill` and

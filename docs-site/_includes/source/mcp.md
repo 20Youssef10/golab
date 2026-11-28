@@ -47,7 +47,7 @@ there is **no** legacy `/sse` endpoint. The implementation uses the official
 handshake and a legacy client requesting `2025-06-18`, confirming the same tool
 list.
 
-**Packaging:** as of the v0.3.0 release target, `.goreleaser.yaml` builds
+**Packaging:** as of the v0.4.0 release, `.goreleaser.yaml` builds
 `golab-mcp` alongside `golab` and ships both binaries plus the two Agent Skills
 in every signed archive. `install.sh` / `install.ps1` install both binaries and
 the skills (skip with `--no-skills` / `-NoSkills`); the GHCR image carries them

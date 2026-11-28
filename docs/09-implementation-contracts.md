@@ -25,7 +25,7 @@
 > It is intentionally short. The authoritative behaviour specs remain docs/01–08 and
 > the upstream Python source cloned at `/tmp/opencode/google-colab-cli` (HEAD).
 > Module path: `github.com/20Youssef10/golab`. Binary: `golab`. Go 1.27.4,
-> `CGO_ENABLED=0`. Current release target: `v0.3.0` (last published: `v0.2.0`).
+> `CGO_ENABLED=0`. Current release: `v0.4.0` (last published: `v0.3.0`).
 
 ## Ground rules for every package
 
@@ -65,10 +65,10 @@ func Redact(s string) string               // defensive free-form redaction pass
 
 ### `internal/version`
 ```go
-const Number = "0.3.0"
+const Number = "0.4.0"
 const Upstream = "0.8.x+HEAD"
-func String() string   // "golab 0.3.0 (compatible with google-colab-cli 0.8.x+HEAD)"
-func ClientAgent() string // "github.com/20Youssef10/golab/0.3.0" (single honest identity)
+func String() string   // "golab 0.4.0 (compatible with google-colab-cli 0.8.x+HEAD)"
+func ClientAgent() string // "github.com/20Youssef10/golab/0.4.0" (single honest identity)
 ```
 
 ### `internal/platform`

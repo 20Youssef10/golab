@@ -25,5 +25,5 @@ permalink: /conformance/
   The excerpt above is generated from <code>docs/CONFORMANCE.md</code>. The most recent
   live-probe results are recorded in the
   <a href="https://github.com/20Youssef10/golab/blob/main/CHANGELOG.md">CHANGELOG</a>
-  under <code>[0.3.0]</code>; read both together.
+  under <code>[0.4.0]</code>; read both together.
 </p>

@@ -5,10 +5,10 @@
 > It is built from these files: the site's excerpts are generated from canonical
 > `docs/*.md` prose, which remains the source of truth.
 
-> **Release target: v0.3.0 (2026-11-27; annotated tag pending).** The last
-> published release is v0.2.0 (2026-11-24). The dated notes at the top of docs
-> 01–04 and 07 were written for v0.1.0 (2026-11-23) and are not an up-to-date
-> account of v0.3.0; for that, read the `[0.3.0]` and `[Unreleased]` sections of
+> **Current release: v0.4.0 (2026-11-28).** The previous published release is
+> v0.3.0 (2026-11-27). The dated notes at the top
+> of docs 01–04 and 07 were written for v0.1.0 (2026-11-23) and are not an
+> up-to-date account of v0.4.0; for that, read the `[0.4.0]` section of
 > [CHANGELOG.md](../CHANGELOG.md) and [CONFORMANCE.md](CONFORMANCE.md). Where a
 > design doc and the code disagree, **the code wins** (AGENTS.md).
 
@@ -28,7 +28,7 @@ does one job and exits.
 against upstream HEAD `0abf82d` (v0.8.0 + 5 commits) on 2026-11-23.
 Module path: `github.com/20Youssef10/golab`; binary: `golab`; Go 1.27.4 with
 `CGO_ENABLED=0`. See [COMPAT.md](COMPAT.md) for the exact drift status and
-[CHANGELOG.md](../CHANGELOG.md) for what shipped in v0.3.0.
+[CHANGELOG.md](../CHANGELOG.md) for what shipped in v0.4.0.
 
 > ⚠️ **Proof status — read before trusting any "done" claim.** A billable CPU-VM
 > live e2e *has* been run for v0.2.0 (v0.2.0 Verification in
@@ -92,6 +92,6 @@ Companions: [CONFORMANCE.md](CONFORMANCE.md) (per-layer ledger, dated 2026-11-23
    upstream snapshot and the unresolved 🔴 wire/security probes.
 
 Reminder: docs/01–08 are design documents whose dated notes describe v0.1.0.
-For what actually shipped at v0.3.0, start with [CHANGELOG.md](../CHANGELOG.md)
+For what actually shipped at v0.4.0, start with [CHANGELOG.md](../CHANGELOG.md)
 and [README.md](../README.md), then [COMPAT.md](COMPAT.md) and
 [CONFORMANCE.md](CONFORMANCE.md).

@@ -49,7 +49,7 @@ golab/
 │   ├── repl/                      # interface + implementation
 │   ├── platform/                  # paths, termux/android detect, netfix, perms, browser, tty, signals
 │   ├── update/                    # version check, signed self-update (sigstore-go)
-│   ├── version/                   # Number = "0.3.0", Upstream = "0.8.x+HEAD", ClientAgent()
+│   ├── version/                   # Number = "0.4.0", Upstream = "0.8.x+HEAD", ClientAgent()
 │   ├── logx/                      # slog setup, redaction, rotation
 │   ├── doctor/ auditsec/ budget/ bundle/ agentout/   # Go-only commands
 │   └── testutil/                  # fakecolab, fakekernel, fakesshd
@@ -165,7 +165,7 @@ Compatibility promises: read/write `sessions.json` and `settings.json` with the 
 ### ADR-001 · Naming, module and Go version
 **Decision.** Repo/module `github.com/<owner>/colab-go`; binary **`colab`** (drop-in) with an install-time alias option `colab-go`. Latest stable Go at kickoff, pinned with a `toolchain` directive; CI also builds with the previous minor.
 **Why.** Agents/scripts call `colab` and shebangs resolve via `$PATH`. The names `colab-cli` are already taken on PyPI and crates.io, so avoid them as the *distribution* name.
-**Caveat.** If Python `colab` is also installed, PATH order decides who wins (upstream's `AGENTS.md` #8 describes exactly this trap); `golab version` prints the implementation (`golab 0.3.0 (compatible with google-colab-cli 0.8.x+HEAD)`). The original `colab-go …` text above is historical.
+**Caveat.** If Python `colab` is also installed, PATH order decides who wins (upstream's `AGENTS.md` #8 describes exactly this trap); `golab version` prints the implementation (`golab 0.4.0 (compatible with google-colab-cli 0.8.x+HEAD)`). The original `colab-go …` text above is historical.
 **Branding.** Unofficial. Must not imply Google endorsement ("Colab" is Google's mark).
 
 ### ADR-002 · Static builds, `CGO_ENABLED=0`, everywhere including Termux

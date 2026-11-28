@@ -27,26 +27,26 @@
 >   (archives + SHA-256 checksums + cosign signatures + signed SBOMs) via
 >   `.goreleaser.yaml` and `.github/workflows/release.yml`, plus
 >   `go install github.com/20Youssef10/golab/cmd/golab@latest`. Updated
->   2026-11-27 for the `v0.3.0` release target: GoReleaser builds **both**
->   `golab` and `golab-mcp`, and every archive carries both binaries plus the two
->   Agent Skills under `.agents/skills/`. Windows additionally gets three
->   `.zip` repacks (13 `.tar.gz` + 3 `.zip` = 16 signed archives). The root
->   `install.sh` and `install.ps1` installers verify the SHA-256 checksum and
->   cosign keyless signature, then install both binaries and the skills; they
->   accept `--no-skills` / `--skills-dir` and `-NoSkills` / `-SkillsDir`.
->   `install.sh --verify-only ARTIFACT BUNDLE CHECKSUMS` reuses that gate for
->   local/CI checks. `Dockerfile` plus `.github/workflows/docker.yml` push a
->   distroless nonroot image to `ghcr.io/20youssef10/golab` on `main` and `v*`
->   tags with provenance, SBOM and digest smoke tests. None of the install
->   paths has a published v0.3.0 tag or live install proof yet.
->   **Packaging configs were added under `packaging/`**: Homebrew formula
->   (`golab.rb`), Scoop manifest (`golab.json`), winget version/locale/installer
->   manifests and an nfpm config (`.deb`/`.rpm`/`.apk`). They remain **configs,
->   not live channels**: none is wired into release CI, and brew/scoop/nfpm are
->   **unverified on this host**. The winget `.zip` blocker is resolved in code
->   and the manifests point at v0.3.0, but every `InstallerSha256` is still
->   `REPLACE_AT_RELEASE` until the signed tag exists. AUR, Termux TUR and Nix
->   remain planned, not configured.
+>   Updated 2026-11-28 for the current `v0.4.0` release: GoReleaser builds
+>   **both** `golab` and `golab-mcp`, and every CLI archive carries both binaries
+>   plus one flat `golab-skills.tar.gz` member holding the two Agent Skills.
+>   Windows additionally gets three `.zip` repacks, and a second archive set
+>   publishes standalone `golab-mcp_<version>_<os>_<arch>` downloads with the
+>   same signed provenance. The root `install.sh` and `install.ps1` installers
+>   verify the SHA-256 checksum and cosign keyless signature (cosign >= v2.6.5),
+>   bootstrap missing dependencies instead of failing, then install both
+>   binaries and the skills; they accept `--no-skills` / `--skills-dir` and
+>   `-NoSkills` / `-SkillsDir`. `install.sh --verify-only ARTIFACT BUNDLE
+>   CHECKSUMS` reuses that gate for local/CI checks. `Dockerfile` plus
+>   `.github/workflows/docker.yml` push a distroless nonroot image to
+>   `ghcr.io/20youssef10/golab` on `main` and `v*` tags with provenance, SBOM and
+>   digest smoke tests.
+>   **Packaging manifests live under `packaging/`**: Homebrew (`golab.rb`),
+>   Scoop (`golab.json`), winget version/locale/installer manifests and nfpm
+>   (`.deb`/`.rpm`/`.apk`). Brew/Scoop/nfpm and winget are pinned to published
+>   signed digests, but no package-manager binary was available here — schema
+>   verification only, not live install proof. AUR, Termux TUR and Nix remain
+>   planned, not configured.
 
 ---
 
@@ -166,16 +166,16 @@ Optional later improvement: Tailscale's `androiddns` approach (query Android's `
 
 ## 7. Distribution channels
 
-| Channel | Platforms | Mechanism | Status (v0.3.0 published 2026-11-27; next-release items noted) |
+| Channel | Platforms | Mechanism | Status (current: v0.4.0; v0.3.0 remains published) |
 |---|---|---|---|
 | GitHub Releases (13 `.tar.gz` + 3 Windows `.zip`, checksums + cosign sigs + SBOM) | all | GoReleaser, both binaries + both skills in every archive | **v0.3.0 published** (49 assets, release run `46062649930`); direct-archive download + checksum + both binaries smoke-tested in a live Colab VM |
-| Standalone `golab-mcp_<version>_<os>_<arch>.tar.gz` (+ Windows `.zip`) | all | second GoReleaser archive set, signed and attested like the CLI archives | configured for the **next release**; v0.3.0 assets are immutable and do not contain it. `go install github.com/20Youssef10/golab/cmd/golab-mcp@v0.3.0` was verified live |
+| Standalone `golab-mcp_<version>_<os>_<arch>.tar.gz` (+ Windows `.zip`) | all | second GoReleaser archive set, signed and attested like the CLI archives | shipped in v0.4.0 with the same signatures and SBOMs; `go install github.com/20Youssef10/golab/cmd/golab-mcp@v0.3.0` was verified live |
 | `install.sh` (SHA-256 + cosign, installs both binaries and skills; `--verify-only`, `--no-skills`, `--skills-dir`) | Linux, macOS, Termux | curl installer | **live-verified in a Colab VM with cosign v2.6.5** (checksum + signature + both binaries + both skills). Requires cosign >= v2.6.5; older versions are rejected with an actionable error |
 | `install.ps1` (SHA-256 + cosign, installs both binaries and skills; `-NoSkills`, `-SkillsDir`) | Windows | PowerShell installer | config/schema verified; no Windows host available here for a live install |
 | GHCR image `ghcr.io/20youssef10/golab` | all with Docker | `Dockerfile` (distroless nonroot, both binaries + skills) + `.github/workflows/docker.yml` | GHCR publish workflow green; image pull smoke test not run on this host |
-| Homebrew tap | macOS, Linux | `packaging/golab.rb` formula | manifests pinned to the signed v0.3.0 archives; no brew binary here — schema only |
-| Scoop bucket | Windows | `packaging/golab.json` manifest | manifests pinned to the signed v0.3.0 archives; no scoop binary here — schema only |
-| winget | Windows | `packaging/20Youssef10.golab*.yaml` → PR to `winget-pkgs`, using the new `.zip` assets | `.zip` blocker resolved; manifests pin the three **real v0.3.0 zip hashes** from signed `checksums.txt`; `winget validate` still needs a Windows host |
+| Homebrew tap | macOS, Linux | `packaging/golab.rb` formula | manifests pinned to signed release archives; no brew binary here — schema only |
+| Scoop bucket | Windows | `packaging/golab.json` manifest | manifests pinned to signed release archives; no scoop binary here — schema only |
+| winget | Windows | `packaging/20Youssef10.golab*.yaml` → PR to `winget-pkgs`, using the new `.zip` assets | `.zip` blocker resolved; manifests pin real signed `.zip` hashes from `checksums.txt`; `winget validate` still needs a Windows host |
 | `.deb` / `.rpm` / `.apk` | Linux | `packaging/nfpm.yaml` | config added; unverified here, not CI-wired |
 | AUR `colab-go-bin` | Arch | PKGBUILD | planned |
 | Termux (`go install`, tarball, TUR) | Termux | see §3.3 | `go install` configured; TUR planned |
@@ -184,9 +184,8 @@ Optional later improvement: Tailscale's `androiddns` approach (query Android's `
 
 Rows marked "in tree", "config added" or "configured" describe repository
 contents, not verified live channels. No packaging config has been validated by a
-package-manager install on this host or in CI, and no v0.3.0 release tag has been
-pushed yet; the release-time checksum step for winget is mandatory before a
-`winget-pkgs` PR.
+package-manager install on this host or in CI; `winget validate` and a real
+`winget-pkgs` PR remain maintainer steps on a Windows host.
 
 ## 8. Build & CI matrix
 

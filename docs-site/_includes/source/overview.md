@@ -16,7 +16,7 @@ does one job and exits.
 against upstream HEAD `0abf82d` (v0.8.0 + 5 commits) on 2026-11-23.
 Module path: `github.com/20Youssef10/golab`; binary: `golab`; Go 1.27.4 with
 `CGO_ENABLED=0`. See [COMPAT.md](https://github.com/20Youssef10/golab/blob/main/docs/COMPAT.md) for the exact drift status and
-[CHANGELOG.md](https://github.com/20Youssef10/golab/blob/main/CHANGELOG.md) for what shipped in v0.3.0.
+[CHANGELOG.md](https://github.com/20Youssef10/golab/blob/main/CHANGELOG.md) for what shipped in v0.4.0.
 
 > ⚠️ **Proof status — read before trusting any "done" claim.** A billable CPU-VM
 > live e2e *has* been run for v0.2.0 (v0.2.0 Verification in
