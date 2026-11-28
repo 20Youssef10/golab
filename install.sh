@@ -47,13 +47,19 @@ COSIGN_CHECKSUMS_SHA256="4037b3c8d222e970cf0c030147471f44743626323cb0904820e5986
 # cosign-darwin-amd64       0f8a1a70c81de9740a2b62e91307ff396ce54e7dd80568d42411bb2d9d44269c
 # cosign-darwin-arm64       4d41cc18f0563907c0c785b51db76e1d1af10db4422b605ba876b1758e1771ab
 # cosign-windows-amd64.exe  19ec346d0050f59ffad9694da97ef9704be34ec60ddc41c5f1d16d8619385825
-declare -A COSIGN_PINNED_SHA256=(
-  [cosign-linux-amd64]="c3b4f5410e608af03a5eb0aaac84a4313d8da131248e08ff1759ac70c79d1644"
-  [cosign-linux-arm64]="426193b4c5da4d4d643e822f48fe0cc8a476ca1782a272704831f5a0cef716d7"
-  [cosign-linux-arm]="5eeda8f80117783b03dcbaa7f74d0aeb52bd42218fa509274a0bf4c030802331"
-  [cosign-darwin-amd64]="0f8a1a70c81de9740a2b62e91307ff396ce54e7dd80568d42411bb2d9d44269c"
-  [cosign-darwin-arm64]="4d41cc18f0563907c0c785b51db76e1d1af10db4422b605ba876b1758e1771ab"
-)
+# A case lookup, not `declare -A`: macOS still ships bash 3.2, where
+# `declare -A` is parsed as an indexed array and a string subscript is
+# evaluated arithmetically ("cosign: unbound variable" under `set -u`).
+cosign_pinned_sha256() {
+  case "$1" in
+    cosign-linux-amd64)  printf '%s' "c3b4f5410e608af03a5eb0aaac84a4313d8da131248e08ff1759ac70c79d1644" ;;
+    cosign-linux-arm64)  printf '%s' "426193b4c5da4d4d643e822f48fe0cc8a476ca1782a272704831f5a0cef716d7" ;;
+    cosign-linux-arm)    printf '%s' "5eeda8f80117783b03dcbaa7f74d0aeb52bd42218fa509274a0bf4c030802331" ;;
+    cosign-darwin-amd64) printf '%s' "0f8a1a70c81de9740a2b62e91307ff396ce54e7dd80568d42411bb2d9d44269c" ;;
+    cosign-darwin-arm64) printf '%s' "4d41cc18f0563907c0c785b51db76e1d1af10db4422b605ba876b1758e1771ab" ;;
+    *) return 1 ;;
+  esac
+}
 
 COSIGN_BIN=""
 COSIGN_FOUND=""
@@ -292,7 +298,7 @@ bootstrap_cosign() {
     die "cosign_checksums.txt digest mismatch: got $actual, want pinned $COSIGN_CHECKSUMS_SHA256"
   expected="$(awk -v n="$asset" '$2 == n { print $1; exit }' "$tmp/cosign_checksums.txt")"
   [[ -n "$expected" ]] || die "no checksum entry for $asset in cosign checksums.txt"
-  pinned="${COSIGN_PINNED_SHA256[$asset]:-}"
+  pinned="$(cosign_pinned_sha256 "$asset" || true)"
   [[ -n "$pinned" ]] || die "no pinned cosign digest for $asset"
   [[ "$expected" == "$pinned" ]] || \
     die "published cosign checksum changed for $asset: $expected != pinned $pinned"

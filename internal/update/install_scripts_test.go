@@ -148,28 +148,6 @@ func minimalBinDir(t *testing.T, tools ...string) string {
 	return dir
 }
 
-// writeTarGz builds a small tar.gz fixture with the named regular-file
-// members. Content is deterministic test data, never a release artifact.
-func writeTarGz(t *testing.T, path string, members map[string]string) {
-	t.Helper()
-	dir := t.TempDir()
-	args := []string{"-czf", path}
-	for name, content := range members {
-		full := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		args = append(args, "-C", dir, name)
-	}
-	cmd := exec.Command("tar", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("tar fixture: %v (%s)", err, out)
-	}
-}
-
 func TestInstallScriptVerificationGate(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -418,7 +396,7 @@ func TestInstallScriptBootstrapPolicy(t *testing.T) {
 		"unsafe archive member type", "issym()", "islnk()",
 		// cosign bootstrap: pinned release, checksums.txt verified twice
 		"COSIGN_VERSION=\"v" + cosignBootstrapVersion + "\"",
-		"cosign_checksums.txt", "COSIGN_CHECKSUMS_SHA256", "COSIGN_PINNED_SHA256",
+		"cosign_checksums.txt", "COSIGN_CHECKSUMS_SHA256", "cosign_pinned_sha256",
 		"cosign_checksums.txt digest mismatch", "cosign bootstrap checksum mismatch",
 		"cosign_asset_for", "bootstrap_cosign", "no pinned cosign",
 		// CLI contract unchanged
@@ -711,7 +689,7 @@ exit 0
 	snippet := `source "$GOLAB_INSTALL_SCRIPT"
 http_get() { cp "$FIXTURES/$(basename "$1")" "$2"; }
 COSIGN_CHECKSUMS_SHA256="$(sha256sum "$FIXTURES/cosign_checksums.txt" | awk '{print $1}')"
-declare -A COSIGN_PINNED_SHA256=( [cosign-linux-amd64]="$PAYLOAD_DIGEST" )
+cosign_pinned_sha256() { [ "$1" = cosign-linux-amd64 ] && printf '%s' "$PAYLOAD_DIGEST"; }
 os=linux; arch=amd64
 bootstrap_cosign "$BOOT"
 "$COSIGN_BIN" version --output json
