@@ -1,4 +1,4 @@
-# Generated from `golab help` on 2026-11-27 (54 top-level commands).
+# Generated from `golab help` on 2026-11-28 (55 top-level commands).
 # Regenerate with: golab help | (see docs-site/README.md)
 commands:
   - group: Session lifecycle
@@ -83,6 +83,8 @@ commands:
         summary: "Install python packages on the VM"
   - group: Account & info
     items:
+      - name: account
+        summary: "Manage named accounts and their isolated sessions (add, list, show, use, remove)"
       - name: completion
         summary: "Generate shell completion scripts"
       - name: cost

@@ -10,7 +10,7 @@ This directory is the source of the published site at
 |---|---|
 | `_config.yml` | Site identity, `baseurl: /golab`, Markdown/highlighting options. |
 | `_data/nav.yml` | The hierarchical sidebar — groups, titles and page URLs. |
-| `_data/commands.yml` | 54 top-level commands, generated from `golab help`. |
+| `_data/commands.yml` | 55 top-level commands, generated from `golab help`. |
 | `_data/mcp-tools.yml` | 25 allow-listed MCP tools, generated from `internal/mcpserver/tools.go`. |
 | `_layouts/default.html` | One shell for every page: header, sidebar, breadcrumbs, article, footer. |
 | `_includes/` | Header, sidebar, search, breadcrumbs, footer, inline SVG diagrams. |
