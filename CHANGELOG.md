@@ -8,70 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Breaking changes are defined as changes to the CLI surface, flag semantics,
 on-disk schema or persisted token format (per AGENTS.md).
 
-## [0.3.0] - 2026-11-27
-
-Release summary for the `v0.3.0` tag. The last published release is `v0.2.0`;
-the individual fix entries that landed on `main` before the tag remain in
-`[Unreleased]` below.
-
-### Added
-
-- **MCP server** (`cmd/golab-mcp`): a second static binary built on the official
-  `modelcontextprotocol/go-sdk`, exposing 22 allow-listed `colab_*` tools (15
-  read-only, 7 requiring `confirm: true`), stdio and streamable HTTP at `/mcp`
-  (also `/`, no `/sse`), `golab://docs/skill` and `golab://docs/usage` resources,
-  CLI redaction, and legacy `2025-06-18` negotiation tests.
-- **Portable Agent Skills** at `.agents/skills/golab-operations` and
-  `.agents/skills/colab-mcp`, both validated with the `agentskills` CLI.
-- **Spend safety (Tier 1):** `reap`, `new --ttl` / `--ttl-action`,
-  `--wait-capacity`, `cost`, `run --max-cu [--enforce]` and named budget profiles.
-  CU reporting is account-level and carries no prices.
-- **VM inspection (Tier 2):** `ps` (`top`), `cat`, `tail`, `grep`, `du`, `find`
-  and `fetch [--sha256]` via server-side polling; `tail -f` is not byte-perfect
-  across log rotation.
-- **Detached runs (Tier 3, ADR-001):** `run --detach --ttl`, `jobs`,
-  `logs ID [-f]`, `wait` and `sync --watch`; `--ttl` is enforced by a remote
-  5-second watchdog (`exit=124` / `ttl-reason=ttl_exceeded`), and `--detach`
-  with an explicit `--max-cu` / `--enforce` is rejected before allocation.
-- **SSH host-key pinning** with `ssh --accept-host-key SHA256:…` (TOFU; a
-  mismatch exits before allocation) and **`compat refresh [--out] [--ref]`**,
-  which writes a provenance-tagged, explicitly partial snapshot.
-- **Distribution:** `.goreleaser.yaml` builds both binaries and ships both plus
-  `.agents/skills/` in every archive — 13 `.tar.gz` plus 3 Windows `.zip`
-  repacks, all with checksums, cosign signatures and SBOM attestations.
-  `install.sh` / `install.ps1` install both binaries and the skills
-  (`--no-skills` / `--skills-dir`, `-NoSkills` / `-SkillsDir`); `Dockerfile`
-  and `.github/workflows/docker.yml` publish a distroless nonroot image to
-  `ghcr.io/20youssef10/golab` on `main` and `v*` tags with provenance, SBOM and
-  digest smoke tests. Winget manifests point at the v0.3.0 `.zip` assets, but
-  their `InstallerSha256` values remain `REPLACE_AT_RELEASE` until the tag
-  exists.
-
-### Fixed
-
-- Follow-up fixes from the spend-safety, protocol and response-integrity audits:
-  compensating unassign after a failed session write, honest `stop --all`
-  counts, pre-allocation script reads, a guard on `ssh` auto-create, a
-  fail-closed CU guard, `logout` exit status, a cross-process cost-ledger flock,
-  pinned OAuth token endpoint/client ID, strict `golab.yaml` parsing, URL-escaped
-  kernel IDs, bounded responses, resume journal continuity, one interrupt on
-  socket loss, and redacted typed prompt replies.
-- Silent-false-success fixes (notebook saves, execution records, upload size
-  checks), stderr diagnostics in `logout` / `update`, valid markdown fences,
-  and portable security tests.
-
-### Verification
-
-- Billable CPU e2e on 2026-11-26/27 covered all six tiers, including VM
-  inspection, detached submission, `reap`, `cost`, config/doctor/trace/compat
-  and the sweeper; two Tier 2 path/decoding defects were fixed and re-verified.
-  OAuth re-consent, Drive approval, interactive TTY, real devices, the GCP
-  quota project and >75 MiB uploads remain human-only.
-- `go vet ./...`, `go test -race -count=1 ./...`, `golangci-lint` (0 issues),
-  `govulncheck`, `go mod verify`, redaction/path gates and goleak/coverage gates
-  are green on `main`; `docs/CONFORMANCE.md` is the layered ledger.
-
-## [Unreleased]
+## [0.4.0] - 2026-11-28
 
 ### Added
 
@@ -381,6 +318,72 @@ signed release archive or self-update proof exists for it.
   VM remains allocated and billable until `golab stop`, and a watchdog cannot
   survive VM reclamation. [ADR-001](docs/adr-001-detached-runs.md) is amended;
   see [MIGRATION.md](docs/MIGRATION.md#new-ergonomics-and-spend-semantics).
+
+
+## [0.3.0] - 2026-11-27
+
+Release summary for the `v0.3.0` tag. The last published release is `v0.2.0`;
+the individual fix entries that landed on `main` before the tag remain in
+`[Unreleased]` below.
+
+### Added
+
+- **MCP server** (`cmd/golab-mcp`): a second static binary built on the official
+  `modelcontextprotocol/go-sdk`, exposing 22 allow-listed `colab_*` tools (15
+  read-only, 7 requiring `confirm: true`), stdio and streamable HTTP at `/mcp`
+  (also `/`, no `/sse`), `golab://docs/skill` and `golab://docs/usage` resources,
+  CLI redaction, and legacy `2025-06-18` negotiation tests.
+- **Portable Agent Skills** at `.agents/skills/golab-operations` and
+  `.agents/skills/colab-mcp`, both validated with the `agentskills` CLI.
+- **Spend safety (Tier 1):** `reap`, `new --ttl` / `--ttl-action`,
+  `--wait-capacity`, `cost`, `run --max-cu [--enforce]` and named budget profiles.
+  CU reporting is account-level and carries no prices.
+- **VM inspection (Tier 2):** `ps` (`top`), `cat`, `tail`, `grep`, `du`, `find`
+  and `fetch [--sha256]` via server-side polling; `tail -f` is not byte-perfect
+  across log rotation.
+- **Detached runs (Tier 3, ADR-001):** `run --detach --ttl`, `jobs`,
+  `logs ID [-f]`, `wait` and `sync --watch`; `--ttl` is enforced by a remote
+  5-second watchdog (`exit=124` / `ttl-reason=ttl_exceeded`), and `--detach`
+  with an explicit `--max-cu` / `--enforce` is rejected before allocation.
+- **SSH host-key pinning** with `ssh --accept-host-key SHA256:…` (TOFU; a
+  mismatch exits before allocation) and **`compat refresh [--out] [--ref]`**,
+  which writes a provenance-tagged, explicitly partial snapshot.
+- **Distribution:** `.goreleaser.yaml` builds both binaries and ships both plus
+  `.agents/skills/` in every archive — 13 `.tar.gz` plus 3 Windows `.zip`
+  repacks, all with checksums, cosign signatures and SBOM attestations.
+  `install.sh` / `install.ps1` install both binaries and the skills
+  (`--no-skills` / `--skills-dir`, `-NoSkills` / `-SkillsDir`); `Dockerfile`
+  and `.github/workflows/docker.yml` publish a distroless nonroot image to
+  `ghcr.io/20youssef10/golab` on `main` and `v*` tags with provenance, SBOM and
+  digest smoke tests. Winget manifests point at the v0.3.0 `.zip` assets, but
+  their `InstallerSha256` values remain `REPLACE_AT_RELEASE` until the tag
+  exists.
+
+### Fixed
+
+- Follow-up fixes from the spend-safety, protocol and response-integrity audits:
+  compensating unassign after a failed session write, honest `stop --all`
+  counts, pre-allocation script reads, a guard on `ssh` auto-create, a
+  fail-closed CU guard, `logout` exit status, a cross-process cost-ledger flock,
+  pinned OAuth token endpoint/client ID, strict `golab.yaml` parsing, URL-escaped
+  kernel IDs, bounded responses, resume journal continuity, one interrupt on
+  socket loss, and redacted typed prompt replies.
+- Silent-false-success fixes (notebook saves, execution records, upload size
+  checks), stderr diagnostics in `logout` / `update`, valid markdown fences,
+  and portable security tests.
+
+### Verification
+
+- Billable CPU e2e on 2026-11-26/27 covered all six tiers, including VM
+  inspection, detached submission, `reap`, `cost`, config/doctor/trace/compat
+  and the sweeper; two Tier 2 path/decoding defects were fixed and re-verified.
+  OAuth re-consent, Drive approval, interactive TTY, real devices, the GCP
+  quota project and >75 MiB uploads remain human-only.
+- `go vet ./...`, `go test -race -count=1 ./...`, `golangci-lint` (0 issues),
+  `govulncheck`, `go mod verify`, redaction/path gates and goleak/coverage gates
+  are green on `main`; `docs/CONFORMANCE.md` is the layered ledger.
+
+## [Unreleased]
 
 ## [0.2.0] - 2026-11-24
 

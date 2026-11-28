@@ -4,7 +4,7 @@ package version
 import "fmt"
 
 // Number is the semantic version of this build.
-const Number = "0.3.0"
+const Number = "0.4.0"
 
 // Upstream is the google-colab-cli release line this build targets. It is
 // deliberately a compatibility range ("0.8.x" plus untagged HEAD), not a
