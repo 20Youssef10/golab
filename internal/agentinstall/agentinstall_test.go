@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -14,6 +15,18 @@ import (
 // first (RED) against the API below, then the package is implemented to GREEN.
 
 func boolPtr(v bool) *bool { return &v }
+
+// absBin mirrors production's absoluteBin for test expectations: on POSIX the
+// literal path is already absolute, but on Windows filepath.Abs attaches the
+// current drive (e.g. /opt/golab-mcp -> D:\opt\golab-mcp).
+func absBin(t *testing.T, bin string) string {
+	t.Helper()
+	abs, err := filepath.Abs(bin)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", bin, err)
+	}
+	return abs
+}
 
 func newTestInstaller(t *testing.T) (*Installer, string, string, *int) {
 	t.Helper()
@@ -76,6 +89,7 @@ func mcpPath(home, project, agent string) string {
 func TestInstallMCPAllAgentsAuto(t *testing.T) {
 	i, home, project, syncCalls := newTestInstaller(t)
 	const bin = "/opt/golab-mcp"
+	wantBin := absBin(t, bin)
 
 	res, err := i.InstallMCP(MCPRequest{
 		Agents:    []string{"all"},
@@ -106,7 +120,7 @@ func TestInstallMCPAllAgentsAuto(t *testing.T) {
 		t.Errorf("opencode type = %v", oc["type"])
 	}
 	cmd, ok := oc["command"].([]any)
-	if !ok || len(cmd) != 1 || cmd[0] != bin {
+	if !ok || len(cmd) != 1 || cmd[0] != wantBin {
 		t.Errorf("opencode command = %v", oc["command"])
 	}
 	if env, ok := oc["environment"].(map[string]any); !ok || len(env) != 0 {
@@ -124,7 +138,7 @@ func TestInstallMCPAllAgentsAuto(t *testing.T) {
 		default:
 			entry = nested(t, m, "mcpServers", "golab")
 		}
-		if entry["command"] != bin {
+		if entry["command"] != wantBin {
 			t.Errorf("%s command = %v", agent, entry["command"])
 		}
 		args, _ := entry["args"].([]any)
@@ -142,7 +156,7 @@ func TestInstallMCPAllAgentsAuto(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(toml)
-	for _, want := range []string{"[mcp_servers.golab]", `command = "/opt/golab-mcp"`, `"--transport", "stdio"`, "env = {}"} {
+	for _, want := range []string{"[mcp_servers.golab]", "command = " + tomlQuote(wantBin), `"--transport", "stdio"`, "env = {}"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("codex config missing %q:\n%s", want, s)
 		}
@@ -153,9 +167,10 @@ func TestInstallMCPAllAgentsAuto(t *testing.T) {
 // both the JSON args arrays and the opencode command array.
 func TestInstallMCPTransportAwareArgs(t *testing.T) {
 	i, home, project, _ := newTestInstaller(t)
+	const bin = "/bin/golab-mcp"
 	_, err := i.InstallMCP(MCPRequest{
 		Agents:    []string{"opencode", "claude-code"},
-		GolabBin:  "/bin/golab-mcp",
+		GolabBin:  bin,
 		Transport: "http",
 		Addr:      "127.0.0.1:9090",
 		Mode:      "auto",
@@ -166,7 +181,7 @@ func TestInstallMCPTransportAwareArgs(t *testing.T) {
 	}
 	oc := nested(t, readMap(t, mcpPath(home, project, "opencode")), "mcp", "servers", "golab")
 	cmd, _ := oc["command"].([]any)
-	want := []any{"/bin/golab-mcp", "--transport", "http", "--addr", "127.0.0.1:9090"}
+	want := []any{absBin(t, bin), "--transport", "http", "--addr", "127.0.0.1:9090"}
 	if len(cmd) != len(want) {
 		t.Fatalf("opencode command = %v, want %v", cmd, want)
 	}
@@ -264,8 +279,11 @@ func TestInstallMCPNoClobberAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o640 {
-		t.Errorf("mode = %o, want 640", got)
+	// Windows does not honor/report os.Chmod permission bits (it reports 666).
+	if runtime.GOOS != "windows" {
+		if got := info.Mode().Perm(); got != 0o640 {
+			t.Errorf("mode = %o, want 640", got)
+		}
 	}
 	entries, err := os.ReadDir(filepath.Dir(ccPath))
 	if err != nil {

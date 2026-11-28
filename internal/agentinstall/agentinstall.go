@@ -476,7 +476,7 @@ func mergeTOMLSection(raw []byte, section string, kv []string) []byte {
 // .bak of the previous good file, preserves its mode and renames into place.
 func atomicWrite(p string, data []byte, dirSync func(string) error) (backup string, err error) {
 	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}
 	mode := os.FileMode(0o600)
@@ -638,7 +638,7 @@ func (i *Installer) copySkills(base string) error {
 			}
 			dest := filepath.Join(base, filepath.FromSlash(p))
 			if d.IsDir() {
-				return os.MkdirAll(dest, 0o755)
+				return os.MkdirAll(dest, 0o750)
 			}
 			data, err := fs.ReadFile(i.Skills, p)
 			if err != nil {
