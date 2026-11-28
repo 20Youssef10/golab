@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Install & distribution
-lede: "The v0.3.0 release target ships both binaries and both skills in signed archives, plus a GHCR image. Channel status is stated per row."
+lede: "v0.3.0 is published with both binaries and both skills in signed archives, plus a GHCR image. Channel status is stated per row."
 source_file: docs/04-platform-matrix.md
 source_section: "7. Distribution channels"
 permalink: /distribution/
@@ -18,16 +18,21 @@ permalink: /distribution/
 <h2>Release archives and install scripts</h2>
 
 <p>
-  For the <code>v0.3.0</code> release target, <code>.goreleaser.yaml</code> builds
-  <code>golab</code> <em>and</em> <code>golab-mcp</code>, and every archive carries
-  both binaries plus the two Agent Skills under <code>.agents/skills/</code>.
-  There are 13 <code>.tar.gz</code> archives (the updater's input) and 3 Windows
-  <code>.zip</code> repacks built from the same binaries — 16 assets, each with a
-  checksum entry, a cosign signature bundle and an SBOM attestation.
-  <code>install.sh</code> and <code>install.ps1</code> still verify checksum and
-  cosign signature first, then install both binaries and the skills. Skip skills
-  with <code>--no-skills</code> / <code>-NoSkills</code>, or relocate them with
+  The published <code>v0.3.0</code> release has 13 <code>.tar.gz</code> archives
+  (the updater's input), 3 Windows <code>.zip</code> repacks from the same
+  binaries, and 30 signature/SBOM sidecars — 49 assets in total. Every archive
+  carries both <code>golab</code> and <code>golab-mcp</code> plus one flat
+  <code>golab-skills.tar.gz</code> member holding the two Agent Skills; the flat
+  layout keeps signed self-update compatible with the older v0.2.0 verifier.
+  <code>install.sh</code> and <code>install.ps1</code> verify checksum and cosign
+  signature first, then install both binaries and the skills. Skip skills with
+  <code>--no-skills</code> / <code>-NoSkills</code>, or relocate them with
   <code>--skills-dir PATH</code> / <code>-SkillsDir PATH</code>.
+  <strong>cosign v2.6.5 or newer is required</strong>: releases use
+  <code>--new-bundle-format</code> (sigstore v0.3 protobuf), which older cosign
+  cannot verify. The installers now reject older versions with an actionable
+  error. A second archive set for a standalone <code>golab-mcp</code> download is
+  configured for the next release.
 </p>
 
 <h2>Docker / GHCR</h2>
@@ -56,16 +61,14 @@ docker run --rm --entrypoint /golab-mcp ghcr.io/20youssef10/golab --help
 <h2>Still not live / release-time steps</h2>
 
 <p>
-  Homebrew, Scoop and nfpm remain configs: they are neither wired into release CI
-  nor live-verified on a package-manager install. The winget <code>.zip</code> blocker is
-  resolved in code and the manifests point at v0.3.0, but each
-  <code>InstallerSha256</code> is still <code>REPLACE_AT_RELEASE</code>: a
-  maintainer must copy the three Windows <code>.zip</code> digests from the signed
-  v0.3.0 <code>checksums.txt</code> into the manifest before a
-  <code>winget-pkgs</code> PR. AUR, Termux TUR and Nix remain plans. The Docker
-  workflow and install scripts are configured in code, but no <code>v0.3.0</code>
-  tag has been pushed yet, so treat these as configured paths rather than
-  release-day proof.
+  Homebrew, Scoop and nfpm are pinned to the published signed v0.3.0 archives
+  with real <code>checksums.txt</code> digests; no package-manager binary was
+  available here, so those channels are schema-verified only. The winget
+  <code>.zip</code> blocker is resolved and the manifests carry the three real
+  v0.3.0 <code>.zip</code> hashes — a maintainer still needs
+  <code>winget validate</code> on a Windows host before opening the
+  <code>winget-pkgs</code> PR. AUR, Termux TUR and Nix remain plans. The GHCR
+  workflow is green; image pull was not exercised on this host.
 </p>
 
 {% capture artifacts %}{% include source/release-artifacts.md %}{% endcapture %}

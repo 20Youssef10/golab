@@ -6,6 +6,8 @@
       url: /
     - title: Quickstart
       url: /quickstart/
+    - title: Accounts & Web UI sessions
+      url: /accounts/
     - title: Commands map (54)
       url: /commands/
     - title: FAQ
@@ -26,7 +28,7 @@
   items:
     - title: Two planes, two credentials
       url: /architecture/
-    - title: MCP server (22 tools)
+    - title: MCP server (25 tools)
       url: /mcp/
     - title: Agent Skills
       url: /skills/

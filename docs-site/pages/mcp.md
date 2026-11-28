@@ -1,6 +1,6 @@
 ---
 layout: default
-title: MCP server (22 tools)
+title: MCP server (25 tools)
 lede: "A separate <code>golab-mcp</code> binary exposes the CLI to agents over stdio or streamable HTTP, with an explicit confirmation gate on every mutating call."
 source_file: docs/USAGE.md
 source_section: "12. MCP server"
@@ -22,7 +22,7 @@ permalink: /mcp/
 <h2>Setup, transports and packaging</h2>
 
 <p>
-  For the v0.3.0 release target, <code>golab-mcp</code> is built by GoReleaser and
+  For the published v0.3.0 release, <code>golab-mcp</code> is built by GoReleaser and
   ships in the same signed archives as <code>golab</code>, alongside both Agent
   Skills. It has no <code>update</code> subcommand: replace it with the next
   signed release archive.

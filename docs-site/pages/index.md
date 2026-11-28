@@ -9,7 +9,7 @@ permalink: /
 
 <div class="card-grid">
   <a class="card" href="{{ '/quickstart/' | relative_url }}"><strong>Quickstart</strong><span>Allocate a VM, run code, stop it.</span></a>
-  <a class="card" href="{{ '/commands/' | relative_url }}"><strong>Commands map</strong><span>All 54 top-level commands by area.</span></a>
+  <a class="card" href="{{ '/commands/' | relative_url }}"><strong>Commands map</strong><span>All top-level commands by area.</span></a>
   <a class="card" href="{{ '/architecture/' | relative_url }}"><strong>Architecture</strong><span>Two planes, two credentials, no daemon.</span></a>
   <a class="card" href="{{ '/conformance/' | relative_url }}"><strong>Verification</strong><span>What is proven, faked, or human-only.</span></a>
 </div>

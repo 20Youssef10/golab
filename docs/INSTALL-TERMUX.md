@@ -10,7 +10,7 @@
 
 - Termux with `$PREFIX` set (install from F-Droid or the official GitHub builds; the Play Store package is outdated).
 - `curl` (or `wget`), `tar` and `sha256sum` — all from Termux `coreutils`/`curl` packages.
-- Optional: `cosign` v2 available on your device, to check the keyless signature and SBOM yourself (install it by your preferred method; availability in Termux packages is not checked here).
+- Optional: `cosign` **v2.6.5 or newer** available on your device, to check the keyless signature and SBOM yourself (install it by your preferred method; availability in Termux packages is not checked here). Releases use `--new-bundle-format`; older cosign versions report a misleading "bundle does not contain cert" error.
 - No root. Everything is installed under `$PREFIX/bin` and `$HOME/.config/colab-cli`.
 
 ```bash
