@@ -9,6 +9,7 @@ package update
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +24,30 @@ import (
 // manifest pins. It carries the 13 CLI .tar.gz archives, the 3 winget .zip
 // repacks, and the standalone golab-mcp archives, all signed at the same tag.
 const nextVersion = "0.3.0"
+
+// cosignBootstrapVersion is the pinned verifier release. Both installers must
+// bootstrap exactly this version when the local cosign is missing or too old:
+// v0.3 sigstore bundles use --new-bundle-format, which older clients misreport
+// as a bad signature.
+const cosignBootstrapVersion = "2.6.5"
+
+// cosignPublishedV265 is an independent transcription of the SIGNED static
+// binaries in https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign_checksums.txt
+// (SHA-256 of that file:
+// 4037b3c8d222e970cf0c030147471f44743626323cb0904820e59869e03968ef).
+// The linux-amd64 value was additionally verified by downloading the published
+// binary and hashing the bytes. Never fabricate these: a wrong pin would make
+// bootstrap install an unverified verifier.
+var cosignPublishedV265 = map[string]string{
+	"cosign-linux-amd64":       "c3b4f5410e608af03a5eb0aaac84a4313d8da131248e08ff1759ac70c79d1644",
+	"cosign-linux-arm64":       "426193b4c5da4d4d643e822f48fe0cc8a476ca1782a272704831f5a0cef716d7",
+	"cosign-linux-arm":         "5eeda8f80117783b03dcbaa7f74d0aeb52bd42218fa509274a0bf4c030802331",
+	"cosign-darwin-amd64":      "0f8a1a70c81de9740a2b62e91307ff396ce54e7dd80568d42411bb2d9d44269c",
+	"cosign-darwin-arm64":      "4d41cc18f0563907c0c785b51db76e1d1af10db4422b605ba876b1758e1771ab",
+	"cosign-windows-amd64.exe": "19ec346d0050f59ffad9694da97ef9704be34ec60ddc41c5f1d16d8619385825",
+}
+
+const cosignChecksumsDigest = "4037b3c8d222e970cf0c030147471f44743626323cb0904820e59869e03968ef"
 
 // publishedV030 is an independent transcription of the SIGNED v0.3.0
 // checksums.txt (all 16 lines: 13 tar.gz + 3 windows zip), downloaded from
@@ -80,6 +105,71 @@ exit %d
 	}
 }
 
+// sourceInstallScript runs a bash snippet with install.sh sourced, so the
+// capability resolver functions can be exercised directly. pathEnv is the
+// script's entire PATH (a minimal dir for fallback tests, or a dir prepended
+// to the host PATH); the installer's main is guarded by BASH_SOURCE so sourcing
+// it never starts an install.
+func sourceInstallScript(t *testing.T, pathEnv, snippet string) (string, error) {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	script, err := filepath.Abs(filepath.Join("..", "..", "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bash, "-c", snippet)
+	cmd.Env = append(os.Environ(),
+		"PATH="+pathEnv,
+		"GOLAB_INSTALL_SCRIPT="+script,
+	)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// minimalBinDir builds a PATH with only the named tools. Hiding curl, tar,
+// sha256sum, mktemp and cosign exercises the fallback chains rather than the
+// host's preferred implementations.
+func minimalBinDir(t *testing.T, tools ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	// Fake tools use #!/usr/bin/env bash, so every stripped PATH needs these.
+	for _, tool := range append([]string{"bash", "env"}, tools...) {
+		src, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("tool %q unavailable for stripped-PATH test", tool)
+		}
+		if err := os.Symlink(src, filepath.Join(dir, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// writeTarGz builds a small tar.gz fixture with the named regular-file
+// members. Content is deterministic test data, never a release artifact.
+func writeTarGz(t *testing.T, path string, members map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	args := []string{"-czf", path}
+	for name, content := range members {
+		full := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, "-C", dir, name)
+	}
+	cmd := exec.Command("tar", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("tar fixture: %v (%s)", err, out)
+	}
+}
+
 func TestInstallScriptVerificationGate(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -97,8 +187,8 @@ func TestInstallScriptVerificationGate(t *testing.T) {
 	}
 	s := string(raw)
 	for _, needle := range []string{
-		"cosign verify-blob", "--certificate-identity-regexp", "--certificate-oidc-issuer",
-		"sha256sum", "checksums.txt", "20Youssef10/golab", "--verify-only",
+		`"$COSIGN_BIN" verify-blob`, "--certificate-identity-regexp", "--certificate-oidc-issuer",
+		"sha256_file", "checksums.txt", "20Youssef10/golab", "--verify-only",
 		// Both binaries and the flat skills bundle ship in the signed archive.
 		"golab-mcp", "--no-skills", "--skills-dir", "XDG_DATA_HOME",
 		"golab-skills.tar.gz", "golab-operations", "colab-mcp",
@@ -188,40 +278,25 @@ func TestInstallScriptVerificationGate(t *testing.T) {
 // before verification with an upgrade hint, accept v2.6.5, compare numerically
 // (2.10.0 > 2.6.5), and read both `GitVersion:` and JSON output forms.
 func TestInstallScriptCosignMinimumVersion(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil {
+	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash unavailable")
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("install.sh --verify-only requires a Unix shell")
 	}
-	script := filepath.Join("..", "..", "install.sh")
-
-	dir := t.TempDir()
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	artifact := filepath.Join(dir, "golab_1.2.3_linux_amd64.tar.gz")
-	artifactBytes := []byte("fake release archive")
-	if err := os.WriteFile(artifact, artifactBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(artifactBytes)
-	checksums := filepath.Join(dir, "checksums.txt")
-	if err := os.WriteFile(checksums,
-		[]byte(fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), filepath.Base(artifact))), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	bundle := filepath.Join(dir, "release.sigstore.json")
-	if err := os.WriteFile(bundle, []byte("bundle"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	binDir := t.TempDir()
+	// Bootstrap is deliberately disabled in this harness: the cases below pin
+	// the actionable error shown when NO viable bootstrap exists. The success
+	// path of bootstrap is exercised separately in
+	// TestInstallScriptCosignBootstrapVerification.
+	versionSnippet := `
+source "$GOLAB_INSTALL_SCRIPT"
+bootstrap_cosign() { return 1; }
+os=linux; arch=amd64
+require_cosign_version ""
+`
 	run := func() (string, error) {
-		cmd := exec.Command(bash, script, "--verify-only", artifact, bundle, checksums)
-		cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-		out, err := cmd.CombinedOutput()
-		return string(out), err
+		return sourceInstallScript(t, binDir+string(os.PathListSeparator)+os.Getenv("PATH"), versionSnippet)
 	}
 
 	cases := []struct {
@@ -257,6 +332,427 @@ func TestInstallScriptCosignMinimumVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+type tarEntry struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	Type    string `json:"type,omitempty"` // file (default), dir, symlink
+	Link    string `json:"link,omitempty"`
+	Exec    bool   `json:"exec,omitempty"`
+}
+
+// writeTarGzRaw builds an archive with exact member names (including hostile
+// ones such as ../escape) without going through the host filesystem.
+func writeTarGzRaw(t *testing.T, path string, entries []tarEntry) {
+	t.Helper()
+	dir := t.TempDir()
+	py := filepath.Join(dir, "mk.py")
+	body := `import io, json, sys, tarfile
+archive, datafile = sys.argv[1], sys.argv[2]
+with open(datafile, encoding="utf-8") as f:
+    entries = json.load(f)
+with tarfile.open(archive, "w:gz") as tf:
+    for e in entries:
+        ti = tarfile.TarInfo(e["name"])
+        kind = e.get("type", "file")
+        if kind == "symlink":
+            ti.type = tarfile.SYMTYPE
+            ti.linkname = e.get("link", "")
+            tf.addfile(ti)
+        elif kind == "dir":
+            ti.type = tarfile.DIRTYPE
+            ti.mode = 0o755
+            tf.addfile(ti)
+        else:
+            data = e.get("content", "").encode()
+            ti.size = len(data)
+            ti.mode = 0o755 if e.get("exec") else 0o644
+            tf.addfile(ti, io.BytesIO(data))
+`
+	if err := os.WriteFile(py, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	datafile := filepath.Join(dir, "entries.json")
+	if err := os.WriteFile(datafile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", py, path, datafile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("tar fixture: %v (%s)", err, out)
+	}
+}
+
+func writeFakeTool(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/usr/bin/env bash\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestInstallScriptBootstrapPolicy pins the self-bootstrapping contract:
+// every former hard dependency must have a fallback chain, and cosign v2.6.5
+// is bootstrapped from the official release with a REAL pinned digest.
+func TestInstallScriptBootstrapPolicy(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	for _, needle := range []string{
+		// download: curl -> wget -> python3 urllib, HTTPS only
+		"http_get", "curl -fsSL", "wget -q --https-only", "urllib.request",
+		"refusing non-HTTPS download", "refusing non-HTTPS redirect",
+		"no usable HTTPS downloader",
+		// hashing: sha256sum -> shasum -> openssl -> python3 hashlib
+		"sha256sum", "shasum -a 256", "openssl dgst -sha256", "hashlib.sha256",
+		"no usable SHA-256 implementation",
+		// archive: tar -> python3 tarfile with the same allowlist/traversal gate
+		"make_temp_dir", "umask 077", "golab-install.$$",
+		"list_archive_members", "extract_members", "tarfile.open",
+		"unexpected member in archive", "archive member escapes destination",
+		"unsafe archive member type", "issym()", "islnk()",
+		// cosign bootstrap: pinned release, checksums.txt verified twice
+		"COSIGN_VERSION=\"v" + cosignBootstrapVersion + "\"",
+		"cosign_checksums.txt", "COSIGN_CHECKSUMS_SHA256", "COSIGN_PINNED_SHA256",
+		"cosign_checksums.txt digest mismatch", "cosign bootstrap checksum mismatch",
+		"cosign_asset_for", "bootstrap_cosign", "no pinned cosign",
+		// CLI contract unchanged
+		"--verify-only", "--no-skills", "--skills-dir", "golab-mcp", "--help",
+	} {
+		if !strings.Contains(s, needle) {
+			t.Errorf("install.sh is missing %q", needle)
+		}
+	}
+	for _, forbidden := range []string{
+		"need curl", "need tar", "need mktemp", "need sha256sum", "need cosign",
+		"required command 'cosign'", "http://github.com",
+	} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("install.sh still has hard dependency %q", forbidden)
+		}
+	}
+	for asset, digest := range cosignPublishedV265 {
+		if !strings.Contains(s, digest) {
+			t.Errorf("install.sh is missing the real pinned digest for %s (%s)", asset, digest)
+		}
+		if !strings.Contains(s, asset) {
+			t.Errorf("install.sh is missing the pinned cosign asset %s", asset)
+		}
+	}
+	if !strings.Contains(s, cosignChecksumsDigest) {
+		t.Errorf("install.sh is missing the pinned cosign_checksums.txt digest %s", cosignChecksumsDigest)
+	}
+	if !strings.Contains(s, `COSIGN_BASE="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}"`) {
+		t.Error("install.sh does not pin the cosign release download URL")
+	}
+	// A local `tmp` in install_main goes out of scope before EXIT: the trap
+	// must read a global or `set -u` fails after a successful installation.
+	if !strings.Contains(s, `trap 'cleanup_temp "${GOLAB_TMP_DIR:-}"' EXIT`) {
+		t.Error("install.sh EXIT trap does not use a scoped-safe temp dir global")
+	}
+}
+
+// TestInstallScriptFallbackChains exercises the capability resolver with a
+// deliberately stripped PATH: no curl, tar, sha256sum, mktemp or cosign.
+func TestInstallScriptFallbackChains(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh fallback chains require a Unix shell")
+	}
+
+	// Hashing: each preferred tool fails in turn; the next one must produce
+	// the correct digest of the same bytes.
+	payload := []byte("bootstrap-hash-fixture")
+	sum := sha256.Sum256(payload)
+	wantHash := hex.EncodeToString(sum[:])
+	file := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(file, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hashSnippet := `source "$GOLAB_INSTALL_SCRIPT"
+sha256_file "$PAYLOAD"
+`
+	fallbacks := []struct {
+		name  string
+		tools []string
+	}{
+		{"shasum", []string{"shasum", "awk"}},
+		{"openssl", []string{"openssl", "awk"}},
+		{"python3", []string{"python3"}},
+	}
+	for _, tc := range fallbacks {
+		t.Run("hash/"+tc.name, func(t *testing.T) {
+			dir := minimalBinDir(t, tc.tools...)
+			if tc.name == "shasum" {
+				writeFakeTool(t, dir, "sha256sum", "exit 1")
+			} else {
+				writeFakeTool(t, dir, "sha256sum", "exit 1")
+				writeFakeTool(t, dir, "shasum", "exit 1")
+			}
+			cmd := exec.Command("bash", "-c", hashSnippet)
+			cmd.Env = append(os.Environ(), "PATH="+dir, "PAYLOAD="+file,
+				"GOLAB_INSTALL_SCRIPT="+mustAbsScript(t))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s fallback: %v (%s)", tc.name, err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != wantHash {
+				t.Fatalf("%s fallback hash = %q, want %q", tc.name, got, wantHash)
+			}
+		})
+	}
+
+	// Download: a failing curl must fall through to wget, then to python3.
+	downloadSnippet := `source "$GOLAB_INSTALL_SCRIPT"
+http_get "https://example.invalid/release.bin" "$DEST"
+cat "$DEST"
+`
+	t.Run("download/wget", func(t *testing.T) {
+		dir := minimalBinDir(t, "cat")
+		writeFakeTool(t, dir, "curl", "exit 1")
+		writeFakeTool(t, dir, "wget", `
+dest=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in -O) dest="$2"; shift 2 ;; *) shift ;; esac
+done
+printf 'wget-ok' > "$dest"
+`)
+		dest := filepath.Join(t.TempDir(), "out.bin")
+		cmd := exec.Command("bash", "-c", downloadSnippet)
+		cmd.Env = append(os.Environ(), "PATH="+dir, "DEST="+dest,
+			"GOLAB_INSTALL_SCRIPT="+mustAbsScript(t))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("wget fallback: %v (%s)", err, out)
+		}
+		if strings.TrimSpace(string(out)) != "wget-ok" {
+			t.Fatalf("wget fallback output = %q", out)
+		}
+	})
+	t.Run("download/python3", func(t *testing.T) {
+		dir := minimalBinDir(t, "cat")
+		writeFakeTool(t, dir, "curl", "exit 1")
+		writeFakeTool(t, dir, "python3", `printf 'python-ok' > "$3"`)
+		dest := filepath.Join(t.TempDir(), "out.bin")
+		cmd := exec.Command("bash", "-c", downloadSnippet)
+		cmd.Env = append(os.Environ(), "PATH="+dir, "DEST="+dest,
+			"GOLAB_INSTALL_SCRIPT="+mustAbsScript(t))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("python3 fallback: %v (%s)", err, out)
+		}
+		if strings.TrimSpace(string(out)) != "python-ok" {
+			t.Fatalf("python3 fallback output = %q", out)
+		}
+	})
+	t.Run("download/https-only", func(t *testing.T) {
+		dir := minimalBinDir(t)
+		cmd := exec.Command("bash", "-c", `source "$GOLAB_INSTALL_SCRIPT"
+http_get "http://example.invalid/plain.bin" "$DEST"
+`)
+		cmd.Env = append(os.Environ(), "PATH="+dir,
+			"DEST="+filepath.Join(t.TempDir(), "out.bin"),
+			"GOLAB_INSTALL_SCRIPT="+mustAbsScript(t))
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "refusing non-HTTPS download") {
+			t.Fatalf("plaintext download was not rejected: %v (%s)", err, out)
+		}
+	})
+	t.Run("download/no-capability", func(t *testing.T) {
+		dir := minimalBinDir(t, "mkdir")
+		cmd := exec.Command("bash", "-c", `source "$GOLAB_INSTALL_SCRIPT"
+http_get "https://example.invalid/release.bin" "$DEST"
+`)
+		cmd.Env = append(os.Environ(), "PATH="+dir,
+			"DEST="+filepath.Join(t.TempDir(), "out.bin"),
+			"GOLAB_INSTALL_SCRIPT="+mustAbsScript(t))
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "no usable HTTPS downloader") {
+			t.Fatalf("missing downloader was not actionable: %v (%s)", err, out)
+		}
+	})
+
+	// Temp dir: with no mktemp the fallback must be private (0700).
+	t.Run("tempdir/fallback", func(t *testing.T) {
+		dir := minimalBinDir(t, "mkdir")
+		cmd := exec.Command("bash", "-c", `source "$GOLAB_INSTALL_SCRIPT"
+make_temp_dir
+`)
+		cmd.Env = append(os.Environ(), "PATH="+dir, "TMPDIR="+t.TempDir(),
+			"GOLAB_INSTALL_SCRIPT="+mustAbsScript(t))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("mktemp fallback: %v (%s)", err, out)
+		}
+		got := strings.TrimSpace(string(out))
+		st, err := os.Stat(got)
+		if err != nil {
+			t.Fatalf("temp dir %q: %v", got, err)
+		}
+		if st.Mode().Perm() != 0o700 {
+			t.Fatalf("temp dir mode = %o, want 700", st.Mode().Perm())
+		}
+	})
+
+	// Extraction with python tarfile only (no tar binary in PATH).
+	extractSnippet := `source "$GOLAB_INSTALL_SCRIPT"
+extract_members "$ARCHIVE" "$DEST" "$MODE" $ARGS
+`
+	runExtract := func(t *testing.T, archive, mode string, args []string, dest string) (string, error) {
+		t.Helper()
+		dir := minimalBinDir(t, "python3")
+		cmd := exec.Command("bash", "-c", extractSnippet)
+		cmd.Env = append(os.Environ(),
+			"PATH="+dir, "ARCHIVE="+archive, "DEST="+dest, "MODE="+mode,
+			"ARGS="+strings.Join(args, " "), "GOLAB_INSTALL_SCRIPT="+mustAbsScript(t))
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	t.Run("extract/flat", func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "outer.tar.gz")
+		writeTarGzRaw(t, archive, []tarEntry{
+			{Name: "golab", Content: "cli", Exec: true},
+			{Name: "golab-mcp", Content: "mcp", Exec: true},
+			{Name: "golab-skills.tar.gz", Content: "skills"},
+		})
+		dest := t.TempDir()
+		out, err := runExtract(t, archive, "flat", []string{"golab", "golab-mcp", "golab-skills.tar.gz"}, dest)
+		if err != nil {
+			t.Fatalf("flat extraction: %v (%s)", err, out)
+		}
+		for name, want := range map[string]string{"golab": "cli", "golab-mcp": "mcp", "golab-skills.tar.gz": "skills"} {
+			got, err := os.ReadFile(filepath.Join(dest, name))
+			if err != nil || string(got) != want {
+				t.Fatalf("extracted %s = %q, want %q (%v)", name, got, want, err)
+			}
+		}
+	})
+	t.Run("extract/unexpected-member", func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "outer.tar.gz")
+		writeTarGzRaw(t, archive, []tarEntry{
+			{Name: "golab", Content: "cli", Exec: true},
+			{Name: "evil", Content: "unexpected"},
+		})
+		out, err := runExtract(t, archive, "flat", []string{"golab", "golab-mcp", "golab-skills.tar.gz"}, t.TempDir())
+		if err == nil || !strings.Contains(out, "unexpected member in archive") {
+			t.Fatalf("unexpected member was accepted: %v (%s)", err, out)
+		}
+	})
+	t.Run("extract/traversal", func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "skills.tar.gz")
+		writeTarGzRaw(t, archive, []tarEntry{
+			{Name: "golab-operations/SKILL.md", Content: "ok"},
+			{Name: "golab-operations/../../escape.txt", Content: "escaped"},
+		})
+		out, err := runExtract(t, archive, "skills", []string{"golab-operations", "colab-mcp"}, t.TempDir())
+		if err == nil || !strings.Contains(out, "escapes destination") {
+			t.Fatalf("traversal member was accepted: %v (%s)", err, out)
+		}
+	})
+	t.Run("extract/symlink", func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "outer.tar.gz")
+		writeTarGzRaw(t, archive, []tarEntry{
+			{Name: "golab", Type: "symlink", Link: "/etc/passwd"},
+		})
+		out, err := runExtract(t, archive, "flat", []string{"golab", "golab-mcp", "golab-skills.tar.gz"}, t.TempDir())
+		if err == nil || !strings.Contains(out, "unsafe archive member type") {
+			t.Fatalf("symlink member was accepted: %v (%s)", err, out)
+		}
+	})
+	t.Run("extract/skills", func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "skills.tar.gz")
+		writeTarGzRaw(t, archive, []tarEntry{
+			{Name: "golab-operations/SKILL.md", Content: "op"},
+			{Name: "colab-mcp/SKILL.md", Content: "mcp"},
+			{Name: "evil/SKILL.md", Content: "unexpected"},
+		})
+		out, err := runExtract(t, archive, "skills", []string{"golab-operations", "colab-mcp"}, t.TempDir())
+		if err == nil || !strings.Contains(out, "unexpected member in archive") {
+			t.Fatalf("out-of-allowlist skill was accepted: %v (%s)", err, out)
+		}
+	})
+}
+
+// TestInstallScriptCosignBootstrapVerification proves the bootstrap downloads
+// the pinned release, verifies the checksums file AND the binary against real
+// digests, and refuses a tampered payload. Pin overrides are test-local: the
+// production pins are checked by TestInstallScriptBootstrapPolicy.
+func TestInstallScriptCosignBootstrapVerification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh bootstrap requires a Unix shell")
+	}
+	dir := t.TempDir()
+	fixtures := filepath.Join(dir, "fixtures")
+	boot := filepath.Join(dir, "boot")
+	for _, d := range []string{fixtures, boot} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload := `#!/usr/bin/env bash
+if [[ ${1:-} == version ]]; then printf '{"GitVersion":"v2.6.5"}\n'; fi
+exit 0
+`
+	payloadPath := filepath.Join(fixtures, "cosign-linux-amd64")
+	if err := os.WriteFile(payloadPath, []byte(payload), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(payload))
+	payloadDigest := hex.EncodeToString(sum[:])
+	checksumsPath := filepath.Join(fixtures, "cosign_checksums.txt")
+	if err := os.WriteFile(checksumsPath,
+		[]byte(fmt.Sprintf("%s  cosign-linux-amd64\n", payloadDigest)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snippet := `source "$GOLAB_INSTALL_SCRIPT"
+http_get() { cp "$FIXTURES/$(basename "$1")" "$2"; }
+COSIGN_CHECKSUMS_SHA256="$(sha256sum "$FIXTURES/cosign_checksums.txt" | awk '{print $1}')"
+declare -A COSIGN_PINNED_SHA256=( [cosign-linux-amd64]="$PAYLOAD_DIGEST" )
+os=linux; arch=amd64
+bootstrap_cosign "$BOOT"
+"$COSIGN_BIN" version --output json
+`
+	run := func() (string, error) {
+		cmd := exec.Command("bash", "-c", snippet)
+		cmd.Env = append(os.Environ(),
+			"FIXTURES="+fixtures, "BOOT="+boot, "PAYLOAD_DIGEST="+payloadDigest,
+			"GOLAB_INSTALL_SCRIPT="+mustAbsScript(t))
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	out, err := run()
+	if err != nil {
+		t.Fatalf("verified cosign bootstrap failed: %v (%s)", err, out)
+	}
+	if !strings.Contains(out, "v2.6.5") {
+		t.Fatalf("bootstrapped cosign reported no pinned version: %s", out)
+	}
+	// Tamper with the binary after the checksum file was published: bootstrap
+	// must refuse it even though the URL and release are unchanged.
+	if err := os.WriteFile(payloadPath, []byte("tampered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.RemoveAll(boot)
+	if err := os.MkdirAll(boot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run()
+	if err == nil || !strings.Contains(out, "cosign bootstrap checksum mismatch") {
+		t.Fatalf("tampered cosign was accepted: %v (%s)", err, out)
+	}
+}
+
+func mustAbsScript(t *testing.T) string {
+	t.Helper()
+	abs, err := filepath.Abs(filepath.Join("..", "..", "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
 }
 
 // TestPackagingConfigsPinSignedRelease guards the package-channel configs:
@@ -463,26 +959,39 @@ func TestPowerShellInstallScriptPolicy(t *testing.T) {
 		// Both binaries, opt-out skills flag and the documented skill path.
 		"golab-mcp.exe", "-NoSkills", "$SkillsDir", "LOCALAPPDATA",
 		"golab-skills.tar.gz", "SKILL.md", "--help",
-		"tar.exe -xzf $artifactPath -C $tmp golab-skills.tar.gz",
+		// PowerShell built-ins only: no curl.exe/tar.exe package requirement.
+		"Invoke-WebRequest", "Invoke-RestMethod", "Expand-Archive", "New-Item",
+		"Expand-TarGz", "GZipStream", "ZipFile", "GetFullPath",
+		"unexpected member in skills bundle", "unsafe member in skills bundle",
 		// cosign >= v2.6.5 is required before verification. This is a static
 		// check: no PowerShell runtime is available in this authoring env.
 		"cosign >= v2.6.5", "Assert-CosignVersion", "cosign version",
 		"GitVersion", "too old", "go install github.com/sigstore/cosign/v2/cmd/cosign@latest",
+		"Bootstrap-Cosign", "cosign_checksums.txt", "COSIGN_VERSION",
 	} {
 		if !strings.Contains(s, needle) {
 			t.Fatalf("install.ps1 is missing %q", needle)
 		}
 	}
-	if !strings.Contains(s, "Invoke-WebRequest") && !strings.Contains(s, "Invoke-RestMethod") {
-		t.Fatal("install.ps1 has no download mechanism")
-	}
-	for _, forbidden := range []string{"Invoke-Expression", "iex "} {
+	for _, forbidden := range []string{
+		"Invoke-Expression", "iex ", "curl.exe is required", "tar.exe is required",
+		"http://github.com",
+	} {
 		if strings.Contains(s, forbidden) {
-			t.Fatalf("install.ps1 executes downloaded text via %q", forbidden)
+			t.Fatalf("install.ps1 contains forbidden %q", forbidden)
 		}
 	}
+	// Windows bootstraps only the published static Windows verifier (x64,
+	// emulated on ARM64); the Unix assets are pinned in install.sh instead.
+	winAsset := "cosign-windows-amd64.exe"
+	if !strings.Contains(s, cosignPublishedV265[winAsset]) || !strings.Contains(s, winAsset) {
+		t.Errorf("install.ps1 is missing the real pinned cosign %s / %s", winAsset, cosignPublishedV265[winAsset])
+	}
+	if !strings.Contains(s, cosignChecksumsDigest) {
+		t.Errorf("install.ps1 is missing the pinned cosign_checksums.txt digest %s", cosignChecksumsDigest)
+	}
 	verifyAt := strings.Index(s, "Verify-Release -ArtifactPath $artifactPath")
-	extractAt := strings.Index(s, "tar.exe -xzf")
+	extractAt := strings.Index(s, "Expand-Archive -LiteralPath")
 	if verifyAt < 0 || extractAt < 0 || verifyAt > extractAt {
 		t.Fatal("install.ps1 extracts before verifying the archive")
 	}
