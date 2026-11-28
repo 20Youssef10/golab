@@ -14,6 +14,50 @@ SKILLS=(golab-operations colab-mcp)
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command '$1' not found"; }
 
+# v0.3.0 sigstore bundles use cosign's --new-bundle-format. cosign < 2.6.5
+# cannot read them and reports a misleading "signature verification failed",
+# so reject old clients BEFORE the verification gate with an actionable error.
+MIN_COSIGN_VERSION="2.6.5"
+COSIGN_UPGRADE="upgrade with 'go install github.com/sigstore/cosign/v2/cmd/cosign@latest' (see https://docs.sigstore.dev/cosign/installation/)"
+
+# cosign_version prints the bare numeric version (e.g. 2.6.5). Prefer JSON
+# when this cosign supports --output json; older releases fall back to the
+# `GitVersion: vX.Y.Z` line printed by plain `cosign version`.
+cosign_version() {
+  local raw version
+  raw="$(cosign version --output json 2>/dev/null || true)"
+  version="$(printf '%s\n' "$raw" | sed -nE 's/.*"GitVersion"[[:space:]]*:[[:space:]]*"v?([0-9]+\.[0-9]+(\.[0-9]+)?)[^"]*".*/\1/p' | head -n 1)"
+  if [[ -z "$version" ]]; then
+    raw="$(cosign version 2>/dev/null || true)"
+    version="$(printf '%s\n' "$raw" | awk '/GitVersion:/ { for (i = 1; i <= NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+/) { gsub(/^v/, "", $i); print $i; exit } }')"
+  fi
+  printf '%s\n' "$version"
+}
+
+# Numeric (not lexical) dotted-version comparison: 2.10.0 > 2.6.5.
+version_at_least() {
+  local have="$1" want="$2" i
+  local -a h=(0 0 0) w=(0 0 0) parts
+  IFS='.' read -r -a parts <<<"$have"
+  for i in 0 1 2; do h[i]="10#${parts[i]:-0}"; done
+  IFS='.' read -r -a parts <<<"$want"
+  for i in 0 1 2; do w[i]="10#${parts[i]:-0}"; done
+  for i in 0 1 2; do
+    (( h[i] > w[i] )) && return 0
+    (( h[i] < w[i] )) && return 1
+  done
+  return 0
+}
+
+require_cosign_version() {
+  need cosign
+  local found
+  found="$(cosign_version)"
+  [[ -n "$found" ]] || die "could not parse 'cosign version' output; cosign >= v${MIN_COSIGN_VERSION} is required; $COSIGN_UPGRADE"
+  version_at_least "$found" "$MIN_COSIGN_VERSION" || \
+    die "cosign v${found} is too old: v${MIN_COSIGN_VERSION} or newer is required to read the v0.3.0 sigstore bundle; $COSIGN_UPGRADE"
+}
+
 usage() {
   cat >&2 <<'EOF'
 usage: install.sh [--version X.Y.Z] [--dir PATH] [--skills-dir PATH] [--no-skills]
@@ -24,7 +68,10 @@ the same signed archive into a documented skills directory.
 
 Environment: GOLAB_VERSION, GOLAB_INSTALL_DIR (defaults to $HOME/.local/bin),
   GOLAB_SKILLS_DIR (defaults to ${XDG_DATA_HOME:-$HOME/.local/share}/golab/skills).
-Requirements: curl, tar, sha256sum, cosign (the signature verifier).
+Requirements: curl, tar, sha256sum, and cosign >= v2.6.5 (the signature verifier).
+  Older cosign cannot read the v0.3.0 sigstore bundle and will be rejected
+  before verification with an upgrade hint. Upgrade:
+  go install github.com/sigstore/cosign/v2/cmd/cosign@latest
 EOF
 }
 
@@ -32,7 +79,9 @@ EOF
 verify_local() {
   local artifact="$1" bundle="$2" checksums="$3"
   need sha256sum
-  need cosign
+  # Reject an old cosign before attempting verification: v0.3.0 bundles use
+  # --new-bundle-format, which older binaries misreport as a bad signature.
+  require_cosign_version
   [[ -f "$artifact" ]] || die "artifact not found: $artifact"
   [[ -f "$bundle" ]] || die "cosign bundle not found: $bundle"
   [[ -f "$checksums" ]] || die "checksums file not found: $checksums"

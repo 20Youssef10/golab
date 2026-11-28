@@ -1,6 +1,18 @@
-# Install golab and golab-mcp on Windows ONLY from a release whose SHA-256
-# checksum and cosign keyless signature have both been verified against the
-# pinned release identity. Downloaded text is never executed as program text.
+<#
+.SYNOPSIS
+Install golab and golab-mcp on Windows from a verified signed release.
+.DESCRIPTION
+Downloads are verified with SHA-256 and a cosign keyless signature pinned to
+the release workflow identity. Downloaded text is never executed as program
+text.
+.NOTES
+Requires cosign >= v2.6.5. Older cosign versions cannot read the
+--new-bundle-format sigstore bundles published since v0.3.0 and fail with a
+misleading "signature verification failed"; this installer rejects them
+before verification with an actionable upgrade hint.
+Upgrade: go install github.com/sigstore/cosign/v2/cmd/cosign@latest
+         https://docs.sigstore.dev/cosign/installation/
+#>
 [CmdletBinding()]
 param(
     [string] $Version,
@@ -19,12 +31,35 @@ $repo = 'golab'
 $issuer = 'https://token.actions.githubusercontent.com'
 $identity = '^https://github\.com/20Youssef10/golab/\.github/workflows/release\.yml@refs/tags/v'
 $skills = @('golab-operations', 'colab-mcp')
+$minCosign = [version]'2.6.5'
+$cosignUpgrade = 'go install github.com/sigstore/cosign/v2/cmd/cosign@latest (https://docs.sigstore.dev/cosign/installation/)'
+
+# Reject an old cosign BEFORE verification: v0.3.0 bundles use
+# --new-bundle-format, which older binaries misreport as a bad signature.
+function Assert-CosignVersion {
+    if (-not (Get-Command cosign -ErrorAction SilentlyContinue)) {
+        throw "cosign >= v2.6.5 is required to verify the release signature; upgrade: $cosignUpgrade"
+    }
+    $raw = & cosign version --output json 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($raw -join ''))) {
+        $raw = & cosign version 2>$null
+    }
+    $text = $raw -join "`n"
+    # Matches both the JSON form ("GitVersion": "v2.6.5") and the plain
+    # `GitVersion: v2.6.5` line printed by older cosign releases.
+    $match = [regex]::Match($text, 'GitVersion"?\s*:?\s*"?v?(?<ver>\d+\.\d+(?:\.\d+)?)', 'IgnoreCase')
+    if (-not $match.Success) {
+        throw "could not parse 'cosign version' output; cosign >= v2.6.5 is required; upgrade: $cosignUpgrade"
+    }
+    $found = [version]$match.Groups['ver'].Value
+    if ($found -lt $minCosign) {
+        throw "cosign v$found is too old: v2.6.5 or newer is required to read the v0.3.0 sigstore bundle; upgrade: $cosignUpgrade"
+    }
+}
 
 function Verify-Release {
     param([string] $ArtifactPath, [string] $BundlePath, [string] $ChecksumPath)
-    if (-not (Get-Command cosign -ErrorAction SilentlyContinue)) {
-        throw 'cosign is required to verify the release signature'
-    }
+    Assert-CosignVersion
     if (-not (Test-Path -LiteralPath $ArtifactPath -PathType Leaf)) { throw "artifact not found: $ArtifactPath" }
     if (-not (Test-Path -LiteralPath $BundlePath -PathType Leaf)) { throw "cosign bundle not found: $BundlePath" }
     if (-not (Test-Path -LiteralPath $ChecksumPath -PathType Leaf)) { throw "checksums file not found: $ChecksumPath" }

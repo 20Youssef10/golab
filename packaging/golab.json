@@ -1,21 +1,21 @@
 {
-  "_comment": "Pinned to signed GitHub Release v0.2.0 artifacts. Hashes are copied verbatim from that release's checksums.txt (SHA-256 of each .tar.gz, NOT of the unpacked golab.exe). URLs were verified reachable. BUMP: publish a new annotated vX.Y.Z tag first, then replace every 0.2.0 here and copy the three windows_{amd64,arm64,386} hashes from the new checksums.txt; keep internal/version.Number and the brew/winget/nfpm configs on the same version. JSON has no comments, hence this key (Scoop ignores unknown keys).",
-  "version": "0.2.0",
+  "_comment": "Pinned to signed GitHub Release v0.3.0 artifacts. Hashes are copied verbatim from that release's checksums.txt (SHA-256 of each .tar.gz, NOT of the unpacked golab.exe). URLs were verified reachable. Scoop keeps the .tar.gz form it has always used; winget (20Youssef10.golab.installer.yaml) is the channel that uses the .zip repacks, and both forms are published for every Windows target in v0.3.0. BUMP: publish a new annotated vX.Y.Z tag first, then replace every 0.3.0 here and copy the three windows_{amd64,arm64,386} .tar.gz hashes from the new checksums.txt; keep internal/version.Number and the brew/winget/nfpm configs on the same version. JSON has no comments, hence this key (Scoop ignores unknown keys).",
+  "version": "0.3.0",
   "description": "Unofficial Go port of the Google Colab CLI",
   "homepage": "https://github.com/20Youssef10/golab",
   "license": "Apache-2.0",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_amd64.tar.gz",
-      "hash": "a75742ec1e03d55cc38687f68056bff4595d639e7571349aca2f675442046af5"
+      "url": "https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_amd64.tar.gz",
+      "hash": "5fdeaa7ecda7136cc333f96109917e8b957c5b2f7008cdf27ff88d4bfb30bb02"
     },
     "arm64": {
-      "url": "https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_arm64.tar.gz",
-      "hash": "83350bc3c1572b9e231706845220b1b5656ebb74e8e3fc444888a70e31e97b7c"
+      "url": "https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_arm64.tar.gz",
+      "hash": "a279ad1a1356d3aa79fc0321132c21ff5872aeef33979e4fb54b39fae4f77703"
     },
     "32bit": {
-      "url": "https://github.com/20Youssef10/golab/releases/download/v0.2.0/golab_0.2.0_windows_386.tar.gz",
-      "hash": "38f874d57623179442b7f47b2860a5e3612ded2f0a6a5c27ce21c757858ec7b8"
+      "url": "https://github.com/20Youssef10/golab/releases/download/v0.3.0/golab_0.3.0_windows_386.tar.gz",
+      "hash": "547ab75039cff395e74a8f24458ee56c22e321f88c28714ff04d087dde6d0bf8"
     }
   },
   "bin": "golab.exe",

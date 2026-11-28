@@ -82,7 +82,8 @@ jobs:
         with:
           version: ${{ env.GORELEASER_VERSION }}
           # --skip=publish disables the publish pipe (no GitHub release, no
-          # asset uploads); all 13 tar.gz archives, the 3 winget zip repacks
+          # asset uploads); all 13 CLI tar.gz archives, the 3 winget zip
+          # repacks, the 13 standalone golab-mcp tar.gz archives (+3 zips)
           # and checksums.txt still land in dist.
           args: release --clean --skip=publish
         env:
@@ -166,13 +167,24 @@ jobs:
           # same binaries and signed with the same pinned release identity.
           tarballs=(dist/golab_*.tar.gz)
           zips=(dist/golab_*.zip)
+          # The hyphenated prefix is deliberate: the updater's anchored
+          # `^golab_v?\d+..._<os>_<arch>.tar.gz$` pattern cannot match these,
+          # so a standalone MCP download is never mistaken for a CLI update.
+          mcp_tarballs=(dist/golab-mcp_*.tar.gz)
+          mcp_zips=(dist/golab-mcp_*.zip)
           if (( ${#tarballs[@]} < 13 )); then
             echo "expected at least 13 tar.gz archives, got ${#tarballs[@]}" >&2; exit 1
           fi
           if (( ${#zips[@]} != 3 )); then
             echo "expected 3 winget zip archives, got ${#zips[@]}" >&2; exit 1
           fi
-          archives=("${tarballs[@]}" "${zips[@]}")
+          if (( ${#mcp_tarballs[@]} != 13 )); then
+            echo "expected 13 standalone golab-mcp tar.gz archives, got ${#mcp_tarballs[@]}" >&2; exit 1
+          fi
+          if (( ${#mcp_zips[@]} != 3 )); then
+            echo "expected 3 standalone golab-mcp zip archives, got ${#mcp_zips[@]}" >&2; exit 1
+          fi
+          archives=("${tarballs[@]}" "${zips[@]}" "${mcp_tarballs[@]}" "${mcp_zips[@]}")
           for artifact in "${archives[@]}"; do
             base="$(basename "$artifact")"
             # Keyless signature bundle -> contains "sigstore", not "sbom":
@@ -243,7 +255,12 @@ jobs:
                          '^golab_.*\.zip$' \
                          '^golab_.*\.tar\.gz\.sigstore\.json$' \
                          '^golab_.*\.zip\.sigstore\.json$' \
-                         '^golab_.*\.sbom\.sigstore\.json$'; do
+                         '^golab_.*\.sbom\.sigstore\.json$' \
+                         '^golab-mcp_.*\.tar\.gz$' \
+                         '^golab-mcp_.*\.zip$' \
+                         '^golab-mcp_.*\.tar\.gz\.sigstore\.json$' \
+                         '^golab-mcp_.*\.zip\.sigstore\.json$' \
+                         '^golab-mcp_.*\.sbom\.sigstore\.json$'; do
             grep -E "$pattern" /tmp/assets.txt >/dev/null || {
               echo "FAIL: no release asset matches $pattern" >&2; exit 1;
             }
@@ -266,9 +283,20 @@ jobs:
           # below would pass even if --new-bundle-format were dropped. Assert the
           # format on disk so that regression fails the release loudly instead.
           # jq is preinstalled on GitHub's ubuntu-latest runners.
-          fmt_bundles=(dist/golab_*.tar.gz.sigstore.json dist/golab_*.zip.sigstore.json dist/golab_*.sbom.sigstore.json)
+          fmt_bundles=(dist/golab_*.tar.gz.sigstore.json dist/golab_*.zip.sigstore.json dist/golab_*.sbom.sigstore.json \
+                       dist/golab-mcp_*.tar.gz.sigstore.json dist/golab-mcp_*.zip.sigstore.json dist/golab-mcp_*.sbom.sigstore.json)
           if (( ${#fmt_bundles[@]} == 0 )); then
             echo "FAIL: no sigstore bundles found for format check" >&2; exit 1
+          fi
+          # Every standalone MCP archive must carry both a signature bundle and
+          # an SBOM bundle (13 tar.gz + 3 zip each), just like the CLI archives.
+          mcp_sig_bundles=(dist/golab-mcp_*.tar.gz.sigstore.json dist/golab-mcp_*.zip.sigstore.json)
+          mcp_sbom_bundles=(dist/golab-mcp_*.sbom.sigstore.json)
+          if (( ${#mcp_sig_bundles[@]} != 16 )); then
+            echo "FAIL: expected 16 golab-mcp signature bundles, got ${#mcp_sig_bundles[@]}" >&2; exit 1
+          fi
+          if (( ${#mcp_sbom_bundles[@]} != 16 )); then
+            echo "FAIL: expected 16 golab-mcp SBOM bundles, got ${#mcp_sbom_bundles[@]}" >&2; exit 1
           fi
           for bundle in "${fmt_bundles[@]}"; do
             if ! jq -e '.mediaType | strings | contains("v0.3")' "$bundle" >/dev/null; then
@@ -284,7 +312,8 @@ jobs:
 
           # (a) Keyless signature bundle for EVERY archive (tar.gz and zip),
           # not just one sample.
-          archive_bundles=(dist/golab_*.tar.gz.sigstore.json dist/golab_*.zip.sigstore.json)
+          archive_bundles=(dist/golab_*.tar.gz.sigstore.json dist/golab_*.zip.sigstore.json \
+                           dist/golab-mcp_*.tar.gz.sigstore.json dist/golab-mcp_*.zip.sigstore.json)
           if (( ${#archive_bundles[@]} == 0 )); then
             echo "FAIL: no archive signature bundles" >&2; exit 1
           fi
@@ -317,7 +346,7 @@ jobs:
           # the guard checks the payload rather than one storage path - the
           # v0.1.8 release failed at this guard (run 45428451505) with
           # "Malformed BOM" while its published attestation was correct.
-          sbom_bundles=(dist/golab_*.sbom.sigstore.json)
+          sbom_bundles=(dist/golab_*.sbom.sigstore.json dist/golab-mcp_*.sbom.sigstore.json)
           if (( ${#sbom_bundles[@]} == 0 )); then
             echo "FAIL: no SBOM attestation bundles" >&2; exit 1
           fi

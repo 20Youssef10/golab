@@ -11,6 +11,13 @@
 # winget, whose installer type has no tar.gz form; the updater keeps consuming
 # the untouched .tar.gz assets.
 #
+# A SECOND archive, id mcp-standalone, publishes that same golab-mcp binary on
+# its own as golab-mcp_<version>_<os>_<arch>.tar.gz (plus a Windows .zip). It
+# contains LICENSE/NOTICE/README only - no CLI binary, no skills bundle, no
+# changelog - and reuses the reproducible builds and shared checksums.txt above.
+# The `default` archive names and flat layout are deliberately untouched:
+# signed self-update from v0.2.0 depends on those exact bytes.
+#
 # Signing (cosign sign-blob + attest-blob) is done in .github/workflows/release.yml
 # after this pipeline runs, because the bundles must be uploaded to the same
 # GitHub Release. Validate with: goreleaser check && goreleaser release --snapshot --clean
@@ -112,10 +119,28 @@ archives:
       - src: "/tmp/golab-skills.tar.gz"
         dst: golab-skills.tar.gz
 
+  # Standalone signed download for the MCP server: only the golab-mcp binary
+  # plus LICENSE/NOTICE/README. It reuses the exact same reproducible build
+  # artifacts as `default`, so both archives carry identical MCP bytes and are
+  # covered by the one checksums.txt. The distinct `golab-mcp_` prefix keeps
+  # the updater's `golab_*` asset parsing unambiguous.
+  - id: mcp-standalone
+    ids: [golab-mcp]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [tar.gz, zip]
+    name_template: "golab-mcp_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
 checksum:
   # Must be literally `checksums.txt` (internal/update/check.go:192-195).
-  # It now also contains the three winget .zip digests; the updater selects
-  # only the platform .tar.gz line, so this is backward compatible.
+  # It now also contains the three winget .zip digests and all 16 standalone
+  # golab-mcp archive digests; the updater selects only its platform .tar.gz
+  # line, so this is backward compatible.
   name_template: checksums.txt
   algorithm: sha256
 
