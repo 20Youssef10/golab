@@ -4,7 +4,7 @@
 
 | Channel | Platforms | Mechanism | Status (current: v0.4.0; v0.3.0 remains published) |
 |---|---|---|---|
-| GitHub Releases (13 `.tar.gz` + 3 Windows `.zip`, checksums + cosign sigs + SBOM) | all | GoReleaser, both binaries + both skills in every archive | **v0.3.0 published** (49 assets, release run `46062649930`); direct-archive download + checksum + both binaries smoke-tested in a live Colab VM |
+| GitHub Releases (13 `.tar.gz` + 3 Windows `.zip`, checksums + cosign sigs + SBOM) | all | GoReleaser, both binaries + both skills in every archive | **v0.4.0 published** (97 assets, release run `46141971283`; v0.3.0 had 49); direct-archive download + checksum + both binaries smoke-tested in a live Colab VM |
 | Standalone `golab-mcp_<version>_<os>_<arch>.tar.gz` (+ Windows `.zip`) | all | second GoReleaser archive set, signed and attested like the CLI archives | shipped in v0.4.0 with the same signatures and SBOMs; `go install github.com/20Youssef10/golab/cmd/golab-mcp@v0.3.0` was verified live |
 | `install.sh` (SHA-256 + cosign, installs both binaries and skills; `--verify-only`, `--no-skills`, `--skills-dir`) | Linux, macOS, Termux | curl installer | **live-verified in a Colab VM with cosign v2.6.5** (checksum + signature + both binaries + both skills). Requires cosign >= v2.6.5; older versions are rejected with an actionable error |
 | `install.ps1` (SHA-256 + cosign, installs both binaries and skills; `-NoSkills`, `-SkillsDir`) | Windows | PowerShell installer | config/schema verified; no Windows host available here for a live install |

@@ -18,7 +18,7 @@ permalink: /distribution/
 <h2>Release archives and install scripts</h2>
 
 <p>
-  The <code>v0.4.0</code> release has 13 CLI <code>.tar.gz</code> archives
+  The <code>v0.4.0</code> release has 97 signed assets: 13 CLI <code>.tar.gz</code> archives, 3 Windows <code>.zip</code> repacks, 13 standalone MCP <code>.tar.gz</code> archives, 3 MCP <code>.zip</code> files, signatures, SBOMs and a checksum manifest
   (the updater's input), 3 Windows <code>.zip</code> repacks from the same
   binaries, and 30 signature/SBOM sidecars — 49 assets in total. Every archive
   carries both <code>golab</code> and <code>golab-mcp</code> plus one flat

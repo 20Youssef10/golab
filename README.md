@@ -14,7 +14,10 @@ This is a community port, not a Google product. “Google” and “Colab” are
 
 ## Status (v0.4.0)
 
-`v0.4.0` is the current release (2026-11-28). It builds on `v0.3.0`
+`v0.4.0` is the current release (2026-11-28; release run `46141971283`,
+97 signed assets: 13+3 CLI archives and 13+3 standalone MCP archives with
+signatures and SBOMs). A signed self-update from `v0.3.0` → `v0.4.0` was verified
+live. It builds on `v0.3.0`
 (published 2026-11-27, release run `46062649930`, 49 signed assets) and adds
 **named accounts with isolated sessions**, **browser-created session discovery**
 (`sessions --web`, `attach --all`/`--refresh`), a 25-tool `golab-mcp` server with
