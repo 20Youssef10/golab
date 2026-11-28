@@ -116,6 +116,12 @@ type Config struct {
 	TokenStore TokenStore
 	Keyring    KeyringBackend
 
+	// KeyringUser and TokenFileName select a named account's credential slots.
+	// Empty values keep the legacy pair ("oauth_token" / "oauth_token.json")
+	// so a pre-accounts install stays signed in with no prompts or moves.
+	KeyringUser   string
+	TokenFileName string
+
 	ProbeTimeout time.Duration // keyring availability probe; default 5s
 	TokenTimeout time.Duration // one OAuth token HTTP exchange; default 15s
 	ADCTimeout   time.Duration // ADC discovery + first token; default 10s
@@ -250,9 +256,18 @@ func New(cfg Config) (Provider, error) {
 			if kr == nil {
 				kr = realKeyring{}
 			}
-			tokenPath := filepath.Join(cfg.ConfigDir, OAuthTokenFileName)
+			fname := cfg.TokenFileName
+			if fname == "" {
+				fname = OAuthTokenFileName
+			}
+			user := cfg.KeyringUser
+			if user == "" {
+				user = KeyringUser
+			}
+			tokenPath := filepath.Join(cfg.ConfigDir, fname)
 			store = &tieredStore{
 				kr:      kr,
+				user:    user,
 				file:    newFileStore(tokenPath),
 				path:    tokenPath,
 				stderr:  cfg.Stderr,

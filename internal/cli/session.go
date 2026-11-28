@@ -233,12 +233,16 @@ func newSessionCommand() *cobra.Command {
 }
 
 func sessionsCommand() *cobra.Command {
-	return &cobra.Command{
+	var web bool
+	cmd := &cobra.Command{
 		Use:   "sessions",
 		Short: "List all active sessions",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d := depsOf(cmd)
+			if web {
+				return listWebSessions(cmd, d)
+			}
 			local, assignments, err := d.SyncSessions(cmd.Context())
 			if err != nil {
 				return err
@@ -262,6 +266,49 @@ func sessionsCommand() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&web, "web", false, "List browser-created runtimes discovered from the read-only List on either plane")
+	return cmd
+}
+
+// listWebSessions shows every runtime the control plane reports, including
+// ones created in the browser that have no local session ("?"). It is a
+// read-only List: no sync, refresh write or allocation happens here. A List
+// failure names the plane so a restricted plane cannot fake an empty result.
+func listWebSessions(cmd *cobra.Command, d *app.Deps) error {
+	client, err := d.ColabClient(cmd.Context())
+	if err != nil {
+		return err
+	}
+	assignments, err := client.List(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("list Web UI runtimes on the %s plane: %w", planeLabel(d), err)
+	}
+	if len(assignments) == 0 {
+		fmt.Fprintf(d.Stderr, "[colab] No Web UI runtimes found on the %s plane.\n", planeLabel(d))
+		return nil
+	}
+	local, err := d.Store.List()
+	if err != nil {
+		return err
+	}
+	names := make(map[string]string, 2*len(local))
+	for name, s := range local {
+		names[s.Endpoint] = name
+		if s.RuntimeName != "" {
+			names[s.RuntimeName] = name
+		}
+	}
+	for _, a := range assignments {
+		name := "?"
+		if n, ok := names[a.Endpoint]; ok {
+			name = n
+		} else if n, ok := names[a.RuntimeName]; ok {
+			name = n
+		}
+		fmt.Fprintln(d.Stdout, formatSessionLine(name, a.Endpoint,
+			string(a.Accelerator), a.Variant.String(), nil, a.MachineShape.String()))
+	}
+	return nil
 }
 
 func statusCommand() *cobra.Command {

@@ -81,6 +81,7 @@ func withErrorTimeout(timeout time.Duration, fn func() error) error {
 // provider per CLI process) with a hard timeout.
 type tieredStore struct {
 	kr      KeyringBackend
+	user    string // keyring user; empty keeps the legacy KeyringUser constant
 	file    TokenStore
 	path    string
 	stderr  io.Writer
@@ -93,10 +94,19 @@ type tieredStore struct {
 	noticeOnce sync.Once
 }
 
+// keyringUser returns the account-specific user, falling back to the legacy
+// constant for stores built directly by tests or older callers.
+func (s *tieredStore) keyringUser() string {
+	if s.user == "" {
+		return KeyringUser
+	}
+	return s.user
+}
+
 func (s *tieredStore) probe() {
 	s.probeOnce.Do(func() {
 		v, err := withStringTimeout(s.timeout, func() (string, error) {
-			return s.kr.Get(KeyringService, KeyringUser)
+			return s.kr.Get(KeyringService, s.keyringUser())
 		})
 		switch {
 		case err == nil:
@@ -141,7 +151,7 @@ func (s *tieredStore) Load() ([]byte, error) {
 			return data, nil
 		}
 		v, err := withStringTimeout(s.timeout, func() (string, error) {
-			return s.kr.Get(KeyringService, KeyringUser)
+			return s.kr.Get(KeyringService, s.keyringUser())
 		})
 		switch {
 		case err == nil:
@@ -160,7 +170,7 @@ func (s *tieredStore) Save(data []byte) error {
 	s.probe()
 	if s.available {
 		err := withErrorTimeout(s.timeout, func() error {
-			return s.kr.Set(KeyringService, KeyringUser, string(data))
+			return s.kr.Set(KeyringService, s.keyringUser(), string(data))
 		})
 		if err == nil {
 			return nil
@@ -175,7 +185,7 @@ func (s *tieredStore) Delete() error {
 	var firstErr error
 	if s.available {
 		firstErr = withErrorTimeout(s.timeout, func() error {
-			return s.kr.Delete(KeyringService, KeyringUser)
+			return s.kr.Delete(KeyringService, s.keyringUser())
 		})
 		if errors.Is(firstErr, keyring.ErrNotFound) {
 			firstErr = nil

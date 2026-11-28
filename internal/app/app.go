@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/20Youssef10/golab/internal/account"
 	"github.com/20Youssef10/golab/internal/auth"
 	"github.com/20Youssef10/golab/internal/colabapi"
 	"github.com/20Youssef10/golab/internal/contents"
@@ -59,11 +60,23 @@ type Config struct {
 	ContentsHTTPClient *http.Client
 
 	Owner, Repo string // pinned self-update source
+
+	// Account selects the active profile (--account / GOLAB_ACCOUNT). Empty
+	// means "use the registry's persisted active profile".
+	Account string
+	// ConfigDir overrides the config directory (normally platform.ConfigDir()).
+	ConfigDir string
 }
 
 // Deps is the set of dependencies shared by all CLI commands.
 type Deps struct {
 	Config Config
+
+	// Account is the resolved active profile; Accounts is its registry. The
+	// Store below is already scoped to this account's isolated session file.
+	Account   string
+	Accounts  *account.Registry
+	ConfigDir string
 
 	Store         *state.Store
 	SettingsStore *state.SettingsStore
@@ -108,7 +121,47 @@ func New(ctx context.Context, cfg Config) (*Deps, error) {
 	if cfg.Repo == "" {
 		cfg.Repo = "golab"
 	}
-	store, err := state.NewStore(cfg.SessionsFile)
+	var err error
+	cfgDir := cfg.ConfigDir
+	if cfgDir == "" {
+		cfgDir, err = platform.ConfigDir()
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Adopt a legacy single-user install as account "default" on first use.
+	// Ensure never rewrites existing tokens or sessions; it only creates the
+	// versioned registry. An explicit --account/GOLAB_ACCOUNT overrides the
+	// persisted choice for this one invocation.
+	registry, err := account.New(filepath.Join(cfgDir, account.FileName))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := registry.Ensure(); err != nil {
+		return nil, err
+	}
+	requested := ConfiguredAccountName(cfg.Account)
+	if requested == "" {
+		requested, err = registry.Active()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := account.ValidateName(requested); err != nil {
+		return nil, fmt.Errorf("app: invalid account: %w", err)
+	}
+	if _, err := registry.Get(requested); err != nil {
+		return nil, fmt.Errorf("app: %w %q", err, requested)
+	}
+	cfg.Account = requested
+
+	// The default account keeps sessions.json (and any --config override).
+	// Named accounts get their own derived store in the same config dir.
+	sessionsPath := cfg.SessionsFile
+	if sessionsPath == "" && os.Getenv("COLAB_SESSIONS_FILE") == "" && requested != account.DefaultName {
+		sessionsPath = filepath.Join(cfgDir, account.SessionsFileName(requested))
+	}
+	store, err := state.NewStore(sessionsPath)
 	if err != nil {
 		return nil, err
 	}
@@ -134,11 +187,19 @@ func New(ctx context.Context, cfg Config) (*Deps, error) {
 		}
 	}
 
+	// Legacy --config users keep their existing token-file directory. A named
+	// account always uses the config dir so its derived token name is isolated.
+	authDir := dirOf(store.Path())
+	if requested != account.DefaultName {
+		authDir = cfgDir
+	}
 	authProvider, err := auth.New(auth.Config{
 		Provider:              cfg.AuthProvider,
 		ScopeMode:             cfg.Scopes,
 		ClientOAuthConfigPath: cfg.ClientOAuthConfigPath,
-		ConfigDir:             dirOf(store.Path()),
+		ConfigDir:             authDir,
+		KeyringUser:           account.KeyringUser(requested),
+		TokenFileName:         account.TokenFileName(requested),
 		Stdin:                 os.Stdin,
 		Stdout:                os.Stdout,
 		Stderr:                os.Stderr,
@@ -162,6 +223,9 @@ func New(ctx context.Context, cfg Config) (*Deps, error) {
 	}
 	d := &Deps{
 		Config:        cfg,
+		Account:       requested,
+		Accounts:      registry,
+		ConfigDir:     cfgDir,
 		Store:         store,
 		SettingsStore: settings,
 		Auth:          authProvider,

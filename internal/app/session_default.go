@@ -10,6 +10,20 @@ import (
 // SessionEnvVar is the environment override for the default session [tier5].
 const SessionEnvVar = "GOLAB_SESSION"
 
+// AccountEnvVar is the environment override for the active account. It applies
+// to one invocation; `golab account use` persists the choice for later runs.
+const AccountEnvVar = "GOLAB_ACCOUNT"
+
+// ConfiguredAccountName resolves the active account from an explicit flag
+// value first, then the environment. The empty result means "read the
+// registry's persisted active profile".
+func ConfiguredAccountName(explicit string) string {
+	if v := strings.TrimSpace(explicit); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv(AccountEnvVar))
+}
+
 // ConfiguredSessionName resolves a session name from, in order: an explicit
 // value (the -s flag), the GOLAB_SESSION environment variable, and the
 // settings.json default_session written by `golab use NAME` [tier5].

@@ -67,13 +67,16 @@ func (p *oauth2Provider) ClearToken(ctx context.Context) (ClearTokenResult, erro
 	}
 
 	// Legacy Python file(s), including the literal ~/.config/colab-cli path on
-	// platforms whose native config dir is elsewhere (e.g. Windows).
-	for _, legacy := range legacyTokenPaths(p.cfg.ConfigDir) {
-		removed, err := removeLegacyToken(legacy)
-		record(err)
-		if removed {
-			res.Legacy = true
-			res.Removed = true
+	// platforms whose native config dir is elsewhere (e.g. Windows). A named
+	// account never touches them: they belong to the default account.
+	if p.clearsLegacyToken() {
+		for _, legacy := range legacyTokenPaths(p.cfg.ConfigDir) {
+			removed, err := removeLegacyToken(legacy)
+			record(err)
+			if removed {
+				res.Legacy = true
+				res.Removed = true
+			}
 		}
 	}
 
@@ -83,7 +86,7 @@ func (p *oauth2Provider) ClearToken(ctx context.Context) (ClearTokenResult, erro
 	if ts, ok := p.store.(*tieredStore); ok {
 		ts.probe()
 		v, getErr := withStringTimeout(ts.timeout, func() (string, error) {
-			return ts.kr.Get(KeyringService, KeyringUser)
+			return ts.kr.Get(KeyringService, ts.keyringUser())
 		})
 		if getErr == nil && v != "" {
 			res.Keyring, res.Removed = true, true
@@ -92,7 +95,7 @@ func (p *oauth2Provider) ClearToken(ctx context.Context) (ClearTokenResult, erro
 			res.File, res.Removed = true, true
 		}
 		err := withErrorTimeout(ts.timeout, func() error {
-			return ts.kr.Delete(KeyringService, KeyringUser)
+			return ts.kr.Delete(KeyringService, ts.keyringUser())
 		})
 		if err != nil && !errors.Is(err, keyring.ErrNotFound) {
 			record(err)
@@ -111,6 +114,12 @@ func (p *oauth2Provider) ClearToken(ctx context.Context) (ClearTokenResult, erro
 		}
 	}
 	return res, firstErr
+}
+
+// clearsLegacyToken reports whether this provider owns the legacy single-user
+// credential files. Only the default account does.
+func (p *oauth2Provider) clearsLegacyToken() bool {
+	return p.cfg.KeyringUser == "" || p.cfg.KeyringUser == KeyringUser
 }
 
 // legacyTokenPaths returns the configured legacy path plus the canonical

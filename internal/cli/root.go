@@ -63,6 +63,7 @@ type rootOptions struct {
 	explain           bool
 	assumeYes         bool
 	budgetProfile     string
+	account           string
 }
 
 // NewRootCommand builds the command tree with the global flags of upstream's
@@ -77,6 +78,7 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		outputFormat:      envOr("COLAB_OUTPUT", "text"),
 		assumeYes:         parseBoolEnv(os.Getenv("COLAB_ASSUME_YES")),
 		budgetProfile:     envOr("GOLAB_BUDGET_PROFILE", "default"),
+		account:           envOr(app.AccountEnvVar, ""),
 	}
 	root := &cobra.Command{
 		Use:           "golab",
@@ -106,6 +108,7 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 					AuthProvider:          provider,
 					Scopes:                scopeMode,
 					UsePublicAPI:          &usePublic,
+					Account:               opts.account,
 				}
 				d, err = newAppDeps(cmd.Context(), cfg)
 				if err != nil {
@@ -179,6 +182,8 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 		"Assume yes for non-destructive confirmations (never bypasses budget enforcement)")
 	pf.StringVar(&opts.budgetProfile, "budget-profile", opts.budgetProfile,
 		"Named golab.yaml budget profile for the guard (default: default; env GOLAB_BUDGET_PROFILE)")
+	pf.StringVar(&opts.account, "account", opts.account,
+		"Use a named account for this invocation (env GOLAB_ACCOUNT)")
 	// Debug logging is enabled through COLAB_DEBUG (or --logtostderr); there is
 	// deliberately no --debug flag in the upstream CLI surface.
 

@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/20Youssef10/golab/internal/colabapi"
 	"github.com/20Youssef10/golab/internal/state"
 	"github.com/20Youssef10/golab/internal/testutil/fakecolab"
 )
@@ -165,30 +167,32 @@ func TestAttachDuplicateSessionNameIsUsageError(t *testing.T) {
 	assertAttachTokenAbsent(t, h.stdout.String(), h.stderr.String())
 }
 
-// attach must never silently switch planes: without --public-api (or the env
-// default) it fails before any network call.
-func TestAttachRequiresPublicAPI(t *testing.T) {
+// Browser-created runtimes are auto-discovered on the legacy tunnel plane too:
+// attach no longer demands --public-api, and still allocates nothing.
+func TestAttachWorksOnLegacyTunnelPlane(t *testing.T) {
 	h := newHarness(t)
-	h.ctrl.SetRuntimes([]fakecolab.Runtime{webAttachRuntime()})
-	h.ctrl.ResetLog()
-
-	code := h.run(t, "", "attach", "--runtime", "runtimes/r-web-1234")
-	if code != 2 {
-		t.Fatalf("attach exit = %d, want 2; stderr=%q", code, h.stderr.String())
-	}
-	if !strings.Contains(h.stderr.String(), "--public-api") {
-		t.Errorf("error should name --public-api: stderr=%q", h.stderr.String())
-	}
-	if reqs := h.ctrl.Requests(); len(reqs) != 0 {
-		t.Errorf("attach made %d request(s) before the Public API check: %v", len(reqs), reqs)
-	}
-	sessions, err := h.deps.Store.List()
+	assignment, err := h.client.Assign(context.Background(), colabapi.AssignRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 0 {
-		t.Errorf("rejected attach wrote %d session(s)", len(sessions))
+	h.ctrl.ResetLog()
+
+	code := h.run(t, "", "attach", "--runtime", assignment.Endpoint, "--session", "tunnelweb")
+	if code != 0 {
+		t.Fatalf("attach exit = %d, want 0; stderr=%q", code, h.stderr.String())
 	}
+	if strings.Contains(h.stderr.String(), "--public-api") {
+		t.Errorf("legacy attach should not demand --public-api: stderr=%q", h.stderr.String())
+	}
+	s, err := h.deps.Store.Get("tunnelweb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Endpoint != assignment.Endpoint || s.Token.Reveal() != assignment.RuntimeProxyInfo.Token.Reveal() {
+		t.Errorf("attached session = %+v", s)
+	}
+	assertNoAllocationPosts(t, h)
+	assertAttachTokenAbsent(t, h.stdout.String(), h.stderr.String())
 }
 
 // The default name is the sanitized, truncated suffix of the runtime name and

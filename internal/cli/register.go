@@ -30,8 +30,9 @@ func registerCommands(root *cobra.Command) {
 	RegisterTraceCommands(root)
 	RegisterCompatCommands(root)
 	RegisterStateCommands(root)
-	RegisterTier1Commands(root)  // Tier 1 spend-safety commands (additive hook).
-	RegisterConfigCommands(root) // [tier5] config get/set/unset/list/path
-	RegisterInitCommands(root)   // [tier5] init
-	RegisterUseCommands(root)    // [tier5] use NAME
+	RegisterTier1Commands(root)   // Tier 1 spend-safety commands (additive hook).
+	RegisterConfigCommands(root)  // [tier5] config get/set/unset/list/path
+	RegisterInitCommands(root)    // [tier5] init
+	RegisterUseCommands(root)     // [tier5] use NAME
+	RegisterAccountCommands(root) // named accounts with isolated sessions
 }
