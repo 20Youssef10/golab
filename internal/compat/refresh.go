@@ -33,10 +33,14 @@ const (
 	// OfficialRawBase is the only production source. There is no flag or
 	// environment variable that can redirect a release build away from it.
 	OfficialRawBase = "https://raw.githubusercontent.com"
+	// OfficialRepo is the owner/repo segment every production URL must contain.
+	// Without it raw.githubusercontent.com returns HTTP 404 for every ref.
+	OfficialRepo = "googlecolab/google-colab-cli"
 	// DefaultCLIPath is the upstream Typer root module at the pinned ref.
 	DefaultCLIPath = "src/colab_cli/cli.py"
-	// DefaultRef mirrors the compatibility target this build advertises. It is
-	// compatibility text, not a guaranteed git tag; pass --ref to pin a tag.
+	// DefaultRef is the compatibility label this build advertises (version.Upstream,
+	// e.g. "0.8.x+HEAD"). It is NOT a resolvable git ref, so a production fetch
+	// needs an explicit --ref; v0.8.0 and main are verified to resolve.
 	DefaultRef = version.Upstream
 
 	KindSelf     = "self-snapshot"
@@ -81,6 +85,17 @@ type FetchConfig struct {
 	Now     func() time.Time
 }
 
+// buildSourceURL joins a raw host, ref and source path. Production fetches
+// always pin the official owner/repo; an injected BaseURL is a hermetic test
+// seam only and keeps the shorter /<ref>/<path> shape test servers expect.
+func buildSourceURL(base, ref, sourcePath string, injected bool) string {
+	base = strings.TrimRight(base, "/")
+	if injected {
+		return base + "/" + ref + "/" + sourcePath
+	}
+	return base + "/" + OfficialRepo + "/" + ref + "/" + sourcePath
+}
+
 // Fetch downloads one upstream CLI module, hashes it, parses its literal
 // command/flag surface and returns a snapshot with full provenance. It never
 // writes a file (that is the caller's decision) and never presents itself as
@@ -106,15 +121,14 @@ func Fetch(ctx context.Context, cfg FetchConfig) (Snapshot, error) {
 	if !injected {
 		base = OfficialRawBase
 	}
-	base = strings.TrimRight(base, "/")
-	u, err := url.Parse(base)
+	u, err := url.Parse(strings.TrimRight(base, "/"))
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return Snapshot{}, fmt.Errorf("compat refresh: invalid source base")
 	}
 	if !injected && (u.Scheme != "https" || !allowedUpstreamHost(u.Hostname())) {
 		return Snapshot{}, fmt.Errorf("compat refresh: source base is not an official HTTPS host")
 	}
-	sourceURL := base + "/" + ref + "/" + sourcePath
+	sourceURL := buildSourceURL(base, ref, sourcePath, injected)
 
 	client := cfg.Client
 	if client == nil {

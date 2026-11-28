@@ -7,9 +7,11 @@ package compat
 // conservative literal-token parser test.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -113,6 +115,60 @@ func TestFetchDefaultsRefToUpstreamCompatibilityTarget(t *testing.T) {
 	}
 	if !strings.Contains(snap.SourceURL, version.Upstream) {
 		t.Fatalf("source_url does not pin the ref: %q", snap.SourceURL)
+	}
+}
+
+// captureURLRoundTripper records the outgoing production request URL without
+// contacting the network, then serves a fake upstream CLI body.
+type captureURLRoundTripper struct {
+	body []byte
+	got  string
+}
+
+func (c *captureURLRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.got = req.URL.String()
+	return &http.Response{
+		Status:     "200 OK",
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(c.body)),
+		Request:    req,
+	}, nil
+}
+
+func TestFetchProductionURLIncludesOfficialRepo(t *testing.T) {
+	// Regression: production Fetch built base+"/"+ref+"/"+path, omitting the
+	// owner/repo segment, so raw.githubusercontent.com returned HTTP 404 for
+	// every ref. Upstream test analogue: the GET-only raw source probe recorded
+	// in docs/AUDIT-00-live-upstream.md (owner/repo segment is mandatory).
+	const ref = "v0.8.0"
+	rt := &captureURLRoundTripper{body: fakeUpstreamCLI(t)}
+	snap, err := Fetch(context.Background(), FetchConfig{
+		Ref:    ref,
+		Client: &http.Client{Transport: rt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://raw.githubusercontent.com/googlecolab/google-colab-cli/" + ref + "/" + DefaultCLIPath
+	if rt.got != want {
+		t.Fatalf("requested %q, want %q", rt.got, want)
+	}
+	if snap.SourceURL != want {
+		t.Fatalf("snapshot source_url = %q, want %q", snap.SourceURL, want)
+	}
+}
+
+func TestBuildSourceURLPinsOfficialRepoOnlyInProduction(t *testing.T) {
+	const ref = "v0.8.0"
+	if got, want := buildSourceURL(OfficialRawBase, ref, DefaultCLIPath, false),
+		"https://raw.githubusercontent.com/"+OfficialRepo+"/"+ref+"/"+DefaultCLIPath; got != want {
+		t.Fatalf("production URL = %q, want %q", got, want)
+	}
+	// An injected base is a hermetic test seam only: keep the /<ref>/<path> shape.
+	if got, want := buildSourceURL("http://127.0.0.1:1/", ref, DefaultCLIPath, true),
+		"http://127.0.0.1:1/"+ref+"/"+DefaultCLIPath; got != want {
+		t.Fatalf("injected URL = %q, want %q", got, want)
 	}
 }
 

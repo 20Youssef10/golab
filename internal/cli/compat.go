@@ -123,7 +123,8 @@ func NewCompatCommand() *cobra.Command {
 	}
 	refresh.Flags().StringVar(&out, "out", "", "Write the snapshot to FILE (default: dry-run; '-' prints JSON to stdout)")
 	refresh.Flags().StringVar(&ref, "ref", compat.DefaultRef,
-		"Git ref/tag to pin (defaults to the upstream compatibility target; pass a resolvable tag such as v0.8.0)")
+		"Git ref/tag to pin (the default is a compatibility label, NOT a resolvable git ref; "+
+			"pass a real ref such as v0.8.0 or main)")
 
 	cmd.AddCommand(report, refresh)
 	return cmd
